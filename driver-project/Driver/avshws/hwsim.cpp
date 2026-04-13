@@ -213,7 +213,7 @@ Return Value:
     m_NumFramesSkipped = 0;
     m_InterruptTime = 0;
 
-    KeQuerySystemTime (&m_StartTime);
+    KeQuerySystemTimePrecise (&m_StartTime);
 
     //
     // Allocate a scratch buffer for the synthesizer.
@@ -348,7 +348,7 @@ Return Value:
         //
         LARGE_INTEGER UnpauseTime;
 
-        KeQuerySystemTime (&UnpauseTime);
+        KeQuerySystemTimePrecise (&UnpauseTime);
         m_InterruptTime = (ULONG) (
             (UnpauseTime.QuadPart - m_StartTime.QuadPart) /
             m_TimePerFrame

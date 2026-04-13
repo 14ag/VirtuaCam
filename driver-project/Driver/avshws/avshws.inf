@@ -166,8 +166,8 @@ SERVICE_ERROR_NORMAL=1
 REG_DWORD=0x00010001
 
 ;localizable
-ProviderName="TODO-Set-Provider"
-ManufacturerName="TODO-Set-Manufacturer"
-avshws.DeviceDesc="AVStream Simulated Hardware Sample"
-avshws.Reader.FriendlyName="avshws Source"
+ProviderName="VirtualCameraDriver"
+ManufacturerName="VirtualCameraDriver"
+avshws.DeviceDesc="Virtual Camera Driver"
+avshws.Reader.FriendlyName="Virtual Camera Source"
 cdname="AVSHWS Installation Disk"
