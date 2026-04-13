@@ -137,6 +137,17 @@
   <ItemGroup Label="WrappedTaskItems" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <TargetName>avshws</TargetName>
+    <TargetExt>.sys</TargetExt>
+    <OutputType>sys</OutputType>
+    <LinkCompiled>true</LinkCompiled>
+    <EnableInf2cat>true</EnableInf2cat>
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+    <SignMode>TestSign</SignMode>
+    <EnableUAC>false</EnableUAC>
+    <EmbedManifest>false</EmbedManifest>
+    <GenerateManifest>false</GenerateManifest>
+    <OutDir>$(MSBuildThisFileDirectory)build\$(Platform)\$(Configuration)\</OutDir>
+    <PackageDir>$(MSBuildThisFileDirectory)package\$(Platform)\$(Configuration)\</PackageDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <TargetName>avshws</TargetName>
@@ -176,6 +187,7 @@
       <TreatWarningAsError>true</TreatWarningAsError>
       <WarningLevel>Level4</WarningLevel>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);UNICODE;_UNICODE;DEBUG_LEVEL=DEBUGLVL_BLAB;_WIN2K_COMPAT_SLIST_USAGE;_NO_SYS_GUID_OPERATOR_EQ_;_AMD64_;AMD64;_WIN64;WIN64</PreprocessorDefinitions>
+      <AdditionalOptions>/kernel %(AdditionalOptions)</AdditionalOptions>
       <ExceptionHandling>
       </ExceptionHandling>
     </ClCompile>
@@ -183,6 +195,15 @@
       <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(DDK_INC_PATH)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);UNICODE;_UNICODE;DEBUG_LEVEL=DEBUGLVL_BLAB;_WIN2K_COMPAT_SLIST_USAGE;_NO_SYS_GUID_OPERATOR_EQ_;_AMD64_;AMD64;_WIN64;WIN64</PreprocessorDefinitions>
     </Midl>
+    <Link>
+      <AdditionalDependencies>$(DDK_LIB_PATH)\BufferOverflowFastFailK.lib;$(DDK_LIB_PATH)\ntoskrnl.lib;$(DDK_LIB_PATH)\hal.lib;$(DDK_LIB_PATH)\wmilib.lib;$(DDK_LIB_PATH)\ks.lib</AdditionalDependencies>
+      <Driver>Driver</Driver>
+      <EntryPointSymbol>GsDriverEntry</EntryPointSymbol>
+      <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
+      <OmitDefaultLibName>true</OmitDefaultLibName>
+      <SubSystem>Native</SubSystem>
+      <AdditionalOptions>/kernel %(AdditionalOptions) -merge:PAGECONST=PAGE</AdditionalOptions>
+    </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ResourceCompile>
