@@ -51,13 +51,13 @@ extern "C" {
     Misc Definitions
 
 *************************************************/
-#pragma warning (disable : 4100 4127 4131 4189 4701 4706)
+#pragma warning (disable : 4100 4127 4131 4189 4701 4706 4996)
 #define STR_MODULENAME "avshws: "
 #define DEBUGLVL_VERBOSE 2
 #define DEBUGLVL_TERSE 1
 #define DEBUGLVL_ERROR 0
 
-const DebugLevel = DEBUGLVL_TERSE;
+const ULONG DebugLevel = DEBUGLVL_TERSE;
 
 #if (DBG)
 #define _DbgPrintF(lvl, strings) \
