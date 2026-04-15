@@ -93,12 +93,6 @@ private:
     LIST_ENTRY m_ScatterGatherMappings;
 
     //
-    // Lookaside for memory for the scatter / gather entries on the scatter /
-    // gather list.
-    //
-    NPAGED_LOOKASIDE_LIST m_ScatterGatherLookaside;
-
-    //
     // The current state of the fake hardware.
     //
     HARDWARE_STATE m_HardwareState;
