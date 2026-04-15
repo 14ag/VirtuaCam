@@ -24,7 +24,6 @@
 
 #include "avshws.h"
 
-
 /*************************************************/
 KDEFERRED_ROUTINE SimulatedInterrupt;
 
@@ -253,19 +252,6 @@ Return Value:
     if (NT_SUCCESS (Status)) {
 
         //
-        // Initialize the entry lookaside.
-        //
-        ExInitializeNPagedLookasideList (
-            &m_ScatterGatherLookaside,
-            NULL,
-            NULL,
-            POOL_NX_ALLOCATION,
-            sizeof (SCATTER_GATHER_ENTRY),
-            'nEGS',
-            0
-            );
-
-        //
         // Set up the synthesizer with the width, height, and scratch buffer.
         //
         m_ImageSynth -> SetImageSize (m_Width, m_Height);
@@ -461,19 +447,11 @@ Return Value:
         // 
         // Release the scatter / gather entry back to our lookaside. 
         // 
-        ExFreeToNPagedLookasideList (
-            &m_ScatterGatherLookaside,
-            reinterpret_cast <PVOID> (SGEntry)
-            );
+        ExFreePool (SGEntry);
     } 
 
     m_NumMappingsCompleted = 0;
     m_ScatterGatherBytesQueued = 0;
-    //
-    // Delete the scatter / gather lookaside for this run.
-    //
-    ExDeleteNPagedLookasideList (&m_ScatterGatherLookaside);
-
     KeReleaseSpinLock (&m_ListLock, Irql);
 
     return STATUS_SUCCESS;
@@ -582,8 +560,10 @@ Return Value:
     {
         PSCATTER_GATHER_ENTRY Entry =
             reinterpret_cast <PSCATTER_GATHER_ENTRY> (
-                ExAllocateFromNPagedLookasideList (
-                    &m_ScatterGatherLookaside
+                ExAllocatePoolWithTag (
+                    NonPagedPoolNx,
+                    sizeof (SCATTER_GATHER_ENTRY),
+                    'nEGS'
                     )
                 );
 
@@ -715,10 +695,7 @@ Return Value:
         //
         // Release the scatter / gather entry back to our lookaside.
         //
-        ExFreeToNPagedLookasideList (
-            &m_ScatterGatherLookaside,
-            reinterpret_cast <PVOID> (SGEntry)
-            );
+        ExFreePool (SGEntry);
 
     }
     

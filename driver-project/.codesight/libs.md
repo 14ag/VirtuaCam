@@ -1,0 +1,23 @@
+# Libraries
+
+- `UserLand\DriverInterfaceWrapper\DeviceInfo.cs` — class DeviceInfo, function ToString
+- `UserLand\DriverInterfaceWrapper\DriverInterface.cs`
+  - class DriverInterface
+  - function Init
+  - function Free
+  - function GetDevices
+  - function DestroyDevice
+  - function SelectDevice
+  - _...1 more_
+- `UserLand\DriverInterfaceWrapper\Native.cs`
+  - function Init
+  - function Free
+  - function GetNumDevices
+  - function DestroyDevice
+  - function SetBuffer
+  - function GetDevicePath
+  - _...1 more_
+- `UserLand\UserDriverCanon\CameraListItem.cs` — function ToString
+- `UserLand\UserDriverCanon\FitPictureBox.cs` — class FitPictureBox
+- `UserLand\UserDriverCanon\MainForm.cs` — class MainForm
+- `UserLand\UserDriverStaticImage\MainForm.cs` — class MainForm
