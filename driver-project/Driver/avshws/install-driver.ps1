@@ -1,12 +1,18 @@
 [CmdletBinding()]
 param(
-    [string]$InfPath = (Join-Path $PSScriptRoot "avshws.inf"),
+    [string]$InfPath = "",
     [string]$HardwareId = "AVSHWS",
     [string]$DeviceDescription = "Virtual Camera Driver",
     [switch]$SkipCertificateImport,
-    [string]$CertificatePath = (Join-Path $PSScriptRoot "VirtualCameraDriver-TestSign.cer"),
+    [string]$CertificatePath = "",
     [switch]$ForceDriverRebind
 )
+
+# $PSScriptRoot is empty when the script is invoked without a fully qualified path.
+# $MyInvocation.MyCommand.Definition is always populated.
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
+if (-not $InfPath)         { $InfPath         = Join-Path $scriptDir "avshws.inf" }
+if (-not $CertificatePath) { $CertificatePath = Join-Path $scriptDir "VirtualCameraDriver-TestSign.cer" }
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -70,6 +76,7 @@ function Get-AvshwsDevices {
         Where-Object { $_.PNPDeviceID -like ("ROOT\{0}\*" -f $Id) }
 }
 
+if (-not ([System.Management.Automation.PSTypeName]'AvshwsInstallerNative').Type) {
 Add-Type -TypeDefinition @"
 using System;
 using System.ComponentModel;
@@ -126,12 +133,13 @@ public static class AvshwsInstallerNative {
     private static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
 
     [DllImport("newdev.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool UpdateDriverForPlugAndPlayDevices(
         IntPtr hwndParent,
         string HardwareId,
         string FullInfPath,
         uint InstallFlags,
-        out bool bRebootRequired
+        [MarshalAs(UnmanagedType.Bool)] out bool bRebootRequired
     );
 
     public static void CreateRootDevice(string hardwareId, string className, string deviceDescription, Guid classGuid) {
@@ -176,6 +184,9 @@ public static class AvshwsInstallerNative {
         }
     }
 
+    // FIX 3: When UpdateDriverForPlugAndPlayDevices fails with ERROR_NO_SUCH_DEVINST,
+    // zero out lastError so the caller's (-not $bindOutcome -and $lastError -ne 0) check
+    // does not incorrectly treat it as a fatal error.
     public static bool TryBindDriver(string hardwareId, string infPath, bool forceRebind, out bool rebootRequired, out int lastError) {
         uint flags = forceRebind ? INSTALLFLAG_FORCE : 0;
         bool ok = UpdateDriverForPlugAndPlayDevices(IntPtr.Zero, hardwareId, infPath, flags, out rebootRequired);
@@ -185,17 +196,25 @@ public static class AvshwsInstallerNative {
         }
 
         lastError = Marshal.GetLastWin32Error();
-        return lastError != ERROR_NO_SUCH_DEVINST;
+        if (lastError == ERROR_NO_SUCH_DEVINST) {
+            lastError = 0;  // non-fatal: device node not yet visible to PnP
+            return false;
+        }
+        return false;
     }
 }
 "@
+} # end if type not loaded
 
 Assert-Administrator
 
-$resolvedInf = (Resolve-Path -LiteralPath $InfPath).Path
-if (-not (Test-Path -LiteralPath $resolvedInf)) {
+# FIX 2: Guard with Test-Path before Resolve-Path.
+# With $ErrorActionPreference = "Stop", Resolve-Path throws on a missing path,
+# making any Test-Path check placed after it unreachable.
+if (-not (Test-Path -LiteralPath $InfPath)) {
     throw "INF not found: $InfPath"
 }
+$resolvedInf = (Resolve-Path -LiteralPath $InfPath).Path
 
 Import-TestCertificateIfPresent -Path $CertificatePath
 
@@ -211,8 +230,11 @@ else {
     Write-Host "ROOT\\$HardwareId already exists. Reusing existing device node."
 }
 
+# FIX 1: Declare $lastError before use so [ref]$lastError is a valid reference.
+# The original [ref]([int]$lastError = 0) inline form does not correctly wire the reference.
 $rebootRequired = $false
-$bindOutcome = [AvshwsInstallerNative]::TryBindDriver($HardwareId, $resolvedInf, $ForceDriverRebind.IsPresent, [ref]$rebootRequired, [ref]([int]$lastError = 0))
+[int]$lastError = 0
+$bindOutcome = [AvshwsInstallerNative]::TryBindDriver($HardwareId, $resolvedInf, $ForceDriverRebind.IsPresent, [ref]$rebootRequired, [ref]$lastError)
 if (-not $bindOutcome -and $lastError -ne 0) {
     $hexError = ("0x{0:X8}" -f ([uint32]$lastError))
     throw "UpdateDriverForPlugAndPlayDevices failed with $hexError."
@@ -237,3 +259,4 @@ $finalDevices | ForEach-Object {
 if ($rebootRequired) {
     Write-Host "A reboot is required to finalize installation."
 }
+Read-Host -Prompt "Press Enter to continue"
