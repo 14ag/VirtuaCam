@@ -283,7 +283,13 @@ HRESULT LoadBroker() {
 
 HRESULT RegisterVirtualCamera() {
     auto clsid = GUID_ToStringW(CLSID_VCam, false);
-    RETURN_IF_FAILED_MSG(MFCreateVirtualCamera(MFVirtualCameraType_SoftwareCameraSource, MFVirtualCameraLifetime_Session, MFVirtualCameraAccess_CurrentUser, L"VirtuaCam", clsid.c_str(), nullptr, 0, &g_vcam), "Failed to create virtual camera");
+    HMODULE hMfplat = GetModuleHandleW(L"mfplat.dll");
+    if (!hMfplat) hMfplat = LoadLibraryW(L"mfplat.dll");
+    using PFN_MFCreateVirtualCamera = HRESULT(STDAPICALLTYPE *)(MFVirtualCameraType, MFVirtualCameraLifetime, MFVirtualCameraAccess, LPCWSTR, LPCWSTR, const void*, ULONG, IMFVirtualCamera**);
+    auto pMFCreateVirtualCamera = (PFN_MFCreateVirtualCamera)GetProcAddress(hMfplat, "MFCreateVirtualCamera");
+    if (!pMFCreateVirtualCamera) return E_NOTIMPL;
+
+    RETURN_IF_FAILED_MSG(pMFCreateVirtualCamera(MFVirtualCameraType_SoftwareCameraSource, MFVirtualCameraLifetime_Session, MFVirtualCameraAccess_CurrentUser, L"VirtuaCam", clsid.c_str(), nullptr, 0, &g_vcam), "Failed to create virtual camera");
     RETURN_IF_FAILED_MSG(g_vcam->Start(nullptr), "Cannot start VCam");
     return S_OK;
 }
