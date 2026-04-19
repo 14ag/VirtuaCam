@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Webcam Feed</title>
+    <style>
+        body {
+            margin: 0;
+            background: #111;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            color: white;
+            font-family: Arial, sans-serif;
+        }
+        video {
+            width: 80%;
+            max-width: 800px;
+            border: 2px solid #444;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+
+    <video id="webcam" autoplay playsinline></video>
+
+    <script>
+        const video = document.getElementById('webcam');
+
+        async function startWebcam() {
+            // check that mediaDevices API exists in this browser and context
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                alert('Camera API not available - use HTTPS or a modern browser');
+                return;
+            }
+
+            // enumerate devices to confirm at least one real videoinput exists
+            // before requesting the stream
+            let hasCamera = false;
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                hasCamera = devices.some(device => device.kind === 'videoinput');
+            } catch (enumErr) {
+                // enumerateDevices failed - proceed anyway and let getUserMedia report the real error
+                // this can happen on some browsers before permissions are granted
+                hasCamera = true;
+            }
+
+            if (!hasCamera) {
+                alert('No camera device detected on this system');
+                return;
+            }
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: false
+                });
+
+                video.srcObject = stream;
+
+                // confirm the track is actually live after stream is attached
+                // a device may be detected but already in use or hardware-blocked
+                const track = stream.getVideoTracks()[0];
+                if (!track || track.readyState !== 'live') {
+                    alert('Camera stream acquired but track is not live - device may be in use');
+                    stream.getTracks().forEach(t => t.stop());
+                    video.srcObject = null;
+                }
+
+            } catch (error) {
+                // surface the specific DOMException name for easier diagnosis
+                // NotAllowedError means permission denied
+                // NotFoundError means no device matched the constraints
+                // NotReadableError means hardware or OS blocked the device
+                const reason = error.name || 'UnknownError';
+                console.error('Webcam error - ' + reason + ' - ' + error.message);
+                alert('Unable to access webcam\nReason: ' + reason + '\n' + error.message);
+            }
+        }
+
+        startWebcam();
+    </script>
+
+</body>
+</html>

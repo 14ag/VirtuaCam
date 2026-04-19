@@ -4,7 +4,7 @@
 
 # --- PARAMETERS ---
 param(
-    [string]$VcpkgRoot = "c:\vcpkg",
+    [string]$VcpkgRoot = "",
     [string]$BuildConfig = "Release",
     [switch]$Clean,
     [switch]$Register,
@@ -47,8 +47,29 @@ $SourceDir = Join-Path $PSScriptRoot "src"
 Write-Step "Performing Pre-flight Sanity Checks"
 if (-not (Test-Path (Join-Path $SourceDir "CMakeLists.txt"))) { Exit-WithError "'CMakeLists.txt' not found in '$SourceDir'." }
 Write-Success "Found 'src/CMakeLists.txt'."
-if (-not (Test-Path $VcpkgRoot)) { Exit-WithError "vcpkg directory not found at '$VcpkgRoot'." }
-Write-Success "Found vcpkg directory."
+if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) {
+    if ($env:VCPKG_ROOT -and (Test-Path $env:VCPKG_ROOT)) {
+        $VcpkgRoot = $env:VCPKG_ROOT
+    } elseif (Test-Path "C:\vcpkg") {
+        $VcpkgRoot = "C:\vcpkg"
+    } else {
+        $VcpkgRoot = Join-Path $PSScriptRoot "vcpkg"
+    }
+}
+
+if (-not (Test-Path $VcpkgRoot)) {
+    Write-Host "  - vcpkg directory not found at '$VcpkgRoot'. Automatically cloning..." -ForegroundColor Yellow
+    Execute-Process "git" @("clone", "https://github.com/microsoft/vcpkg.git", $VcpkgRoot)
+    
+    Write-Host "  - Bootstrapping vcpkg..." -ForegroundColor Yellow
+    $bootstrap = Join-Path $VcpkgRoot "bootstrap-vcpkg.bat"
+    Execute-Process "cmd.exe" @("/c", $bootstrap, "-disableMetrics")
+    
+    Write-Success "vcpkg auto-installed successfully."
+} else {
+    Write-Success "Found vcpkg directory at '$VcpkgRoot'."
+}
+
 $ToolchainFile = Join-Path $VcpkgRoot "scripts\buildsystems\vcpkg.cmake"
 if (-not (Test-Path $ToolchainFile)) { Exit-WithError "vcpkg toolchain file not found at '$ToolchainFile'." }
 Write-Success "Found vcpkg toolchain file."

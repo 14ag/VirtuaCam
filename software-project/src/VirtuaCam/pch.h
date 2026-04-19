@@ -2,6 +2,10 @@
 #ifndef PCH_H
 #define PCH_H
 
+#ifdef __clang__
+#define _SILENCE_CLANG_COROUTINE_MESSAGE
+#endif
+
 // Compat stubs for older Windows SDK (10.0.19041.0) — defined before dwmapi.h
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20

@@ -184,7 +184,7 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int) {
     if (!IsRunningAsAdmin()) {
-        MessageBox(NULL, L"This application requires Administrator privileges to register the virtual camera.", L"Administrator Rights Required", MB_OK | MB_ICONERROR);
+        MessageBoxW(NULL, L"This application requires Administrator privileges to register the virtual camera.", L"Administrator Rights Required", MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -194,7 +194,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     RETURN_IF_FAILED(MFStartup(MF_VERSION));
 
     if (FAILED(LoadBroker())) {
-         MessageBox(NULL, L"Failed to load DirectPortBroker.dll.", L"Error", MB_OK | MB_ICONERROR);
+         MessageBoxW(NULL, L"Failed to load DirectPortBroker.dll.", L"Error", MB_OK | MB_ICONERROR);
          MFShutdown(); CoUninitialize(); return 1;
     }
 
@@ -221,8 +221,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         });
     }
 
-    if (FAILED(RegisterVirtualCamera())) {
-        MessageBox(g_hMainWnd, L"Failed to register and start the virtual camera.", L"Error", MB_OK | MB_ICONERROR);
+    HRESULT hrVcam = RegisterVirtualCamera();
+    if (FAILED(hrVcam)) {
+        wchar_t msg[256];
+        swprintf_s(msg, 256, L"Failed to register and start the virtual camera.\nHRESULT: 0x%08X", hrVcam);
+        MessageBoxW(g_hMainWnd, msg, L"Error", MB_OK | MB_ICONERROR);
     }
 
     UI_RunMessageLoop(OnIdle);
@@ -283,10 +286,10 @@ HRESULT LoadBroker() {
 
 HRESULT RegisterVirtualCamera() {
     auto clsid = GUID_ToStringW(CLSID_VCam, false);
-    HMODULE hMfplat = GetModuleHandleW(L"mfplat.dll");
-    if (!hMfplat) hMfplat = LoadLibraryW(L"mfplat.dll");
+    HMODULE hMfsensor = GetModuleHandleW(L"mfsensorgroup.dll");
+    if (!hMfsensor) hMfsensor = LoadLibraryW(L"mfsensorgroup.dll");
     using PFN_MFCreateVirtualCamera = HRESULT(STDAPICALLTYPE *)(MFVirtualCameraType, MFVirtualCameraLifetime, MFVirtualCameraAccess, LPCWSTR, LPCWSTR, const void*, ULONG, IMFVirtualCamera**);
-    auto pMFCreateVirtualCamera = (PFN_MFCreateVirtualCamera)GetProcAddress(hMfplat, "MFCreateVirtualCamera");
+    auto pMFCreateVirtualCamera = (PFN_MFCreateVirtualCamera)GetProcAddress(hMfsensor, "MFCreateVirtualCamera");
     if (!pMFCreateVirtualCamera) return E_NOTIMPL;
 
     RETURN_IF_FAILED_MSG(pMFCreateVirtualCamera(MFVirtualCameraType_SoftwareCameraSource, MFVirtualCameraLifetime_Session, MFVirtualCameraAccess_CurrentUser, L"VirtuaCam", clsid.c_str(), nullptr, 0, &g_vcam), "Failed to create virtual camera");
