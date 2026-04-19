@@ -27,17 +27,16 @@ target_link_libraries(VirtuaCamCommon PUBLIC ${VCAM_VCPKG_LIBS} ${VCAM_MF_LIBS} 
 target_compile_definitions(VirtuaCamCommon PRIVATE UNICODE _UNICODE)
 
 add_library(DirectPortClient SHARED
-    # --- FIX 1: Replaced 'VirtualCamera.cpp' with the correct 'MFClient.cpp' ---
-    VirtuaCam/MFClient.cpp      # <- NEW
+    VirtuaCam/MFClient.cpp
     VirtuaCam/BrokerClient.cpp
     VirtuaCam/pch.cpp
     VirtuaCam/pch.h
+    "${CMAKE_CURRENT_BINARY_DIR}/DirectPortClient.def"
 )
 set(DEF_FILE "${CMAKE_CURRENT_BINARY_DIR}/DirectPortClient.def")
 file(WRITE ${DEF_FILE} "LIBRARY DirectPortClient\nEXPORTS\n    DllCanUnloadNow PRIVATE\n    DllGetClassObject PRIVATE\n    DllRegisterServer PRIVATE\n    DllUnregisterServer PRIVATE\n")
 set_target_properties(DirectPortClient PROPERTIES
     OUTPUT_NAME "DirectPortClient"
-    LINK_FLAGS "/DEF:${DEF_FILE}"
 )
 target_link_libraries(DirectPortClient PRIVATE VirtuaCamCommon)
 target_compile_definitions(DirectPortClient PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE)
