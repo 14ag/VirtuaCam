@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
+set(CMAKE_SYSTEM_VERSION "10.0.22621.0")
 project(VirtuaCam LANGUAGES CXX)
-# set(CMAKE_SYSTEM_VERSION "10.0.22621.0")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
@@ -45,7 +45,10 @@ target_precompile_headers(DirectPortClient PRIVATE VirtuaCam/pch.h)
 add_library(DirectPortBroker SHARED
     VirtuaCam/Broker.cpp
     VirtuaCam/Multiplexer.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/DirectPortBroker.def"
 )
+set(DEF_BROKER "${CMAKE_CURRENT_BINARY_DIR}/DirectPortBroker.def")
+file(WRITE ${DEF_BROKER} "LIBRARY DirectPortBroker\nEXPORTS\n    InitializeBroker\n    ShutdownBroker\n    UpdateProducerPriorityList\n    SetCompositingMode\n    RenderBrokerFrame\n    GetSharedTexture\n    GetBrokerState\n")
 set_target_properties(DirectPortBroker PROPERTIES OUTPUT_NAME "DirectPortBroker")
 target_link_libraries(DirectPortBroker PRIVATE VirtuaCamCommon)
 target_compile_definitions(DirectPortBroker PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE)
@@ -54,7 +57,10 @@ add_library(DirectPortMFCamera SHARED
     # --- FIX 2: Replaced 'CameraModule.cpp' with the correct 'MFCamera.cpp' ---
     VirtuaCam/MFCamera.cpp      # <- NEW
     VirtuaCam/pch.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/Producer.def"
 )
+set(DEF_PRODUCER "${CMAKE_CURRENT_BINARY_DIR}/Producer.def")
+file(WRITE ${DEF_PRODUCER} "EXPORTS\n    InitializeProducer\n    ProcessFrame\n    ShutdownProducer\n")
 set_target_properties(DirectPortMFCamera PROPERTIES OUTPUT_NAME "DirectPortMFCamera")
 target_link_libraries(DirectPortMFCamera PRIVATE VirtuaCamCommon)
 target_compile_definitions(DirectPortMFCamera PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE PRODUCER_EXPORTS)
@@ -64,6 +70,7 @@ add_library(DirectPortMFGraphicsCapture SHARED
     # --- FIX 3: Replaced 'GraphicsCapture.cpp' with the correct 'MFGraphicsCapture.cpp' ---
     VirtuaCam/MFGraphicsCapture.cpp # <- NEW
     VirtuaCam/pch.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/Producer.def"
 )
 set_target_properties(DirectPortMFGraphicsCapture PROPERTIES OUTPUT_NAME "DirectPortMFGraphicsCapture")
 target_link_libraries(DirectPortMFGraphicsCapture PRIVATE VirtuaCamCommon)
@@ -73,6 +80,7 @@ target_precompile_headers(DirectPortMFGraphicsCapture PRIVATE VirtuaCam/pch.h)
 add_library(DirectPortConsumer SHARED
     VirtuaCam/Consumer.cpp
     VirtuaCam/pch.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/Producer.def"
 )
 set_target_properties(DirectPortConsumer PROPERTIES OUTPUT_NAME "DirectPortConsumer")
 target_link_libraries(DirectPortConsumer PRIVATE VirtuaCamCommon)

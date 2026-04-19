@@ -2,6 +2,25 @@
 #ifndef PCH_H
 #define PCH_H
 
+// Compat stubs for older Windows SDK (10.0.19041.0) — defined before dwmapi.h
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#ifndef DWMWA_SYSTEMBACKDROP_TYPE
+#define DWMWA_SYSTEMBACKDROP_TYPE 38
+#endif
+// Enum type needed by DwmSetWindowAttribute — only define if SDK doesn't have it
+#if !defined(DWM_SYSTEMBACKDROP_TYPE)
+typedef enum DWM_SYSTEMBACKDROP_TYPE {
+    DWMSBT_AUTO             = 0,
+    DWMSBT_NONE             = 1,
+    DWMSBT_MAINWINDOW       = 2,
+    DWMSBT_TRANSIENTWINDOW  = 3,
+    DWMSBT_TABBEDWINDOW     = 4
+} DWM_SYSTEMBACKDROP_TYPE;
+#define DWMSBT_TRANSIENTWINDOW DWMSBT_TRANSIENTWINDOW
+#endif
+
 #define WIN32_LEAN_AND_MEAN
 
 #define _CRTDBG_MAP_ALLOC
@@ -22,12 +41,28 @@
 #include <propvarutil.h>
 #include <mfapi.h>
 #include <mfidl.h>
-#include <mfvirtualcamera.h>
+#include "mfvirtualcamera.h"
 #include <mferror.h>
 #include <mfcaptureengine.h>
 #include <ks.h>
 #include <ksproxy.h>
 #include <ksmedia.h>
+
+#ifndef KSPROPERTY_CAMERACONTROL_EXTENDED_EYEGAZECORRECTION
+#define KSPROPERTY_CAMERACONTROL_EXTENDED_EYEGAZECORRECTION 40
+#endif
+
+#ifndef KSPROPERTY_CAMERACONTROL_EXTENDED_BACKGROUNDSEGMENTATION
+#define KSPROPERTY_CAMERACONTROL_EXTENDED_BACKGROUNDSEGMENTATION 41
+#endif
+
+#ifndef KSPROPERTY_CAMERACONTROL_EXTENDED_DIGITALWINDOW_CONFIGCAPS
+#define KSPROPERTY_CAMERACONTROL_EXTENDED_DIGITALWINDOW_CONFIGCAPS 42
+#endif
+
+#ifndef KSPROPERTY_CAMERACONTROL_EXTENDED_DIGITALWINDOW
+#define KSPROPERTY_CAMERACONTROL_EXTENDED_DIGITALWINDOW 43
+#endif
 #include <dxgi1_6.h>
 #include <d3d11_4.h>
 #include <d2d1_1.h>
