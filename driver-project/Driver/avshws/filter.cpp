@@ -140,6 +140,12 @@ SetData(
 
 	ULONG dataLength = bufferLength - sizeof(KSPROPERTY);
 
+	static volatile LONG s_driverFrameCount = 0;
+	LONG n = _InterlockedIncrement(&s_driverFrameCount);
+	if (n % 30 == 0) {
+		DbgPrint("[avshws] SetData called, frame #%ld received, len=%lu\n", n, dataLength);
+	}
+
 	CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
 	device->SetData(Data, dataLength);
 
