@@ -274,6 +274,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         }
     }
 
+    VirtuaCamLog::LogLine(L"Entering message loop.");
     UI_RunMessageLoop(OnIdle);
 
     ShutdownSystem();
