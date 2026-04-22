@@ -21,7 +21,7 @@ if (-not $CertificatePath) { $CertificatePath = Join-Path $PackageRoot "VirtualC
 $defaultLogPath = Join-Path $scriptDir "..\\..\\..\\output\\logs\\driver-install.log"
 if (-not $LogPath) { $LogPath = $defaultLogPath }
 
-Set-StrictMode -Version Latest
+# Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 function Write-Log {
@@ -139,11 +139,12 @@ function Assert-Prereqs {
 
     $bcdOut = & $bcdedit /enum "{current}" 2>&1
     $testLine = $bcdOut | Where-Object { $_ -match '^\s*testsigning\s+' } | Select-Object -First 1
-    if (-not $testLine) {
-        Exit-WithCode -Code 3 -Message "Unable to read TESTSIGNING state from bcdedit output."
+    
+    $isTestSigningOn = $false
+    if ($testLine) {
+        $isTestSigningOn = $testLine -match '(?i)\bYes\b'
     }
 
-    $isTestSigningOn = $testLine -match '(?i)\bYes\b'
     if (-not $isTestSigningOn) {
         Exit-WithCode -Code 4 -Message "TESTSIGNING is OFF. Enable then reboot: bcdedit /set testsigning on"
     }
@@ -186,7 +187,7 @@ public static class AvshwsInstallerNative {
         ref SP_DEVINFO_DATA DeviceInfoData
     );
 
-    [DllImport("setupapi.dll", SetLastError = true)]
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool SetupDiSetDeviceRegistryProperty(
         IntPtr DeviceInfoSet,
         ref SP_DEVINFO_DATA DeviceInfoData,
@@ -195,7 +196,7 @@ public static class AvshwsInstallerNative {
         int PropertyBufferSize
     );
 
-    [DllImport("setupapi.dll", SetLastError = true)]
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool SetupDiCallClassInstaller(
         int InstallFunction,
         IntPtr DeviceInfoSet,
@@ -302,7 +303,7 @@ $existingDevices = @(Get-AvshwsDevices -Id $HardwareId)
 if ($existingDevices.Count -eq 0) {
     Write-Log "No ROOT\\$HardwareId device present. Creating it now..."
     $cameraClassGuid = [Guid]::Parse("{ca3e7ab9-b4c3-4ae6-8251-579ef933890f}")
-    [AvshwsInstallerNative]::CreateRootDevice($HardwareId, "Camera", $DeviceDescription, $cameraClassGuid)
+    [AvshwsInstallerNative]::CreateRootDevice($HardwareId, $HardwareId, $DeviceDescription, $cameraClassGuid)
 }
 else {
     Write-Log "ROOT\\$HardwareId already exists. Reusing existing device node."
@@ -312,6 +313,7 @@ else {
 # The original [ref]([int]$lastError = 0) inline form does not correctly wire the reference.
 $rebootRequired = $false
 [int]$lastError = 0
+$bindOutcome = $false
 $bindOutcome = [AvshwsInstallerNative]::TryBindDriver($HardwareId, $resolvedInf, $ForceDriverRebind.IsPresent, [ref]$rebootRequired, [ref]$lastError)
 if (-not $bindOutcome -and $lastError -ne 0) {
     $hexError = ("0x{0:X8}" -f ([uint32]$lastError))
