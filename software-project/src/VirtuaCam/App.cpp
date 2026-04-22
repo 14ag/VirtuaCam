@@ -4,7 +4,10 @@
 #include "WASAPI.h"
 #include "Tools.h"
 #include "Discovery.h"
+#include "DriverBridge.h"
+#include "RuntimeLog.h"
 #include <wrl.h>
+#include <filesystem>
 #include <algorithm>
 #include <map>
 
@@ -14,6 +17,7 @@ static wil::com_ptr_nothrow<IMFVirtualCamera> g_vcam;
 static HWND g_hMainWnd = NULL;
 static std::unique_ptr<WASAPICapture> g_audioCapture;
 static std::unique_ptr<VirtuaCam::Discovery> g_discovery;
+static std::unique_ptr<DriverBridge> g_driverBridge;
 
 typedef void (*PFN_InitializeBroker)();
 typedef void (*PFN_ShutdownBroker)();
@@ -56,6 +60,29 @@ void InformBroker();
 void LoadSettings();
 void SaveSettings();
 
+static DWORD GetWindowsBuildNumber()
+{
+    using RtlGetVersionFn = LONG (WINAPI*)(PRTL_OSVERSIONINFOW);
+
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) {
+        return 0;
+    }
+
+    auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+    if (!rtlGetVersion) {
+        return 0;
+    }
+
+    RTL_OSVERSIONINFOW info{};
+    info.dwOSVersionInfoSize = sizeof(info);
+    if (rtlGetVersion(&info) != 0) {
+        return 0;
+    }
+
+    return info.dwBuildNumber;
+}
+
 bool GetPipTlEnabled() { return g_showPipTL; }
 bool GetPipTrEnabled() { return g_showPipTR; }
 bool GetPipBlEnabled() { return g_showPipBL; }
@@ -93,16 +120,20 @@ DWORD LaunchProducer(const std::wstring& key, const std::wstring& args)
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
 
-    std::wstring cmdLine = L"VirtuaCamProcess.exe " + args;
-    wchar_t cmdLineNonConst[1024];
-    wcscpy_s(cmdLineNonConst, cmdLine.c_str());
+    std::filesystem::path childExe = std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"VirtuaCamProcess.exe";
+    std::wstring exePath = childExe.wstring();
 
-    if (CreateProcessW(NULL, cmdLineNonConst, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, args);
+    std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
+    cmdLineMutable.push_back(L'\0');
+
+    if (CreateProcessW(exePath.c_str(), cmdLineMutable.data(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
     {
         g_producerProcesses[key] = pi;
         Sleep(200);
         return pi.dwProcessId;
     }
+    VirtuaCamLog::LogWin32(std::format(L"CreateProcessW failed: {}", exePath), GetLastError());
     return 0;
 }
 
@@ -183,18 +214,20 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
 }
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int) {
-    if (!IsRunningAsAdmin()) {
-        MessageBoxW(NULL, L"This application requires Administrator privileges to register the virtual camera.", L"Administrator Rights Required", MB_OK | MB_ICONERROR);
-        return 1;
-    }
+    VirtuaCamLog::InitOptions logOpts;
+    logOpts.logFileName = L"virtuacam-runtime.log";
+    logOpts.attachConsole = true;
+    logOpts.allocConsoleIfMissing = false;
+    VirtuaCamLog::Init(logOpts);
 
     LoadSettings();
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     RETURN_IF_FAILED(MFStartup(MF_VERSION));
 
-    if (FAILED(LoadBroker())) {
-         MessageBoxW(NULL, L"Failed to load DirectPortBroker.dll.", L"Error", MB_OK | MB_ICONERROR);
+    HRESULT hrBroker = LoadBroker();
+    if (FAILED(hrBroker)) {
+         VirtuaCamLog::ShowAndLogError(NULL, L"Failed to load DirectPortBroker.dll.", L"Error", hrBroker);
          MFShutdown(); CoUninitialize(); return 1;
     }
 
@@ -223,9 +256,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 
     HRESULT hrVcam = RegisterVirtualCamera();
     if (FAILED(hrVcam)) {
-        wchar_t msg[256];
-        swprintf_s(msg, 256, L"Failed to register and start the virtual camera.\nHRESULT: 0x%08X", hrVcam);
-        MessageBoxW(g_hMainWnd, msg, L"Error", MB_OK | MB_ICONERROR);
+        g_driverBridge = std::make_unique<DriverBridge>();
+        HRESULT hrDriver = g_driverBridge->Initialize();
+        if (FAILED(hrDriver)) {
+            VirtuaCamLog::LogHr(L"RegisterVirtualCamera failed", hrVcam);
+            VirtuaCamLog::LogHr(L"DriverBridge::Initialize failed", hrDriver);
+            VirtuaCamLog::LogLine(std::format(L"DriverBridge last error: {}", g_driverBridge->GetLastError()));
+            wchar_t msg[768];
+            if (HRESULT_CODE(hrVcam) == ERROR_OLD_WIN_VERSION) {
+                auto build = GetWindowsBuildNumber();
+                swprintf_s(msg, 768, L"Windows 11 virtual camera path unavailable on this system.\nCurrent OS build: %lu\nMF HRESULT: 0x%08X\nDriver-project fallback also failed: %s", build, hrVcam, g_driverBridge->GetLastError().c_str());
+            } else {
+                swprintf_s(msg, 768, L"Failed to start Media Foundation virtual camera.\nHRESULT: 0x%08X\nDriver-project fallback also failed: %s", hrVcam, g_driverBridge->GetLastError().c_str());
+            }
+            g_driverBridge.reset();
+            VirtuaCamLog::ShowAndLogError(g_hMainWnd, msg, L"Error", hrVcam);
+        }
     }
 
     UI_RunMessageLoop(OnIdle);
@@ -239,6 +285,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 void OnIdle() {
     if (g_pfnRenderBrokerFrame) g_pfnRenderBrokerFrame();
     if (g_pfnGetBrokerState) UpdateTelemetry(g_pfnGetBrokerState());
+    if (g_driverBridge && g_driverBridge->IsActive() && g_pfnGetSharedTexture) {
+        wil::com_ptr_nothrow<ID3D11Texture2D> sharedTexture;
+        sharedTexture.attach(g_pfnGetSharedTexture());
+        if (sharedTexture) {
+            HRESULT hr = g_driverBridge->SendFrame(sharedTexture.get());
+            if (FAILED(hr)) {
+                VirtuaCamLog::LogHr(L"DriverBridge::SendFrame failed", hr);
+            }
+        } else {
+            VirtuaCamLog::LogLine(L"GetSharedTexture returned null");
+        }
+    }
 }
 
 void InformBroker() {
@@ -270,8 +328,21 @@ void InformBroker() {
 }
 
 HRESULT LoadBroker() {
-    g_hBrokerDll = LoadLibraryW(L"DirectPortBroker.dll");
-    if (!g_hBrokerDll) return HRESULT_FROM_WIN32(GetLastError());
+    g_hBrokerDll = LoadLibraryExW(L"DirectPortBroker.dll", nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!g_hBrokerDll) {
+        DWORD err = GetLastError();
+        VirtuaCamLog::LogWin32(L"LoadLibraryExW DirectPortBroker.dll failed", err);
+        VirtuaCamLog::LogLine(std::format(L"exe dir: {}", VirtuaCamLog::GetExeDir()));
+        VirtuaCamLog::LogLine(std::format(L"cwd: {}", VirtuaCamLog::GetCurrentDir()));
+        wchar_t found[MAX_PATH];
+        DWORD n = SearchPathW(nullptr, L"DirectPortBroker.dll", nullptr, ARRAYSIZE(found), found, nullptr);
+        if (n > 0 && n < ARRAYSIZE(found)) {
+            VirtuaCamLog::LogLine(std::format(L"SearchPathW found: {}", found));
+        } else {
+            VirtuaCamLog::LogLine(L"SearchPathW: not found");
+        }
+        return HRESULT_FROM_WIN32(err);
+    }
     g_pfnInitializeBroker = (PFN_InitializeBroker)GetProcAddress(g_hBrokerDll, "InitializeBroker");
     g_pfnShutdownBroker = (PFN_ShutdownBroker)GetProcAddress(g_hBrokerDll, "ShutdownBroker");
     g_pfnRenderBrokerFrame = (PFN_RenderBrokerFrame)GetProcAddress(g_hBrokerDll, "RenderBrokerFrame");
@@ -279,18 +350,32 @@ HRESULT LoadBroker() {
     g_pfnGetBrokerState = (PFN_GetBrokerState)GetProcAddress(g_hBrokerDll, "GetBrokerState");
     g_pfnUpdateProducerPriorityList = (PFN_UpdateProducerPriorityList)GetProcAddress(g_hBrokerDll, "UpdateProducerPriorityList");
     g_pfnSetCompositingMode = (PFN_SetCompositingMode)GetProcAddress(g_hBrokerDll, "SetCompositingMode");
-    if (!g_pfnInitializeBroker || !g_pfnShutdownBroker || !g_pfnRenderBrokerFrame || !g_pfnGetSharedTexture || !g_pfnGetBrokerState || !g_pfnUpdateProducerPriorityList || !g_pfnSetCompositingMode) return E_FAIL;
+    if (!g_pfnInitializeBroker || !g_pfnShutdownBroker || !g_pfnRenderBrokerFrame || !g_pfnGetSharedTexture || !g_pfnGetBrokerState || !g_pfnUpdateProducerPriorityList || !g_pfnSetCompositingMode) {
+        VirtuaCamLog::LogLine(L"DirectPortBroker.dll missing expected exports");
+        return E_FAIL;
+    }
     g_pfnInitializeBroker();
     return S_OK;
 }
 
 HRESULT RegisterVirtualCamera() {
+    auto build = GetWindowsBuildNumber();
+    if (build > 0 && build < 22000) {
+        VirtuaCamLog::LogLine(std::format(L"Windows build {} (<22000): MF virtual camera unavailable", build));
+        return HRESULT_FROM_WIN32(ERROR_OLD_WIN_VERSION);
+    }
+
     auto clsid = GUID_ToStringW(CLSID_VCam, false);
     HMODULE hMfsensor = GetModuleHandleW(L"mfsensorgroup.dll");
-    if (!hMfsensor) hMfsensor = LoadLibraryW(L"mfsensorgroup.dll");
+    if (!hMfsensor) hMfsensor = LoadLibraryExW(L"mfsensorgroup.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!hMfsensor) {
+        DWORD err = GetLastError();
+        VirtuaCamLog::LogWin32(L"LoadLibraryExW mfsensorgroup.dll failed", err);
+        return HRESULT_FROM_WIN32(err);
+    }
     using PFN_MFCreateVirtualCamera = HRESULT(STDAPICALLTYPE *)(MFVirtualCameraType, MFVirtualCameraLifetime, MFVirtualCameraAccess, LPCWSTR, LPCWSTR, const void*, ULONG, IMFVirtualCamera**);
     auto pMFCreateVirtualCamera = (PFN_MFCreateVirtualCamera)GetProcAddress(hMfsensor, "MFCreateVirtualCamera");
-    if (!pMFCreateVirtualCamera) return E_NOTIMPL;
+    if (!pMFCreateVirtualCamera) return HRESULT_FROM_WIN32(ERROR_OLD_WIN_VERSION);
 
     RETURN_IF_FAILED_MSG(pMFCreateVirtualCamera(MFVirtualCameraType_SoftwareCameraSource, MFVirtualCameraLifetime_Session, MFVirtualCameraAccess_CurrentUser, L"VirtuaCam", clsid.c_str(), nullptr, 0, &g_vcam), "Failed to create virtual camera");
     RETURN_IF_FAILED_MSG(g_vcam->Start(nullptr), "Cannot start VCam");
@@ -306,6 +391,11 @@ void ShutdownSystem() {
     if (g_vcam) {
         g_vcam->Remove();
         g_vcam.reset();
+    }
+
+    if (g_driverBridge) {
+        g_driverBridge->Shutdown();
+        g_driverBridge.reset();
     }
 
     if (g_pfnShutdownBroker) g_pfnShutdownBroker();

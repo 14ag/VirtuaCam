@@ -1,6 +1,6 @@
 # VirtuaCam
 
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)![Platform: Windows 11](https://img.shields.io/badge/Platform-Windows_11-blue.svg)![Language: C++20](https://img.shields.io/badge/Language-C++20-orange.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Platform: Windows 11 build 22000+](https://img.shields.io/badge/Platform-Windows_11_build_22000%2B-blue.svg) ![Language: C++20](https://img.shields.io/badge/Language-C++20-orange.svg)
 
 VirtuaCam is a modern, high-performance virtual camera for Windows built with a decoupled producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications, games, or other video sources, exposing them as a standard webcam on your system for use in applications like Zoom, Microsoft Teams, OBS, Discord, and more.
 
@@ -65,7 +65,8 @@ Follow these steps to get the virtual camera up and running on your system.
 Before building, ensure you have the following installed:
 
 *   **Visual Studio 2022** (or later) with the "Desktop development with C++" workload.
-*   **Windows 10 SDK** (latest version recommended, usually installed with Visual Studio).
+*   **Windows 11 (build 22000 or newer)**. The virtual camera registration path uses `MFCreateVirtualCamera`, which is only available on Windows 11.
+*   **Windows 10/11 SDK** (latest version recommended, usually installed with Visual Studio).
 *   **Vcpkg** package manager.
 
 #### Vcpkg Dependencies
