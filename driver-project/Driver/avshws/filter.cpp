@@ -132,14 +132,16 @@ SetData(
 	CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
 
 	PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
-	ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
+	ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.InputBufferLength;
 
-	if (bufferLength == 0 || Data == NULL) {
+	if (bufferLength <= sizeof(KSPROPERTY) || Data == NULL) {
 		return STATUS_SUCCESS;
 	}
 
+	ULONG dataLength = bufferLength - sizeof(KSPROPERTY);
+
 	CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
-	device->SetData(Data, bufferLength);
+	device->SetData(Data, dataLength);
 
 	return STATUS_SUCCESS;
 }

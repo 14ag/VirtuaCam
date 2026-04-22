@@ -76,7 +76,11 @@ function Assert-WdkPresent {
 
     $wdfDir = Join-Path $verDir.FullName "wdf"
     if (-not (Test-Path -LiteralPath $wdfDir)) {
-        Fail "WDK headers not found (missing 'wdf'): $wdfDir. Install WDK (not just Windows SDK)."
+        $wdfDir = Join-Path $includeRoot "wdf"
+    }
+    
+    if (-not (Test-Path -LiteralPath $wdfDir)) {
+        Fail "WDK headers not found (missing 'wdf'): looked in $($verDir.FullName)\wdf and $includeRoot\wdf. Install WDK (not just Windows SDK)."
     }
 
     Write-Success "WDK detected at: $wdkRoot"
