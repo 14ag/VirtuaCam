@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set(CMAKE_MSVC_RUNTIME_LIBRARY "$<IF:$<CONFIG:Debug>,MultiThreadedDebugDLL,MultiThreadedDLL>")
 
 find_package(wil CONFIG REQUIRED)
 find_package(cppwinrt CONFIG REQUIRED)
@@ -22,6 +22,7 @@ add_library(VirtuaCamCommon STATIC
     VirtuaCam/Formats.cpp
     VirtuaCam/Discovery.cpp
     VirtuaCam/ShaderModule.cpp
+    VirtuaCam/RuntimeLog.cpp
 )
 set_source_files_properties(VirtuaCam/Guids.cpp PROPERTIES SKIP_PRECOMPILE_HEADER ON)
 target_link_libraries(VirtuaCamCommon PUBLIC ${VCAM_VCPKG_LIBS} ${VCAM_MF_LIBS} ${VCAM_D3D_LIBS} ${VCAM_WIN_LIBS})
@@ -91,6 +92,7 @@ target_precompile_headers(DirectPortConsumer PRIVATE VirtuaCam/pch.h)
 
 add_executable(VirtuaCam WIN32
     VirtuaCam/App.cpp
+    VirtuaCam/DriverBridge.cpp
     VirtuaCam/UI.cpp
     VirtuaCam/Menu.cpp
     VirtuaCam/WASAPI.cpp
