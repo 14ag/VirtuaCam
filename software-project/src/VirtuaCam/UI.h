@@ -21,5 +21,10 @@ void UI_Shutdown();
 void UI_UpdateAudioDeviceLists(const std::vector<std::wstring>& captureDevices);
 void UI_SetAudioSelectionCallback(std::function<void(int)> callback);
 
+// Returns a cached camera DevicePath for a given camera index (menu index),
+// or nullptr if out of range / unknown. This is used to launch camera producers
+// with a stable identifier rather than an API-specific device index.
+const wchar_t* UI_GetCameraDevicePath(int index);
+
 void CreatePreviewWindow();
 void UpdateTelemetry(BrokerState currentState, bool driverConnected);

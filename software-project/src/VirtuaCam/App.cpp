@@ -127,7 +127,16 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
     switch (newMode) {
         case SourceMode::Camera:
             g_mainSourceState.cameraIndex = static_cast<int>(context);
-            g_mainSourceState.pid = LaunchProducer(L"main_camera", L"--type camera --device " + std::to_wstring(g_mainSourceState.cameraIndex));
+            if (const wchar_t* devicePath = UI_GetCameraDevicePath(g_mainSourceState.cameraIndex)) {
+                g_mainSourceState.pid = LaunchProducer(
+                    L"main_camera",
+                    std::format(L"--type camera --device-path \"{}\"", devicePath));
+            } else {
+                // Fallback: old index-based selection (best-effort).
+                g_mainSourceState.pid = LaunchProducer(
+                    L"main_camera",
+                    L"--type camera --device " + std::to_wstring(g_mainSourceState.cameraIndex));
+            }
             break;
         case SourceMode::Window:
             g_mainSourceState.hwnd = reinterpret_cast<HWND>(context);
@@ -171,7 +180,15 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
     switch (newMode) {
         case SourceMode::Camera:
             state.cameraIndex = static_cast<int>(context);
-            state.pid = LaunchProducer(key_prefix + L"_camera", L"--type camera --device " + std::to_wstring(state.cameraIndex));
+            if (const wchar_t* devicePath = UI_GetCameraDevicePath(state.cameraIndex)) {
+                state.pid = LaunchProducer(
+                    key_prefix + L"_camera",
+                    std::format(L"--type camera --device-path \"{}\"", devicePath));
+            } else {
+                state.pid = LaunchProducer(
+                    key_prefix + L"_camera",
+                    L"--type camera --device " + std::to_wstring(state.cameraIndex));
+            }
             break;
         case SourceMode::Window:
             state.hwnd = reinterpret_cast<HWND>(context);

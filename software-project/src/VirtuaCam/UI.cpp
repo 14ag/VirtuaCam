@@ -88,6 +88,11 @@ std::vector<CapturableWindow> EnumerateWindows() {
 
 std::vector<std::wstring> EnumerateCameras() {
     std::vector<std::wstring> cameraNames;
+    // Keep a parallel list of device paths so the app can launch camera producers
+    // using a stable identifier.
+    extern std::vector<std::wstring> g_cameraDevicePaths;
+    g_cameraDevicePaths.clear();
+
     ComPtr<ICreateDevEnum> devEnum;
     if (FAILED(CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&devEnum)))) {
         return cameraNames;
@@ -115,6 +120,16 @@ std::vector<std::wstring> EnumerateCameras() {
             continue;
         }
 
+        std::wstring devicePathStr;
+        VARIANT devicePath;
+        VariantInit(&devicePath);
+        if (SUCCEEDED(propertyBag->Read(L"DevicePath", &devicePath, nullptr)) &&
+            devicePath.vt == VT_BSTR &&
+            devicePath.bstrVal) {
+            devicePathStr = devicePath.bstrVal;
+        }
+        VariantClear(&devicePath);
+
         VARIANT friendlyName;
         VariantInit(&friendlyName);
         if (SUCCEEDED(propertyBag->Read(L"FriendlyName", &friendlyName, nullptr)) &&
@@ -123,6 +138,7 @@ std::vector<std::wstring> EnumerateCameras() {
             std::wstring name(friendlyName.bstrVal);
             if (name.find(L"VirtuaCam") == std::wstring::npos) {
                 cameraNames.push_back(name);
+                g_cameraDevicePaths.push_back(devicePathStr);
             }
         }
         VariantClear(&friendlyName);
@@ -138,6 +154,7 @@ static HWND g_hTelemetryLabel = NULL;
 static WCHAR g_windowClass[MAX_LOADSTRING];
 static std::function<void(int)> g_audioSelectionCallback;
 static std::vector<std::wstring> g_captureDeviceNames;
+std::vector<std::wstring> g_cameraDevicePaths;
 static int g_currentAudioDevice = ID_AUDIO_DEVICE_NONE;
 static PFN_GetSharedTexture g_pfnGetSharedTexture = nullptr;
 static std::function<void()> g_onIdle;
@@ -236,6 +253,17 @@ void UI_UpdateAudioDeviceLists(const std::vector<std::wstring>& captureDevices) 
 
 void UI_SetAudioSelectionCallback(std::function<void(int)> callback) {
     g_audioSelectionCallback = callback;
+}
+
+const wchar_t* UI_GetCameraDevicePath(int index)
+{
+    if (index < 0 || static_cast<size_t>(index) >= g_cameraDevicePaths.size()) {
+        return nullptr;
+    }
+    if (g_cameraDevicePaths[index].empty()) {
+        return nullptr;
+    }
+    return g_cameraDevicePaths[index].c_str();
 }
 
 ATOM MyRegisterClass(HINSTANCE instance) {

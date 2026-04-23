@@ -3,7 +3,6 @@
 #include <d2d1_1.h>
 #include <ks.h>
 #include <cassert>
-#include "winrt/base.h"
 
 std::string to_string(const std::wstring& ws);
 std::wstring to_wstring(const std::string& s);
@@ -64,7 +63,7 @@ struct registry_traits
     using type = HKEY;
     static void close(type value) noexcept
     {
-        WINRT_VERIFY_(ERROR_SUCCESS, RegCloseKey(value));
+        (void)RegCloseKey(value);
     }
     static constexpr type invalid() noexcept
     {
