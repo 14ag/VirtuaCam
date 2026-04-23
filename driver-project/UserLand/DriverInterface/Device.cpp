@@ -32,7 +32,7 @@ int Device::Init()
 		return 0;
 	}
 
-	if (supportFlags & KSPROPERTY_SUPPORT_SET != KSPROPERTY_SUPPORT_SET)
+	if ((supportFlags & KSPROPERTY_SUPPORT_SET) != KSPROPERTY_SUPPORT_SET)
 	{
 		return 0;
 	}
