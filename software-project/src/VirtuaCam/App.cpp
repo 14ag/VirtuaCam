@@ -55,6 +55,7 @@ bool GetDriverBridgeStatus();
 HRESULT LoadBroker();
 void ShutdownSystem();
 void OnIdle();
+void TrySendBrokerFrameToDriver(bool brokerFrameRendered);
 void InformBroker();
 void LoadSettings();
 void SaveSettings();
@@ -199,12 +200,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 
     LoadSettings();
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
-    RETURN_IF_FAILED(MFStartup(MF_VERSION));
 
     HRESULT hrBroker = LoadBroker();
     if (FAILED(hrBroker)) {
          VirtuaCamLog::ShowAndLogError(NULL, L"Failed to load DirectPortBroker.dll.", L"Error", hrBroker);
-         MFShutdown(); CoUninitialize(); return 1;
+         CoUninitialize(); return 1;
     }
 
     g_discovery = std::make_unique<VirtuaCam::Discovery>();
@@ -215,7 +215,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 
     UI_Initialize(hInstance, g_hMainWnd, g_pfnGetSharedTexture);
     if (!g_hMainWnd) {
-        ShutdownSystem(); MFShutdown(); CoUninitialize(); return FALSE;
+        ShutdownSystem(); CoUninitialize(); return FALSE;
     }
 
     SetTimer(g_hMainWnd, 1, 1000, nullptr);
@@ -245,28 +245,45 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     UI_RunMessageLoop(OnIdle);
 
     ShutdownSystem();
-    MFShutdown();
     CoUninitialize();
     return 0;
 }
 
 void OnIdle() {
-    if (g_pfnRenderBrokerFrame) g_pfnRenderBrokerFrame();
+    const bool brokerFrameRendered = (g_pfnRenderBrokerFrame != nullptr);
+    if (brokerFrameRendered) {
+        g_pfnRenderBrokerFrame();
+    }
+
     if (g_pfnGetBrokerState) UpdateTelemetry(g_pfnGetBrokerState(), GetDriverBridgeStatus());
-    if (g_driverBridge && g_driverBridge->IsActive() && g_pfnGetSharedTexture) {
-        wil::com_ptr_nothrow<ID3D11Texture2D> sharedTexture;
-        sharedTexture.attach(g_pfnGetSharedTexture());
-        if (sharedTexture) {
-            HRESULT hr = g_driverBridge->SendFrame(sharedTexture.get());
-            if (FAILED(hr)) {
-                if (hr == HRESULT_FROM_WIN32(ERROR_RETRY)) {
-                    VirtuaCamLog::LogLine(L"DriverBridge::SendFrame requested retry after reinitialize");
-                } else {
-                    VirtuaCamLog::LogHr(L"DriverBridge::SendFrame failed", hr);
-                }
-            }
-        } else {
+    TrySendBrokerFrameToDriver(brokerFrameRendered);
+}
+
+void TrySendBrokerFrameToDriver(bool brokerFrameRendered) {
+    static bool s_loggedNullTexture = false;
+
+    if (!brokerFrameRendered || !g_driverBridge || !g_driverBridge->IsActive() || !g_pfnGetSharedTexture) {
+        return;
+    }
+
+    wil::com_ptr_nothrow<ID3D11Texture2D> sharedTexture;
+    sharedTexture.attach(g_pfnGetSharedTexture());
+    if (!sharedTexture) {
+        if (!s_loggedNullTexture) {
             VirtuaCamLog::LogLine(L"GetSharedTexture returned null");
+            s_loggedNullTexture = true;
+        }
+        return;
+    }
+
+    s_loggedNullTexture = false;
+
+    HRESULT hr = g_driverBridge->SendFrame(sharedTexture.get());
+    if (FAILED(hr)) {
+        if (hr == HRESULT_FROM_WIN32(ERROR_RETRY)) {
+            VirtuaCamLog::LogLine(L"DriverBridge::SendFrame requested retry after reinitialize");
+        } else {
+            VirtuaCamLog::LogHr(L"DriverBridge::SendFrame failed", hr);
         }
     }
 }

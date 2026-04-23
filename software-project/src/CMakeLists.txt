@@ -13,6 +13,7 @@ find_package(cppwinrt CONFIG REQUIRED)
 set(VCAM_COMMON_VCPKG_LIBS WIL::WIL)
 set(VCAM_CPPWINRT_LIBS Microsoft::CppWinRT)
 set(VCAM_MF_LIBS mfplat mfuuid mfreadwrite mf)
+set(VCAM_MF_GUID_LIBS mfuuid)
 set(VCAM_D3D_LIBS d3d11 d2d1 dwrite windowscodecs d3d12 d3dcompiler dxgi)
 set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 comctl32 shlwapi synchronization dwmapi windowsapp avrt strmiids)
 
@@ -106,7 +107,7 @@ add_executable(VirtuaCam WIN32
 )
 set_target_properties(VirtuaCam PROPERTIES OUTPUT_NAME "VirtuaCam")
 target_link_libraries(VirtuaCam PRIVATE VirtuaCamCommon)
-target_link_libraries(VirtuaCam PRIVATE ${VCAM_MF_LIBS})
+target_link_libraries(VirtuaCam PRIVATE ${VCAM_MF_GUID_LIBS})
 target_compile_definitions(VirtuaCam PRIVATE UNICODE _UNICODE)
 target_precompile_headers(VirtuaCam PRIVATE VirtuaCam/pch.h)
 
