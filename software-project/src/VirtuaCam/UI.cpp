@@ -5,6 +5,7 @@
 #include "Tools.h"
 #include "Formats.h"
 #include "Discovery.h"
+#include <dshow.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <dwmapi.h>
@@ -34,6 +35,33 @@ extern void TogglePipTl();
 extern void TogglePipTr();
 extern void TogglePipBl();
 
+namespace
+{
+    const GUID kDriverPropertySet = { 0xcb043957, 0x7b35, 0x456e, { 0x9b, 0x61, 0x55, 0x13, 0x93, 0x0f, 0x4d, 0x8e } };
+    constexpr ULONG kDriverPropertyId = 0;
+
+    bool IsDriverOutputCamera(IMoniker* moniker)
+    {
+        if (!moniker) {
+            return false;
+        }
+
+        ComPtr<IBaseFilter> filter;
+        if (FAILED(moniker->BindToObject(nullptr, nullptr, IID_PPV_ARGS(&filter))) || !filter) {
+            return false;
+        }
+
+        ComPtr<IKsPropertySet> propertySet;
+        if (FAILED(filter->QueryInterface(IID_PPV_ARGS(&propertySet))) || !propertySet) {
+            return false;
+        }
+
+        DWORD supportFlags = 0;
+        return SUCCEEDED(propertySet->QuerySupported(kDriverPropertySet, kDriverPropertyId, &supportFlags)) &&
+            ((supportFlags & KSPROPERTY_SUPPORT_SET) == KSPROPERTY_SUPPORT_SET);
+    }
+}
+
 struct EnumWindowsData { std::vector<CapturableWindow>* windows; };
 BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     EnumWindowsData* data = reinterpret_cast<EnumWindowsData*>(lParam);
@@ -60,27 +88,46 @@ std::vector<CapturableWindow> EnumerateWindows() {
 
 std::vector<std::wstring> EnumerateCameras() {
     std::vector<std::wstring> cameraNames;
-    ComPtr<IMFAttributes> pAttributes;
-    if (FAILED(MFCreateAttributes(&pAttributes, 1))) return cameraNames;
-    if (FAILED(pAttributes->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID))) return cameraNames;
+    ComPtr<ICreateDevEnum> devEnum;
+    if (FAILED(CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&devEnum)))) {
+        return cameraNames;
+    }
 
-    UINT32 count = 0;
-    IMFActivate** devices = nullptr;
-    if (FAILED(MFEnumDeviceSources(pAttributes.Get(), &devices, &count))) return cameraNames;
+    ComPtr<IEnumMoniker> enumMoniker;
+    HRESULT hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &enumMoniker, 0);
+    if (hr != S_OK || !enumMoniker) {
+        return cameraNames;
+    }
 
-    for (UINT32 i = 0; i < count; i++) {
-        wchar_t* friendlyName = nullptr;
-        UINT32 nameLength = 0;
-        if (SUCCEEDED(devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &friendlyName, &nameLength))) {
-            std::wstring name(friendlyName);
+    while (true) {
+        ComPtr<IMoniker> moniker;
+        ULONG fetched = 0;
+        if (enumMoniker->Next(1, &moniker, &fetched) != S_OK) {
+            break;
+        }
+
+        if (IsDriverOutputCamera(moniker.Get())) {
+            continue;
+        }
+
+        ComPtr<IPropertyBag> propertyBag;
+        if (FAILED(moniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&propertyBag))) || !propertyBag) {
+            continue;
+        }
+
+        VARIANT friendlyName;
+        VariantInit(&friendlyName);
+        if (SUCCEEDED(propertyBag->Read(L"FriendlyName", &friendlyName, nullptr)) &&
+            friendlyName.vt == VT_BSTR &&
+            friendlyName.bstrVal) {
+            std::wstring name(friendlyName.bstrVal);
             if (name.find(L"VirtuaCam") == std::wstring::npos) {
                 cameraNames.push_back(name);
             }
-            CoTaskMemFree(friendlyName);
         }
-        devices[i]->Release();
+        VariantClear(&friendlyName);
     }
-    CoTaskMemFree(devices);
+
     return cameraNames;
 }
 
