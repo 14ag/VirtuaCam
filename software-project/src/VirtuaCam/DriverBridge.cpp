@@ -3,6 +3,7 @@
 #include <dshow.h>
 #include <dvdmedia.h>
 #include <d3dcompiler.h>
+#include "RuntimeLog.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 
@@ -103,11 +104,14 @@ HRESULT DriverBridge::FindDriverFilter()
             continue;
         }
 
+        VirtuaCamLog::LogLine(std::format(L"[1.1] Found avshws filter supporting kDriverPropertySet, supportFlags=0x{:08X}", supportFlags));
+
         m_filter = filter;
         m_propertySet = propertySet;
         return S_OK;
     }
 
+    VirtuaCamLog::LogLine(L"[1.1] avshws device NOT found in VideoInputDeviceCategory");
     SetLastError(L"Virtual Camera Driver device not found. Install driver-project camera first.");
     return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
 }
@@ -168,6 +172,12 @@ HRESULT DriverBridge::EnsureGpuResources(ID3D11Texture2D* sourceTexture)
 
 HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
 {
+    static volatile LONG s_driverFrameCount = 0;
+    LONG n = _InterlockedIncrement(&s_driverFrameCount);
+    if (n % 30 == 0) {
+        VirtuaCamLog::LogLine(std::format(L"[1.2] SendFrame #{} calling IKsPropertySet::Set()", n));
+    }
+
     for (UINT y = 0; y < kDriverHeight; ++y) {
         const BYTE* src = static_cast<const BYTE*>(mapped.pData) + (mapped.RowPitch * y);
         BYTE* dst = m_rgbBuffer.data() + (kDriverWidth * kDriverBytesPerPixel * y);

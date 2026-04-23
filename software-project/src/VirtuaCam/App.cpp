@@ -13,7 +13,6 @@
 
 using namespace Microsoft::WRL;
 
-static wil::com_ptr_nothrow<IMFVirtualCamera> g_vcam;
 static HWND g_hMainWnd = NULL;
 static std::unique_ptr<WASAPICapture> g_audioCapture;
 static std::unique_ptr<VirtuaCam::Discovery> g_discovery;
@@ -53,35 +52,11 @@ const WCHAR* REG_VAL_PIPBL = L"ShowPipBottomLeft";
 
 bool IsRunningAsAdmin();
 HRESULT LoadBroker();
-HRESULT RegisterVirtualCamera();
 void ShutdownSystem();
 void OnIdle();
 void InformBroker();
 void LoadSettings();
 void SaveSettings();
-
-static DWORD GetWindowsBuildNumber()
-{
-    using RtlGetVersionFn = LONG (WINAPI*)(PRTL_OSVERSIONINFOW);
-
-    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-    if (!ntdll) {
-        return 0;
-    }
-
-    auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
-    if (!rtlGetVersion) {
-        return 0;
-    }
-
-    RTL_OSVERSIONINFOW info{};
-    info.dwOSVersionInfoSize = sizeof(info);
-    if (rtlGetVersion(&info) != 0) {
-        return 0;
-    }
-
-    return info.dwBuildNumber;
-}
 
 bool GetPipTlEnabled() { return g_showPipTL; }
 bool GetPipTrEnabled() { return g_showPipTR; }
@@ -222,7 +197,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 
     LoadSettings();
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
-    winrt::init_apartment(winrt::apartment_type::multi_threaded);
     RETURN_IF_FAILED(MFStartup(MF_VERSION));
 
     HRESULT hrBroker = LoadBroker();
@@ -254,24 +228,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         });
     }
 
-    HRESULT hrVcam = RegisterVirtualCamera();
-    if (FAILED(hrVcam)) {
-        g_driverBridge = std::make_unique<DriverBridge>();
-        HRESULT hrDriver = g_driverBridge->Initialize();
-        if (FAILED(hrDriver)) {
-            VirtuaCamLog::LogHr(L"RegisterVirtualCamera failed", hrVcam);
-            VirtuaCamLog::LogHr(L"DriverBridge::Initialize failed", hrDriver);
-            VirtuaCamLog::LogLine(std::format(L"DriverBridge last error: {}", g_driverBridge->GetLastError()));
-            wchar_t msg[768];
-            if (HRESULT_CODE(hrVcam) == ERROR_OLD_WIN_VERSION) {
-                auto build = GetWindowsBuildNumber();
-                swprintf_s(msg, 768, L"Windows 11 virtual camera path unavailable on this system.\nCurrent OS build: %lu\nMF HRESULT: 0x%08X\nDriver-project fallback also failed: %s", build, hrVcam, g_driverBridge->GetLastError().c_str());
-            } else {
-                swprintf_s(msg, 768, L"Failed to start Media Foundation virtual camera.\nHRESULT: 0x%08X\nDriver-project fallback also failed: %s", hrVcam, g_driverBridge->GetLastError().c_str());
-            }
-            g_driverBridge.reset();
-            VirtuaCamLog::ShowAndLogError(g_hMainWnd, msg, L"Error", hrVcam);
-        }
+    g_driverBridge = std::make_unique<DriverBridge>();
+    HRESULT hrDriver = g_driverBridge->Initialize();
+    if (FAILED(hrDriver)) {
+        VirtuaCamLog::LogHr(L"DriverBridge::Initialize failed", hrDriver);
+        VirtuaCamLog::LogLine(std::format(L"DriverBridge last error: {}", g_driverBridge->GetLastError()));
+        std::wstring message =
+            L"DriverBridge failed to connect to the avshws kernel driver.\n"
+            L"Make sure driver-project is installed.";
+        VirtuaCamLog::ShowAndLogError(g_hMainWnd, message.c_str(), L"Error", hrDriver);
     }
 
     VirtuaCamLog::LogLine(L"Entering message loop.");
@@ -359,39 +324,10 @@ HRESULT LoadBroker() {
     return S_OK;
 }
 
-HRESULT RegisterVirtualCamera() {
-    auto build = GetWindowsBuildNumber();
-    if (build > 0 && build < 22000) {
-        VirtuaCamLog::LogLine(std::format(L"Windows build {} (<22000): MF virtual camera unavailable", build));
-        return HRESULT_FROM_WIN32(ERROR_OLD_WIN_VERSION);
-    }
-
-    auto clsid = GUID_ToStringW(CLSID_VCam, false);
-    HMODULE hMfsensor = GetModuleHandleW(L"mfsensorgroup.dll");
-    if (!hMfsensor) hMfsensor = LoadLibraryExW(L"mfsensorgroup.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!hMfsensor) {
-        DWORD err = GetLastError();
-        VirtuaCamLog::LogWin32(L"LoadLibraryExW mfsensorgroup.dll failed", err);
-        return HRESULT_FROM_WIN32(err);
-    }
-    using PFN_MFCreateVirtualCamera = HRESULT(STDAPICALLTYPE *)(MFVirtualCameraType, MFVirtualCameraLifetime, MFVirtualCameraAccess, LPCWSTR, LPCWSTR, const void*, ULONG, IMFVirtualCamera**);
-    auto pMFCreateVirtualCamera = (PFN_MFCreateVirtualCamera)GetProcAddress(hMfsensor, "MFCreateVirtualCamera");
-    if (!pMFCreateVirtualCamera) return HRESULT_FROM_WIN32(ERROR_OLD_WIN_VERSION);
-
-    RETURN_IF_FAILED_MSG(pMFCreateVirtualCamera(MFVirtualCameraType_SoftwareCameraSource, MFVirtualCameraLifetime_Session, MFVirtualCameraAccess_CurrentUser, L"VirtuaCam", clsid.c_str(), nullptr, 0, &g_vcam), "Failed to create virtual camera");
-    RETURN_IF_FAILED_MSG(g_vcam->Start(nullptr), "Cannot start VCam");
-    return S_OK;
-}
-
 void ShutdownSystem() {
     if (g_audioCapture) {
         g_audioCapture->StopCapture();
         g_audioCapture.reset();
-    }
-
-    if (g_vcam) {
-        g_vcam->Remove();
-        g_vcam.reset();
     }
 
     if (g_driverBridge) {
