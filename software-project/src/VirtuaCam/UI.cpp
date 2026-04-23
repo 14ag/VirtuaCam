@@ -115,6 +115,7 @@ LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK PreviewWndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 void AddTrayIcon(HWND hwnd, bool add);
+void UpdateTrayTooltip(BrokerState brokerState, bool driverConnected);
 void ShowContextMenu(HWND hwnd);
 ATOM MyRegisterClass(HINSTANCE instance);
 HRESULT InitD3D(HWND hwnd);
@@ -557,17 +558,56 @@ void CreatePreviewWindow() {
     if (g_hPreviewWnd) { CenterWindow(g_hPreviewWnd, true); ShowWindow(g_hPreviewWnd, SW_SHOW); UpdateWindow(g_hPreviewWnd); }
 }
 
-void UpdateTelemetry(BrokerState currentState) {
-    if (!g_hTelemetryLabel) return;
-    static BrokerState lastState = (BrokerState)-1;
-    if (currentState != lastState) {
-        lastState = currentState;
-        switch (currentState) {
-        case BrokerState::Searching: SetWindowText(g_hTelemetryLabel, L"Status: Searching for Producer..."); break;
-        case BrokerState::Connected: SetWindowText(g_hTelemetryLabel, L"Status: Connected to Producer"); break;
-        case BrokerState::Failed: SetWindowText(g_hTelemetryLabel, L"Status: Disconnected / No Producer Found"); break;
+void UpdateTelemetry(BrokerState currentState, bool driverConnected) {
+    static BrokerState lastBrokerState = (BrokerState)-1;
+    static bool lastDriverConnected = false;
+    static bool hasState = false;
+
+    if (!hasState || currentState != lastBrokerState || driverConnected != lastDriverConnected) {
+        hasState = true;
+        lastBrokerState = currentState;
+        lastDriverConnected = driverConnected;
+
+        if (g_hTelemetryLabel) {
+            std::wstring brokerText;
+            switch (currentState) {
+            case BrokerState::Searching: brokerText = L"Searching"; break;
+            case BrokerState::Connected: brokerText = L"Connected"; break;
+            case BrokerState::Failed: brokerText = L"Disconnected"; break;
+            }
+
+            std::wstring label = std::format(
+                L"Broker: {} | Driver: {}",
+                brokerText,
+                driverConnected ? L"OK" : L"FAIL");
+            SetWindowText(g_hTelemetryLabel, label.c_str());
         }
+
+        UpdateTrayTooltip(currentState, driverConnected);
     }
+}
+
+void UpdateTrayTooltip(BrokerState brokerState, bool driverConnected) {
+    if (!g_hMainWnd) return;
+
+    const wchar_t* brokerText = L"Searching";
+    switch (brokerState) {
+    case BrokerState::Searching: brokerText = L"Searching"; break;
+    case BrokerState::Connected: brokerText = L"Connected"; break;
+    case BrokerState::Failed: brokerText = L"Disconnected"; break;
+    }
+
+    std::wstring tip = std::format(
+        L"VirtuaCam | Broker: {} | Driver: {}",
+        brokerText,
+        driverConnected ? L"OK" : L"FAIL");
+
+    NOTIFYICONDATA nid = { sizeof(nid) };
+    nid.hWnd = g_hMainWnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    wcscpy_s(nid.szTip, tip.c_str());
+    Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
 
 HRESULT InitD3D(HWND hwnd) {

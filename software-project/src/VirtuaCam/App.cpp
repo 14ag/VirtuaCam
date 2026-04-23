@@ -51,6 +51,7 @@ const WCHAR* REG_VAL_PIPTR = L"ShowPipTopRight";
 const WCHAR* REG_VAL_PIPBL = L"ShowPipBottomLeft";
 
 bool IsRunningAsAdmin();
+bool GetDriverBridgeStatus();
 HRESULT LoadBroker();
 void ShutdownSystem();
 void OnIdle();
@@ -66,6 +67,7 @@ void TogglePipTr() { g_showPipTR = !g_showPipTR; SaveSettings(); }
 void TogglePipBl() { g_showPipBL = !g_showPipBL; SaveSettings(); }
 
 const VirtuaCam::Discovery* GetGlobalDiscovery() { return g_discovery.get(); }
+bool GetDriverBridgeStatus() { return g_driverBridge && g_driverBridge->IsActive(); }
 const SourceState& GetMainSourceState() { return g_mainSourceState; }
 const SourceState& GetPipSourceState(PipPosition pos) {
     switch (pos) {
@@ -250,14 +252,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 
 void OnIdle() {
     if (g_pfnRenderBrokerFrame) g_pfnRenderBrokerFrame();
-    if (g_pfnGetBrokerState) UpdateTelemetry(g_pfnGetBrokerState());
+    if (g_pfnGetBrokerState) UpdateTelemetry(g_pfnGetBrokerState(), GetDriverBridgeStatus());
     if (g_driverBridge && g_driverBridge->IsActive() && g_pfnGetSharedTexture) {
         wil::com_ptr_nothrow<ID3D11Texture2D> sharedTexture;
         sharedTexture.attach(g_pfnGetSharedTexture());
         if (sharedTexture) {
             HRESULT hr = g_driverBridge->SendFrame(sharedTexture.get());
             if (FAILED(hr)) {
-                VirtuaCamLog::LogHr(L"DriverBridge::SendFrame failed", hr);
+                if (hr == HRESULT_FROM_WIN32(ERROR_RETRY)) {
+                    VirtuaCamLog::LogLine(L"DriverBridge::SendFrame requested retry after reinitialize");
+                } else {
+                    VirtuaCamLog::LogHr(L"DriverBridge::SendFrame failed", hr);
+                }
             }
         } else {
             VirtuaCamLog::LogLine(L"GetSharedTexture returned null");
