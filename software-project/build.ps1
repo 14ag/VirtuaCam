@@ -187,11 +187,39 @@ if (-not (Test-Path $ArtifactSourceDir)) { Exit-WithError "Build artifact direct
 $null = New-Item -ItemType Directory -Force -Path $OutputBinDir
 Write-Info "Output: $OutputBinDir"
 
+$allowed = @(
+    "VirtuaCam.exe",
+    "VirtuaCamProcess.exe",
+    "DirectPortBroker.dll",
+    "DirectPortClient.dll",
+    "DirectPortConsumer.dll"
+)
+
+# Clean out legacy producer DLLs if they were staged by older builds.
+foreach ($legacy in @("DirectPortMFCamera.dll", "DirectPortMFGraphicsCapture.dll")) {
+    $legacyPath = Join-Path $OutputBinDir $legacy
+    if (Test-Path -LiteralPath $legacyPath) {
+        Remove-Item -Force -LiteralPath $legacyPath
+        Write-Info "Removed legacy staged DLL: $legacy"
+    }
+}
+
 $copiedFiles = 0
-Get-ChildItem -Path $ArtifactSourceDir -File | Where-Object { $_.Extension -in ".exe", ".pyd", ".pdb", ".dll" } | ForEach-Object {
-    Copy-Item -Path $_.FullName -Destination $OutputBinDir -Force
-    Write-Success "Staged: $($_.Name)"
-    $copiedFiles++
+foreach ($name in $allowed) {
+    $src = Join-Path $ArtifactSourceDir $name
+    if (Test-Path -LiteralPath $src) {
+        Copy-Item -LiteralPath $src -Destination $OutputBinDir -Force
+        Write-Success "Staged: $name"
+        $copiedFiles++
+
+        $pdb = [System.IO.Path]::ChangeExtension($src, ".pdb")
+        if (Test-Path -LiteralPath $pdb) {
+            Copy-Item -LiteralPath $pdb -Destination $OutputBinDir -Force
+            Write-Success "Staged: $([System.IO.Path]::GetFileName($pdb))"
+        }
+    } else {
+        Write-Host "  - WARNING: Missing build artifact (not staged): $name" -ForegroundColor Yellow
+    }
 }
 
 if ($copiedFiles -eq 0) {

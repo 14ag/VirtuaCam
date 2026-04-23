@@ -45,7 +45,6 @@ typedef enum DWM_SYSTEMBACKDROP_TYPE {
 #include <propvarutil.h>
 #include <mfapi.h>
 #include <mfidl.h>
-#include "mfvirtualcamera.h"
 #include <mferror.h>
 #include <mfcaptureengine.h>
 #include <ks.h>
@@ -73,14 +72,6 @@ typedef enum DWM_SYSTEMBACKDROP_TYPE {
 #include <dwrite.h>
 #include <wincodec.h>
 #include <uuids.h>
-
-#include "winrt/base.h"
-#include "winrt/Windows.ApplicationModel.h"
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Graphics.Capture.h>
-#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
-#include <windows.graphics.capture.interop.h>
-#include <windows.graphics.directx.direct3d11.interop.h>
 
 #include <string>
 #include <format>
@@ -110,25 +101,5 @@ DECLARE_INTERFACE_IID_(IMFDeviceSourceInternal, IUnknown, "7F02A37E-4E81-11E0-8F
 DECLARE_INTERFACE_IID_(IMFDeviceSourceInternal2, IUnknown, "c47d95d5-9685-4bf6-b6fb-772dc58d8e3b") {};
 DECLARE_INTERFACE_IID_(IMFDeviceSourceStatus, IUnknown, "43937DC1-0BE6-4ADD-8A14-9EA68FF31252") {};
 DECLARE_INTERFACE_IID_(IUndocumented1, IUnknown, "9A9DAAAA-9774-4732-848E-8739655F2BA3") {};
-
-namespace winrt
-{
-    template<> inline bool is_guid_of<IMFMediaSourceEx>(guid const& id) noexcept
-    {
-        return is_guid_of<IMFMediaSourceEx, IMFMediaSource, IMFMediaEventGenerator>(id);
-    }
-    template<> inline bool is_guid_of<IMFMediaSource2>(guid const& id) noexcept
-    {
-        return is_guid_of<IMFMediaSource2, IMFMediaSourceEx, IMFMediaSource, IMFMediaEventGenerator>(id);
-    }
-    template<> inline bool is_guid_of<IMFMediaStream2>(guid const& id) noexcept
-    {
-        return is_guid_of<IMFMediaStream2, IMFMediaStream, IMFMediaEventGenerator>(id);
-    }
-    template<> inline bool is_guid_of<IMFActivate>(guid const& id) noexcept
-    {
-        return is_guid_of<IMFActivate, IMFAttributes>(id);
-    }
-}
 
 #endif
