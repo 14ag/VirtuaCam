@@ -34,7 +34,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
 })";
 }
 
-DriverBridge::DriverBridge() = default;
+DriverBridge::DriverBridge()
+{
+    m_rgbBuffer.resize(kDriverFrameSize);
+}
 DriverBridge::~DriverBridge()
 {
     Shutdown();
@@ -44,8 +47,8 @@ HRESULT DriverBridge::Initialize()
 {
     m_lastError.clear();
     RETURN_IF_FAILED(FindDriverFilter());
-    m_rgbBuffer.resize(kDriverFrameSize);
     m_active = true;
+    VirtuaCamLog::LogLine(L"DriverBridge initialized");
     return S_OK;
 }
 
@@ -62,7 +65,15 @@ void DriverBridge::Shutdown()
     m_device.reset();
     m_propertySet.reset();
     m_filter.reset();
-    m_rgbBuffer.clear();
+}
+
+bool DriverBridge::IsRecoverableSendFailure(HRESULT hr)
+{
+    return hr == HRESULT_FROM_WIN32(ERROR_BAD_COMMAND) ||
+        hr == HRESULT_FROM_WIN32(ERROR_GEN_FAILURE) ||
+        hr == HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED) ||
+        hr == HRESULT_FROM_WIN32(ERROR_NOT_READY) ||
+        hr == HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE);
 }
 
 HRESULT DriverBridge::FindDriverFilter()
@@ -186,6 +197,8 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
             const BYTE* srcPixel = src + (x * 4);
             BYTE* dstPixel = dst + (x * 3);
 
+            // Broker texture is BGRA8. Driver sink expects packed BGR24.
+            // Copy B,G,R bytes directly; no extra channel swap needed.
             dstPixel[0] = srcPixel[0];
             dstPixel[1] = srcPixel[1];
             dstPixel[2] = srcPixel[2];
@@ -198,6 +211,20 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
     HRESULT hr = m_propertySet->Set(kDriverPropertySet, kDriverPropertyId, nullptr, 0, m_rgbBuffer.data(), static_cast<ULONG>(m_rgbBuffer.size()));
     if (FAILED(hr)) {
         SetLastError(std::format(L"Driver property set failed: 0x{:08X}", static_cast<unsigned>(hr)));
+    }
+    return hr;
+}
+
+HRESULT DriverBridge::ReinitializeAfterFailure(HRESULT failureHr)
+{
+    VirtuaCamLog::LogLine(std::format(
+        L"DriverBridge recoverable send failure HRESULT=0x{:08X}; reinitializing",
+        static_cast<unsigned>(failureHr)));
+
+    Shutdown();
+    HRESULT hr = Initialize();
+    if (FAILED(hr)) {
+        VirtuaCamLog::LogHr(L"DriverBridge reinitialize failed", hr);
     }
     return hr;
 }
@@ -235,5 +262,14 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
     RETURN_IF_FAILED(m_context->Map(m_stagingTexture.get(), 0, D3D11_MAP_READ, 0, &mapped));
     HRESULT hr = UploadMappedFrame(mapped);
     m_context->Unmap(m_stagingTexture.get(), 0);
+
+    if (FAILED(hr) && IsRecoverableSendFailure(hr)) {
+        HRESULT hrReinit = ReinitializeAfterFailure(hr);
+        if (SUCCEEDED(hrReinit)) {
+            return HRESULT_FROM_WIN32(ERROR_RETRY);
+        }
+        return hrReinit;
+    }
+
     return hr;
 }

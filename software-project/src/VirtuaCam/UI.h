@@ -22,4 +22,4 @@ void UI_UpdateAudioDeviceLists(const std::vector<std::wstring>& captureDevices);
 void UI_SetAudioSelectionCallback(std::function<void(int)> callback);
 
 void CreatePreviewWindow();
-void UpdateTelemetry(BrokerState currentState);
+void UpdateTelemetry(BrokerState currentState, bool driverConnected);

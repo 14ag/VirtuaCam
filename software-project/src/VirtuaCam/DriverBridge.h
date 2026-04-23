@@ -18,7 +18,9 @@ public:
     HRESULT SendFrame(ID3D11Texture2D* sourceTexture);
 
 private:
+    static bool IsRecoverableSendFailure(HRESULT hr);
     HRESULT FindDriverFilter();
+    HRESULT ReinitializeAfterFailure(HRESULT failureHr);
     HRESULT EnsureGpuResources(ID3D11Texture2D* sourceTexture);
     HRESULT CreateShaders();
     HRESULT UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped);
