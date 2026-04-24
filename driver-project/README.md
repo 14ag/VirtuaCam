@@ -1,29 +1,34 @@
-# VirtualCameraDriver
-Windows virtual camera driver using the AVStream minidriver.
+# VirtuaCam Kernel Driver
 
-This project was a challenge for myself. I wanted to create a virtual camera driver for Windows.
+Windows virtual camera driver using AVStream minidriver (avshws). Frame sink for **VirtuaCam v2**.
 
-The project has two parts: the *Windows driver* and the *user mode apps* which can push frames to the driver.
+## Architecture
+- **Type**: Kernel-mode driver (AVStream).
+- **Path**: Direct driver communication (bypasses Media Foundation).
+- **Communication**: Custom `IKsPropertySet` on AVStream filter.
+- **Buffer**: RGB24, 1280x720, 30fps.
 
-## Driver
-The driver is based on the **avshws** driver example from Microsoft.
+## Interface
+- **GUID**: `{CB043957-7B35-456E-9B61-5513930F4D8E}`
+- **ID**: `0`
+- **Logic**: User-mode app pushes frame buffer via `Set` property. Driver copies to output pin.
 
-The filter implemented in this driver is extended with a custom property which accepts a buffer (1280x720, RGB), this buffer is then copied to the output buffer.
+## Build
+Use `build-driver.ps1` (requires WDK + VS 2022).
+Artifacts land in `v2/output/driver/package`.
 
-* *GUID* of the property set: *{CB043957-7B35-456E-9B61-5513930F4D8E}*
-* *ID* of the property: *0*
+## Installation
+1. Enable testsigning: `bcdedit.exe -set TESTSIGNING ON` (requires reboot).
+2. Install certificate: Import `VirtualCameraDriver-TestSign.cer` to Trusted Root Certification Authorities.
+3. Install driver:
+   - Command: `pnputil /add-driver avshws.inf /install`
+   - UI: `hdwwiz.exe` (Add legacy hardware).
 
-Accessing this property can be done using DirectShow.
+## UserMode Software
+Main suite in `software-project/`.
+- `VirtuaCam.exe`: Primary UI.
+- `DriverBridge.cpp`: Library for direct driver frame push.
 
-### Driver installation:
-After building the driver (Windows SDK and Windows Driver Kit required) the inf can be installed using **hdwwiz.exe** (can be launched in CMD).
-
-Test signing might be required to be enabled for driver installation:
-`bcdedit.exe -set TESTSIGNING ON`
-
-## UserMode apps
-These applications can push frames to the driver using the property exposed in the filter. The apps are based on the **driver interface library** which handles enumerating devices and setting the value of the property. This is written in VC++.
-
-There are two example applications:
-* **UserDriverStaticImage**: This app can push static images to the driver.
-* **UserDriverCanon**: This application can push the live view of a Canon EOS camera to the driver, essentially turning it into a webcam. EDSDK not included in this repository!
+Legacy examples in `UserLand/` for standalone testing:
+- `UserDriverStaticImage`: Pushes fixed image.
+- `UserDriverCanon`: (Legacy) Pushes Canon EOS live view.
