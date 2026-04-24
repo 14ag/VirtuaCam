@@ -1,0 +1,60 @@
+# Common Build Patterns
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+build/
+output/
+
+# Visual Studio / Windows
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.exp
+*.ilk
+*.aps
+*.res
+*.ncb
+*.opendb
+*.sdf
+*.opensdf
+Thumbs.db
+Desktop.ini
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# vcpkg
+vcpkg_installed/
+.vcpkg/
+vcpkg/
+
+# Local history / Cache
+.localhistory/
+.cache/
+ipch/
+
+# Misc
+*.env
+~$*
+*~
