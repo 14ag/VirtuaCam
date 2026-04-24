@@ -58,3 +58,7 @@ ipch/
 *.env
 ~$*
 *~
+
+output/
+wiki/
+ignition.txt

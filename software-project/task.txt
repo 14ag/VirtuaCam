@@ -1,4 +1,0 @@
-this webcam is undetectable to browser. even the software exe fails to load the dll. it says that the entrypoint cant be found. 
-scan the repo
-carry out research
-use insights to diagnose and repair
