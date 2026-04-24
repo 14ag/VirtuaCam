@@ -1,0 +1,11 @@
+CompileFlags:
+  CompilationDatabase: "build"
+  Add:
+    - "-fcoroutines-ts"
+    - "-D_SILENCE_CLANG_COROUTINE_MESSAGE"
+    - "-D_HAS_CXX20=1"
+
+Diagnostics:
+  Suppress:
+    - "misc-include-cleaner"
+    - "unused-includes"

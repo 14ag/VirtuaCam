@@ -1,0 +1,7 @@
+after the installable driver, next on the roadmap is providing a software that feeds frame to it so that the application using the driver gets a video feed. to implement this, you will clone the code from obs studio and take the module that allows users to use a screen or window recording as a source of camera feed. we will make that module feed frames to this driver
+
+
+Windows cannot load the device driver for this hardware. The driver may be corrupted or missing. (Code 39)
+
+{Driver Entry Point Not Found}
+The %hs device driver could not locate the entry point %hs in driver %hs.
