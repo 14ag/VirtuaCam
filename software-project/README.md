@@ -1,134 +1,42 @@
 # VirtuaCam
 
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Platform: Windows 11 build 22000+](https://img.shields.io/badge/Platform-Windows_11_build_22000%2B-blue.svg) ![Language: C++20](https://img.shields.io/badge/Language-C++20-orange.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Platform: Windows 10+ / 11](https://img.shields.io/badge/Platform-Windows_10%2B_/_11-blue.svg) ![Language: C++20](https://img.shields.io/badge/Language-C++20-orange.svg)
 
-VirtuaCam is a modern, high-performance virtual camera for Windows built with a decoupled producer-consumer architecture. It enables low-latency, zero-copy video injection from external DirectX applications, games, or other video sources, exposing them as a standard webcam on your system for use in applications like Zoom, Microsoft Teams, OBS, Discord, and more.
+VirtuaCam is a modern, high-performance virtual camera system for Windows. It enables low-latency, zero-copy video injection from external DirectX applications, games, or other video sources directly into a kernel-mode driver path. This exposes them as a standard webcam for use in applications like Zoom, Microsoft Teams, OBS, and Discord.
 
-![ezgif-81ee43ea485d78](https://github.com/user-attachments/assets/c99f8c50-8b2d-4b98-bb63-fc0e57082d44)
+## Architecture: Direct-to-Driver Path
 
-## Core Concept: A High-Performance Video Broker
+VirtuaCam uses a decoupled architecture to achieve maximum performance and stability:
 
-Unlike traditional virtual cameras that generate their own content, VirtuaCam acts as a high-performance transport system—a "broker"—that discovers and composites video feeds from other applications (producers). This is achieved directly on the GPU, avoiding costly memory transfers between the CPU and GPU, which results in minimal performance impact.
+`[Producer (Built-in or External)]` ---> `[Shared D3D11 Texture & Fence]` ---> `[VirtuaCam Broker]` ---> `[DriverBridge]` ---> `[avshws Kernel Driver]`
 
-The data flow is designed for efficiency:
+This design avoids the overhead of the Media Foundation virtual camera pipeline by pushing raw frames directly from the user-mode broker to a kernel-mode AVStream minidriver.
 
-`[Your App (Producer)]` ---> `[Shared D3D11 Texture & Fence]` ---> `[VirtuaCam Broker (Consumer)]` ---> `[Zoom, Teams, etc.]`
+## Key Components
 
-This architecture is ideal for applications like game streaming, creative coding, real-time video filters, screen sharing, or any scenario where you need to pipe a custom, hardware-accelerated video stream into a standard camera feed.
+1.  **VirtuaCam Broker (`DirectPortBroker.dll`):** Composites video feeds from multiple sources on the GPU.
+2.  **VirtuaCam Process (`VirtuaCamProcess.exe`):** A lightweight host for built-in producers (Camera and Screen Capture).
+3.  **Driver Bridge:** A user-mode interface that handles communication with the kernel driver.
+4.  **avshws Driver:** The kernel-mode component that presents the video feed as a hardware camera device to the system.
 
-## Technical Deep Dive
+## Features
 
-VirtuaCam's architecture relies on several key Windows technologies to achieve its high-performance, zero-copy pipeline:
+*   **Zero-Copy GPU Path:** Frames stay on the GPU from capture to driver submission.
+*   **Built-in Producers:** High-performance screen capture and physical camera passthrough are built directly into the process host.
+*   **Kernel-Mode Output:** Appears as a real hardware device, bypassing virtual camera detection in many apps.
+*   **Tray Controller:** Manage sources, layouts (Grid/PIP), and preview from a professional tray interface.
 
-1.  **Shared DirectX 11 Resources:**
-    *   **Shared Texture:** A producer application creates an `ID3D11Texture2D` with the `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` flag. This allows the texture's memory to be accessed by other processes on the same graphics adapter.
-    *   **Shared Fence:** An `ID3D11Fence` is also created with the `D3D11_FENCE_FLAG_SHARED` flag. This synchronization primitive is used to signal when a new frame has been rendered to the shared texture, preventing the consumer from reading an incomplete frame.
+## How to Use
 
-2.  **Memory-Mapped Manifest File:**
-    *   To enable discovery, each producer creates a memory-mapped file with a unique name (e.g., `DirectPort_Producer_Manifest_[ProcessID]`).
-    *   This file contains a `BroadcastManifest` struct, which holds critical metadata: the dimensions and format of the shared texture, the LUID of the graphics adapter, and the global names of the shared texture and fence handles.
+### 1. Build and Install
+1. Build the solution using the root `build-all.ps1`.
+2. Install the kernel driver using `install-all.ps1` (requires Administrator/TestSigning).
 
-3.  **The Broker and Multiplexer (`DirectPortBroker.dll`):**
-    *   At the heart of VirtuaCam is the broker. It runs in the background and is managed by the main `VirtuaCam.exe` controller.
-    *   It continuously scans the system for producer manifest files (`Discovery.cpp`).
-    *   When producers are found, the broker opens their shared resources (texture and fence).
-    *   A **Multiplexer** (`Multiplexer.cpp`) is responsible for compositing frames from one or more producers into a single output texture. It can operate in two modes:
-        *   **Single Source / Picture-in-Picture (PIP):** Renders a primary source fullscreen with smaller PIP overlays.
-        *   **Grid Mode:** Arranges all discovered producers in an automatic grid layout.
-    *   This final composited texture is then made available via its *own* shared texture and fence for the virtual camera driver to consume.
-
-4.  **The Virtual Camera Media Source (`DirectPortClient.dll`):**
-    *   This is the core COM DLL that registers itself with Windows as a Media Foundation virtual camera source.
-    *   When an application like Teams requests a video frame, this DLL connects to the **Broker's** shared texture.
-    *   It waits on the Broker's fence, copies the latest composited frame into the Media Foundation pipeline, and sends it to the requesting application. This final step is also a zero-copy GPU operation.
-
-## Key Features
-
-*   **High-Performance Zero-Copy Transfer:** Video frames are shared between processes entirely on the GPU using DirectX 11 shared resources, resulting in minimal latency and CPU overhead.
-*   **Decoupled Architecture:** The virtual camera (consumer) and video-generating applications (producers) are separate processes. They can be started, stopped, and developed independently.
-*   **Dynamic Producer Discovery:** The virtual camera automatically scans for and connects to any running, compatible producer application.
-*   **Advanced Compositing:** A central broker multiplexes video from multiple sources. It can display a primary source with multiple Picture-in-Picture (PIP) overlays or create an automatic grid view of all available sources.
-*   **System Tray Controller:** The camera's lifecycle is managed by a lightweight tray icon (`VirtuaCam.exe`), providing a professional user experience for selecting sources, managing PIP layouts, and accessing settings.
-*   **Hardware-Accelerated Preview:** An on-demand preview window can be toggled from the tray menu to show the exact output of the camera, rendered with hardware acceleration.
-*   **Multiple Producer Types:** Comes with pre-built producer modules for:
-    *   Window/Screen Capture (`DirectPortMFGraphicsCapture.dll`)
-    *   Physical Webcam Passthrough (`DirectPortMFCamera.dll`)
-    *   Generic Consumer/Filter (`DirectPortConsumer.dll`)
-*   **Modern C++ Implementation:** Built with C++20 and robust Windows libraries like WIL and C++/WinRT for stability and maintainability, using a modern CMake build system.
-
-## How to Use VirtuaCam
-
-Follow these steps to get the virtual camera up and running on your system.
-
-### 1. Prerequisites & Dependencies
-
-Before building, ensure you have the following installed:
-
-*   **Visual Studio 2022** (or later) with the "Desktop development with C++" workload.
-*   **Windows 11 (build 22000 or newer)**. The virtual camera registration path uses `MFCreateVirtualCamera`, which is only available on Windows 11.
-*   **Windows 10/11 SDK** (latest version recommended, usually installed with Visual Studio).
-*   **Vcpkg** package manager.
-
-#### Vcpkg Dependencies
-
-This project requires two libraries that can be installed via vcpkg. Open your terminal and run the following commands:
-
-```sh
-vcpkg install wil
-vcpkg install cppwinrt
-```
-
-The build script is pre-configured to find vcpkg in its default installation path (`C:\vcpkg`). If you have it installed elsewhere, you can specify the path when running the build script:
-
-```powershell
-.\build.ps1 -VcpkgRoot "C:\path\to\your\vcpkg"
-```
-
-### 2. Build the Project
-
-With the prerequisites installed, you can now build the entire solution using the provided `build.ps1` PowerShell script. This will compile all necessary DLLs and EXEs.
-
-```powershell
-.\build.ps1
-```
-
-### 3. Register the Virtual Camera DLL (Administrator Required)
-
-After a successful build, you must register the core COM server. This step requires Administrator privileges.
-
-1.  Open **PowerShell** or **Command Prompt** as an **Administrator**.
-2.  Navigate to the root directory of the VirtuaCam project where the build artifacts were copied.
-3.  Run the following command:
-
-    ```cmd
-    regsvr32 DirectPortClient.dll
-    ```
-
-You should see a confirmation message that the DLL was registered successfully. You can also use the build script for this: `.\build.ps1 -Register`.
-
-### 4. Run the VirtuaCam Controller
-
-Double-click on `VirtuaCam.exe`. A new icon will appear in your system tray. This application runs the background broker process and provides the main user interface for controlling the camera.
-
-### 5. Select a Video Source
-
-Right-click the VirtuaCam tray icon to open the context menu.
-
-*   **To share a window:** Go to `Source` -> `[Window Title]`. A producer process (`VirtuaCamProcess.exe`) will launch automatically to capture and broadcast that window's contents.
-*   **To use a physical webcam:** Go to `Source` -> `[Webcam Name]`. A producer will launch to pass through your physical webcam feed.
-*   **To use the auto-discovery grid:** Go to `Source` -> `Auto-Discovery Grid`. The camera will display a grid of all other active VirtuaCam-compatible producers running on your system.
-*   **To add Picture-in-Picture:** Use the `Picture-in-Picture` sub-menu to select a source for the PIP overlay. You can enable additional PIP windows in the `Settings` menu.
-
-### 6. Use in Your Target Application
-
-Open an application like the **Windows Camera App**, **Zoom**, **Discord**, or **Microsoft Teams**. In the video settings, you should now be able to select **"VirtuaCam"** as your webcam. The feed you configured in the previous step will be displayed.
-
----
+### 3. Run
+1. Launch `VirtuaCam.exe`.
+2. Select a source (Window or Camera) from the tray icon menu.
+3. Open your target app (e.g., Teams) and select "VirtuaCam" as your camera.
 
 ## License
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
-
-## Acknowledgements
-
-A special thank you to the developer of the **[VCamSample](https://github.com/smourier/VCamSample)** project. VCamSample provided an excellent and clear foundational example of a Media Foundation virtual camera. Its well-structured code served as an invaluable educational resource and a starting point for understanding the core concepts involved in this project.
