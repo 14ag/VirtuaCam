@@ -1,0 +1,45 @@
+# CMake
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
+Testing
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+build/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.exp
+*.ilk
+*.aps
+*.res
+*.ncb
+*.opendb
+*.sdf
+*.opensdf
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# vcpkg
+vcpkg_installed/
+.vcpkg/
+
+# Local configuration
+*.env
