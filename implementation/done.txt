@@ -1,0 +1,63 @@
+2026-04-21 03:40:47 +03:00 init implementation tracking
+2026-04-21 03:41:14 +03:00 add implementation/plan.md + implementation/done.txt
+2026-04-21 03:46:13 +03:00 refactor software-project/build.ps1 to stage into output/
+2026-04-21 03:46:13 +03:00 add driver-project/build-driver.ps1 + update install-driver.ps1 for output package + logging
+2026-04-21 03:46:13 +03:00 add top-level build-all.ps1, install-all.ps1, clean-output.ps1
+2026-04-21 03:50:39 +03:00 fix VirtuaCam target to WIN32 subsystem (linker main error)
+2026-04-21 03:50:39 +03:00 fix WDK include detection in driver-project/build-driver.ps1
+2026-04-21 04:32:28 +03:00 add runtime logging + console attach + safe DLL search paths (VirtuaCam)
+2026-04-21 04:32:28 +03:00 make VirtuaCam launch VirtuaCamProcess via absolute sibling path
+2026-04-21 04:33:26 +03:00 update install-all.ps1 to register staged DirectPortClient.dll from output/
+2026-04-23 02:49:16 +03:00 Phase 1/1.3 Audit MF APIs complete
+Phase 1/1.4 Audit winrt usages complete
+Phase 1/1.5 Audit MFStartup survivors complete
+Phase 1/1.6 Verify format contract (BGR) complete
+Phase 1/1.7 Verify driver enumeration complete
+Phase 1/1.8 Verify TESTSIGNING complete
+Phase 1/1.1 Add diagnostic log to DriverBridge complete
+Phase 1/1.2 Add diagnostic DbgPrint to driver complete
+2026-04-23 03:02:58 +03:00 add implementation/plan.md for driver-frame-path phase 2
+2026-04-23 03:06:46 +03:00 Phase 2/2.1 remove RegisterVirtualCamera from App.cpp complete
+2026-04-23 03:06:46 +03:00 Phase 2/2.2 remove g_vcam startup/shutdown usage complete
+2026-04-23 03:06:46 +03:00 Phase 2/2.3 make DriverBridge unconditional in App.cpp complete
+2026-04-23 03:06:46 +03:00 Phase 2/2.5 remove winrt::init_apartment from App.cpp complete
+2026-04-23 03:06:46 +03:00 Phase 2 validation build VirtuaCam target succeeded
+2026-04-23 03:29:05 +03:00 add implementation/phases/phase3-plan.md for driver-frame-path phase 3
+2026-04-23 03:29:05 +03:00 Phase 3/3.1 verify MFActivate/MFSource/MFStream are already excluded from active targets complete
+2026-04-23 03:29:05 +03:00 Phase 3/3.2 verify DirectPortMFCamera and DirectPortMFGraphicsCapture are still required by VirtuaCamProcess; target removal deferred
+2026-04-23 03:29:05 +03:00 Phase 3/3.3 scope Media Foundation and C++/WinRT link libraries to concrete software targets in CMake complete
+2026-04-23 03:29:05 +03:00 Phase 3/3.4 verify cppwinrt is still required by DirectPortClient and DirectPortMFGraphicsCapture; removal deferred
+2026-04-23 03:29:05 +03:00 Phase 3 validation software-project/build.ps1 succeeded
+2026-04-23 03:38:08 +03:00 add implementation/phases/phase4-plan.md for driver-frame-path phase 4
+2026-04-23 03:38:08 +03:00 Phase 4/4.1 fix KSPROPERTY_SUPPORT_SET precedence bug in driver-project UserLand DriverInterface complete
+2026-04-23 03:38:08 +03:00 Phase 4/4.2 add DriverBridge send retry and reinitialize logic for recoverable property-set failures complete
+2026-04-23 03:38:08 +03:00 Phase 4/4.3 verify BGRA broker output maps directly to packed BGR24 driver input; no extra channel swap needed complete
+2026-04-23 03:38:08 +03:00 Phase 4/4.4 add GetDriverBridgeStatus plumbing and show driver status in UI telemetry + tray tooltip complete
+2026-04-23 03:38:08 +03:00 Phase 4/4.5 pre-allocate DriverBridge send buffer in constructor and keep it across reconnects complete
+2026-04-23 03:38:08 +03:00 Phase 4/4.6 verify avshws transport is KS property-set path, not custom METHOD_BUFFERED/METHOD_IN_DIRECT IOCTL; redesign deferred
+2026-04-23 03:38:08 +03:00 Phase 4 validation software-project/build.ps1 succeeded
+2026-04-23 03:38:08 +03:00 Phase 4 validation retarget driver-project/UserLand/DriverInterface.vcxproj to installed SDK/toolset and build succeeded
+2026-04-23 03:55:02 +03:00 add implementation/phases/phase5-plan.md for driver-frame-path phase 5
+2026-04-23 03:55:02 +03:00 Phase 5/5.1 make OnIdle render broker frame before driver send on every idle tick complete
+2026-04-23 03:55:02 +03:00 Phase 5/5.2 gate DriverBridge send on broker render export, active bridge, and non-null shared texture complete
+2026-04-23 03:55:02 +03:00 Phase 5/5.3 defer optional dedicated frame-push thread until after build/link validation complete
+2026-04-23 03:55:02 +03:00 Phase 5 validation build VirtuaCam target succeeded
+2026-04-23 03:57:30 +03:00 add implementation/phases/phase6-plan.md for driver-frame-path phase 6
+2026-04-23 03:57:30 +03:00 Phase 6/6.1 replace VirtuaCam camera enumeration with DirectShow and remove MFStartup/MFShutdown from App.cpp complete
+2026-04-23 03:57:30 +03:00 Phase 6/6.1 validate active VirtuaCam sources contain zero references to IMFVirtualCamera, MFStartup, and MFCreateVirtualCamera complete
+2026-04-23 03:57:30 +03:00 Phase 6/6.2 remove full VCAM_MF_LIBS from VirtuaCam target, retain mfuuid-only linkage for shared GUID helpers, and rebuild all software targets complete
+2026-04-23 03:57:30 +03:00 Phase 6/6.3 validate output/software/bin contains required core binaries complete
+2026-04-23 03:57:30 +03:00 Phase 6/6.3 confirm DirectPortMFCamera.dll and DirectPortMFGraphicsCapture.dll remain runtime dependencies of VirtuaCamProcess; removal deferred
+2026-04-23 03:57:30 +03:00 Phase 6 validation software-project/build.ps1 succeeded
+2026-04-23 15:09:35 +03:00 add implementation/phases/phase6-1-plan.md for driver-frame-path phase 6.1
+2026-04-23 15:41:59 +03:00 Phase 6.1 move camera/capture producers into VirtuaCamProcess (built-in) complete
+2026-04-23 15:41:59 +03:00 Phase 6.1 add UI camera device-path caching + launch camera producers via --device-path complete
+2026-04-23 15:41:59 +03:00 Phase 6.1 add VCAM_ENABLE_LEGACY_MF_COMPONENTS option; default build disables legacy MF/WinRT producer DLLs complete
+2026-04-23 15:41:59 +03:00 Phase 6.1 build DirectPortClient.dll stub for default build (regsvr32-compatible) complete
+2026-04-23 15:41:59 +03:00 Phase 6.1 remove mfvirtualcamera.h from default PCH; keep only for legacy option complete
+2026-04-23 15:41:59 +03:00 Phase 6.1 make cppwinrt optional/off-by-default; remove winrt dependency from Tools.h complete
+2026-04-23 15:41:59 +03:00 Phase 6.1 update software-project/build.ps1 staging allowlist and purge legacy staged producer DLLs complete
+2026-04-23 15:41:59 +03:00 Phase 6.1 update implementation/scheduled.md items complete
+2026-04-23 15:41:59 +03:00 Phase 6.3 output/software/bin no longer ships DirectPortMFCamera.dll or DirectPortMFGraphicsCapture.dll complete
+2026-04-23 15:41:59 +03:00 Phase 6.1 validation software-project/build.ps1 succeeded and output/software/bin verified
+2026-04-23 16:08:22 +03:00 Phase 6.1 move legacy MF/WinRT sources into VirtuaCamLegacy so default VirtuaCam tree has no winrt refs complete

@@ -9,12 +9,9 @@ set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "$<IF:$<CONFIG:Debug>,MultiThreadedDebugDLL,MultiThreadedDLL>")
 
 find_package(wil CONFIG REQUIRED)
-option(VCAM_ENABLE_LEGACY_MF_COMPONENTS "Build legacy MF/WinRT virtual-camera components" OFF)
-if (VCAM_ENABLE_LEGACY_MF_COMPONENTS)
-    find_package(cppwinrt CONFIG REQUIRED)
-endif()
+
 set(VCAM_COMMON_VCPKG_LIBS WIL::WIL)
-set(VCAM_CPPWINRT_LIBS Microsoft::CppWinRT)
+
 set(VCAM_MF_LIBS mfplat mfuuid mfreadwrite mf)
 set(VCAM_MF_GUID_LIBS mfuuid)
 set(VCAM_D3D_LIBS d3d11 d2d1 dwrite windowscodecs d3d12 d3dcompiler dxgi)
@@ -34,11 +31,7 @@ target_link_libraries(VirtuaCamCommon PUBLIC ${VCAM_COMMON_VCPKG_LIBS} ${VCAM_D3
 target_compile_definitions(VirtuaCamCommon PRIVATE UNICODE _UNICODE)
 
 add_library(DirectPortClient SHARED
-    $<$<BOOL:${VCAM_ENABLE_LEGACY_MF_COMPONENTS}>:VirtuaCamLegacy/MFClient.cpp>
-    $<$<BOOL:${VCAM_ENABLE_LEGACY_MF_COMPONENTS}>:VirtuaCam/BrokerClient.cpp>
-    $<$<BOOL:${VCAM_ENABLE_LEGACY_MF_COMPONENTS}>:VirtuaCamLegacy/pch_legacy.cpp>
-    $<$<BOOL:${VCAM_ENABLE_LEGACY_MF_COMPONENTS}>:VirtuaCamLegacy/pch_legacy.h>
-    $<$<NOT:$<BOOL:${VCAM_ENABLE_LEGACY_MF_COMPONENTS}>>:VirtuaCam/DirectPortClientStub.cpp>
+    VirtuaCam/DirectPortClientStub.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/DirectPortClient.def"
 )
 set(DEF_FILE "${CMAKE_CURRENT_BINARY_DIR}/DirectPortClient.def")
@@ -47,12 +40,7 @@ set_target_properties(DirectPortClient PROPERTIES
     OUTPUT_NAME "DirectPortClient"
 )
 target_link_libraries(DirectPortClient PRIVATE VirtuaCamCommon)
-if (VCAM_ENABLE_LEGACY_MF_COMPONENTS)
-    target_link_libraries(DirectPortClient PRIVATE ${VCAM_CPPWINRT_LIBS} ${VCAM_MF_LIBS})
-    target_precompile_headers(DirectPortClient PRIVATE VirtuaCamLegacy/pch_legacy.h)
-    target_include_directories(DirectPortClient PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/VirtuaCam ${CMAKE_CURRENT_SOURCE_DIR}/VirtuaCamLegacy)
-    target_compile_definitions(DirectPortClient PRIVATE VCAM_ENABLE_LEGACY_MF_COMPONENTS=1)
-endif()
+
 target_compile_definitions(DirectPortClient PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE)
 
 add_library(DirectPortBroker SHARED
@@ -69,30 +57,7 @@ target_compile_definitions(DirectPortBroker PRIVATE _WINDOWS _USRDLL UNICODE _UN
 
 set(DEF_PRODUCER "${CMAKE_CURRENT_BINARY_DIR}/Producer.def")
 file(WRITE ${DEF_PRODUCER} "EXPORTS\n    InitializeProducer\n    ProcessFrame\n    ShutdownProducer\n")
-if (VCAM_ENABLE_LEGACY_MF_COMPONENTS)
-    add_library(DirectPortMFCamera SHARED
-        VirtuaCam/MFCamera.cpp
-        VirtuaCam/pch.cpp
-        "${CMAKE_CURRENT_BINARY_DIR}/Producer.def"
-    )
-    set_target_properties(DirectPortMFCamera PROPERTIES OUTPUT_NAME "DirectPortMFCamera")
-    target_link_libraries(DirectPortMFCamera PRIVATE VirtuaCamCommon)
-    target_link_libraries(DirectPortMFCamera PRIVATE ${VCAM_MF_LIBS})
-    target_compile_definitions(DirectPortMFCamera PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE PRODUCER_EXPORTS VCAM_ENABLE_LEGACY_MF_COMPONENTS=1)
-    target_precompile_headers(DirectPortMFCamera PRIVATE VirtuaCam/pch.h)
 
-    add_library(DirectPortMFGraphicsCapture SHARED
-        VirtuaCamLegacy/MFGraphicsCapture.cpp
-        VirtuaCamLegacy/pch_legacy.cpp
-        "${CMAKE_CURRENT_BINARY_DIR}/Producer.def"
-    )
-    set_target_properties(DirectPortMFGraphicsCapture PROPERTIES OUTPUT_NAME "DirectPortMFGraphicsCapture")
-    target_link_libraries(DirectPortMFGraphicsCapture PRIVATE VirtuaCamCommon)
-    target_link_libraries(DirectPortMFGraphicsCapture PRIVATE ${VCAM_CPPWINRT_LIBS})
-    target_compile_definitions(DirectPortMFGraphicsCapture PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE PRODUCER_EXPORTS VCAM_ENABLE_LEGACY_MF_COMPONENTS=1)
-    target_precompile_headers(DirectPortMFGraphicsCapture PRIVATE VirtuaCamLegacy/pch_legacy.h)
-    target_include_directories(DirectPortMFGraphicsCapture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/VirtuaCam ${CMAKE_CURRENT_SOURCE_DIR}/VirtuaCamLegacy)
-endif()
 
 add_library(DirectPortConsumer SHARED
     VirtuaCam/Consumer.cpp

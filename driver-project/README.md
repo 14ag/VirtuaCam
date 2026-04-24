@@ -24,11 +24,8 @@ Artifacts land in `v2/output/driver/package`.
    - Command: `pnputil /add-driver avshws.inf /install`
    - UI: `hdwwiz.exe` (Add legacy hardware).
 
+
 ## UserMode Software
 Main suite in `software-project/`.
 - `VirtuaCam.exe`: Primary UI.
 - `DriverBridge.cpp`: Library for direct driver frame push.
-
-Legacy examples in `UserLand/` for standalone testing:
-- `UserDriverStaticImage`: Pushes fixed image.
-- `UserDriverCanon`: (Legacy) Pushes Canon EOS live view.
