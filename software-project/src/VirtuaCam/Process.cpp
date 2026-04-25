@@ -30,6 +30,8 @@ using Microsoft::WRL::ComPtr;
 namespace
 {
     constexpr wchar_t kClientRequestEventName[] = L"VirtuaCamClientRequest";
+    constexpr DWORD kWatcherOpenRetryMs = 1000;
+    constexpr DWORD kProducerIdleWaitMs = 1;
 
     struct HString
     {
@@ -502,21 +504,23 @@ namespace BuiltInCaptureProducer
         return true;
     }
 
+    HANDLE OpenClientRequestEventHandle()
+    {
+        return OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kClientRequestEventName);
+    }
+
     DWORD WINAPI WatcherThreadProc(LPVOID)
     {
         int launchFailCount = 0;
         while (true) {
-            HANDLE requestEvent = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kClientRequestEventName);
+            HANDLE requestEvent = OpenClientRequestEventHandle();
             if (!requestEvent) {
-                Sleep(2000);
+                Sleep(kWatcherOpenRetryMs);
                 continue;
             }
 
             while (true) {
-                DWORD waitResult = WaitForSingleObject(requestEvent, 2000);
-                if (waitResult == WAIT_TIMEOUT) {
-                    continue;
-                }
+                DWORD waitResult = WaitForSingleObject(requestEvent, INFINITE);
                 if (waitResult != WAIT_OBJECT_0) {
                     break;
                 }
@@ -879,8 +883,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         }
         else
         {
-            module.Process();
-            Sleep(1); 
+            DWORD waitResult = MsgWaitForMultipleObjectsEx(
+                0,
+                nullptr,
+                kProducerIdleWaitMs,
+                QS_ALLINPUT,
+                MWMO_INPUTAVAILABLE);
+            if (waitResult == WAIT_TIMEOUT) {
+                module.Process();
+            }
         }
     }
 

@@ -92,6 +92,7 @@ private:
     //
     KSPIN_LOCK m_ListLock;
     LIST_ENTRY m_ScatterGatherMappings;
+    NPAGED_LOOKASIDE_LIST m_ScatterGatherLookaside;
 
     //
     // The current state of the fake hardware.
@@ -186,9 +187,7 @@ public:
     // The hardware simulation destructor.
     //
     ~CHardwareSimulation (
-        )
-    {
-    }
+        );
 
     //
     // Cleanup():

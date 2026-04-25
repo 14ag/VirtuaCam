@@ -27,6 +27,7 @@
 /*************************************************/
 KDEFERRED_ROUTINE SimulatedInterrupt;
 static const LONGLONG kClientHeartbeatTimeout100ns = 20000000LL;
+static const ULONG kScatterGatherEntryTag = 'nEGS';
 
 void
 SimulatedInterrupt (
@@ -106,7 +107,22 @@ Return Value:
 
     KeInitializeSpinLock (&m_ListLock);
     KeInitializeSpinLock (&m_FrameLock);
+    ExInitializeNPagedLookasideList(
+        &m_ScatterGatherLookaside,
+        NULL,
+        NULL,
+        0,
+        sizeof(SCATTER_GATHER_ENTRY),
+        kScatterGatherEntryTag,
+        0);
 
+}
+
+CHardwareSimulation::
+~CHardwareSimulation (
+    )
+{
+    ExDeleteNPagedLookasideList(&m_ScatterGatherLookaside);
 }
 
 /*************************************************/
@@ -305,15 +321,15 @@ Return Value:
         }
         m_ClientRequestEventObject = NULL;
         if (m_DefaultFrameBuffer) {
-            ExFreePool(m_DefaultFrameBuffer);
+            ExFreePoolWithTag(m_DefaultFrameBuffer, AVSHWS_POOLTAG);
             m_DefaultFrameBuffer = NULL;
         }
         if (m_TemporaryBuffer) {
-            ExFreePool(m_TemporaryBuffer);
+            ExFreePoolWithTag(m_TemporaryBuffer, AVSHWS_POOLTAG);
             m_TemporaryBuffer = NULL;
         }
         if (m_SynthesisBuffer) {
-            ExFreePool(m_SynthesisBuffer);
+            ExFreePoolWithTag(m_SynthesisBuffer, AVSHWS_POOLTAG);
             m_SynthesisBuffer = NULL;
         }
     }
@@ -469,17 +485,17 @@ Return Value:
     m_ImageSynth -> SetBuffer (NULL);
 
     if (m_SynthesisBuffer) {
-        ExFreePool (m_SynthesisBuffer);
+        ExFreePoolWithTag (m_SynthesisBuffer, AVSHWS_POOLTAG);
         m_SynthesisBuffer = NULL;
     }
 
 	if (m_TemporaryBuffer) {
-		ExFreePool(m_TemporaryBuffer);
+		ExFreePoolWithTag(m_TemporaryBuffer, AVSHWS_POOLTAG);
 		m_TemporaryBuffer = NULL;
 	}
 
     if (m_DefaultFrameBuffer) {
-        ExFreePool(m_DefaultFrameBuffer);
+        ExFreePoolWithTag(m_DefaultFrameBuffer, AVSHWS_POOLTAG);
         m_DefaultFrameBuffer = NULL;
     }
 
@@ -511,7 +527,7 @@ Return Value:
         // 
         // Release the scatter / gather entry back to our lookaside. 
         // 
-        ExFreePool (SGEntry);
+        ExFreeToNPagedLookasideList(&m_ScatterGatherLookaside, SGEntry);
     } 
 
     m_NumMappingsCompleted = 0;
@@ -601,60 +617,36 @@ Return Value:
 --*/
 
 {
-
-    KIRQL Irql;
-
     ULONG MappingsInserted = 0;
-
-    //
-    // Protect our S/G list with a spinlock.
-    //
-    KeAcquireSpinLock (&m_ListLock, &Irql);
-
-    //
-    // Loop through the scatter / gather list and break the buffer up into
-    // chunks equal to the scatter / gather mappings.  Stuff the virtual
-    // addresses of these chunks on a list somewhere.  We update the buffer
-    // pointer the caller passes as a more convenient way of doing this.
-    //
-    // If I could just remap physical in the list to virtual easily here,
-    // I wouldn't need to do it.
-    //
-    do
-    {
-        PSCATTER_GATHER_ENTRY Entry =
-            reinterpret_cast <PSCATTER_GATHER_ENTRY> (
-                ExAllocatePoolWithTag (
-                    NonPagedPoolNx,
-                    sizeof (SCATTER_GATHER_ENTRY),
-                    'nEGS'
-                    )
-                );
-
-        if (!Entry) {
-            break;
-        }
-        Entry -> Virtual    = *Buffer;
-        Entry -> ByteCount  = MappingsCount;
-        Entry -> CloneEntry = Clone;
-
-        //
-        // Move forward a specific number of bytes in chunking this into
-        // mapping sized va buffers.
-        //
-        *Buffer += MappingsCount;
-        Mappings = reinterpret_cast <PKSMAPPING> (
-            (reinterpret_cast <PUCHAR> (Mappings) + MappingStride)
+    PSCATTER_GATHER_ENTRY Entry =
+        reinterpret_cast <PSCATTER_GATHER_ENTRY> (
+            ExAllocateFromNPagedLookasideList(&m_ScatterGatherLookaside)
             );
 
-        InsertTailList (&m_ScatterGatherMappings, &(Entry -> ListEntry));
-        MappingsInserted = MappingsCount;
-        m_ScatterGatherMappingsQueued++;
-        m_ScatterGatherBytesQueued += MappingsCount;
+    if (!Entry) {
+        return 0;
+    }
 
-   }
-    while(FALSE);
+    Entry -> Virtual    = *Buffer;
+    Entry -> ByteCount  = MappingsCount;
+    Entry -> CloneEntry = Clone;
 
+    //
+    // Move forward before taking the list lock so the lock only protects
+    // queue metadata updates.
+    //
+    *Buffer += MappingsCount;
+    Mappings = reinterpret_cast <PKSMAPPING> (
+        (reinterpret_cast <PUCHAR> (Mappings) + MappingStride)
+        );
+    UNREFERENCED_PARAMETER(Mappings);
+
+    KIRQL Irql;
+    KeAcquireSpinLock (&m_ListLock, &Irql);
+    InsertTailList (&m_ScatterGatherMappings, &(Entry -> ListEntry));
+    MappingsInserted = MappingsCount;
+    m_ScatterGatherMappingsQueued++;
+    m_ScatterGatherBytesQueued += MappingsCount;
     KeReleaseSpinLock (&m_ListLock, Irql);
 
     return MappingsInserted;
@@ -687,13 +679,6 @@ Return Value:
 --*/
 
 {
-
-    //
-    // We're using this list lock to protect our scatter / gather lists instead
-    // of some hardware mechanism / KeSynchronizeExecution / whatever.
-    //
-    KeAcquireSpinLockAtDpcLevel (&m_ListLock);
-
     PUCHAR Buffer = reinterpret_cast <PUCHAR> (m_SynthesisBuffer);
     ULONG BufferRemaining = m_ImageSize;
 
@@ -705,21 +690,31 @@ Return Value:
     // This could be enforced by only programming scatter / gather mappings
     // for a buffer if all of them fit in the table also...
     //
-    while (BufferRemaining &&
-        m_ScatterGatherMappingsQueued > 0 &&
-        m_ScatterGatherBytesQueued >= BufferRemaining) {
+    while (BufferRemaining) {
+        PSCATTER_GATHER_ENTRY SGEntry = NULL;
+
+        //
+        // Protect only list manipulation and shared queue counters.
+        //
+        KeAcquireSpinLockAtDpcLevel (&m_ListLock);
+        if (m_ScatterGatherMappingsQueued == 0 ||
+            m_ScatterGatherBytesQueued < BufferRemaining) {
+            KeReleaseSpinLockFromDpcLevel (&m_ListLock);
+            break;
+        }
 
         LIST_ENTRY *listEntry = RemoveHeadList (&m_ScatterGatherMappings);
         m_ScatterGatherMappingsQueued--;
 
-        PSCATTER_GATHER_ENTRY SGEntry =  
-            reinterpret_cast <PSCATTER_GATHER_ENTRY> (
-                CONTAINING_RECORD (
-                    listEntry,
-                    SCATTER_GATHER_ENTRY,
-                    ListEntry
-                    )
-                );
+        SGEntry = reinterpret_cast <PSCATTER_GATHER_ENTRY> (
+            CONTAINING_RECORD (
+                listEntry,
+                SCATTER_GATHER_ENTRY,
+                ListEntry
+                )
+            );
+        m_ScatterGatherBytesQueued -= SGEntry -> ByteCount;
+        KeReleaseSpinLockFromDpcLevel (&m_ListLock);
 
         //
         // Since we're software, we'll be accessing this by virtual address...
@@ -754,16 +749,13 @@ Return Value:
         }
 
         m_NumMappingsCompleted++;
-        m_ScatterGatherBytesQueued -= SGEntry -> ByteCount;
 
         //
         // Release the scatter / gather entry back to our lookaside.
         //
-        ExFreePool (SGEntry);
+        ExFreeToNPagedLookasideList(&m_ScatterGatherLookaside, SGEntry);
 
     }
-    
-    KeReleaseSpinLockFromDpcLevel (&m_ListLock);
 
     if (BufferRemaining) return STATUS_INSUFFICIENT_RESOURCES;
     else return STATUS_SUCCESS;

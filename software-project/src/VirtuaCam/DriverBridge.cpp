@@ -57,6 +57,8 @@ HRESULT DriverBridge::Initialize()
 void DriverBridge::Shutdown()
 {
     m_active = false;
+    m_sourceSrv.reset();
+    m_sourceTexture.reset();
     m_samplerState.reset();
     m_pixelShader.reset();
     m_vertexShader.reset();
@@ -183,6 +185,20 @@ HRESULT DriverBridge::EnsureGpuResources(ID3D11Texture2D* sourceTexture)
     return S_OK;
 }
 
+HRESULT DriverBridge::EnsureSourceTextureView(ID3D11Texture2D* sourceTexture)
+{
+    RETURN_HR_IF_NULL(E_POINTER, sourceTexture);
+
+    if (m_sourceTexture.get() == sourceTexture && m_sourceSrv) {
+        return S_OK;
+    }
+
+    m_sourceSrv.reset();
+    m_sourceTexture = sourceTexture;
+    RETURN_IF_FAILED(m_device->CreateShaderResourceView(sourceTexture, nullptr, m_sourceSrv.put()));
+    return S_OK;
+}
+
 HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
 {
     static volatile LONG s_driverFrameCount = 0;
@@ -303,22 +319,18 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
 {
     RETURN_HR_IF(E_UNEXPECTED, !m_active);
     RETURN_IF_FAILED(EnsureGpuResources(sourceTexture));
+    RETURN_IF_FAILED(EnsureSourceTextureView(sourceTexture));
 
-    wil::com_ptr_nothrow<ID3D11ShaderResourceView> sourceSrv;
-    RETURN_IF_FAILED(m_device->CreateShaderResourceView(sourceTexture, nullptr, sourceSrv.put()));
-
-    const float clearColor[] = { 0.f, 0.f, 0.f, 1.f };
     D3D11_VIEWPORT viewport = { 0.f, 0.f, static_cast<float>(kDriverWidth), static_cast<float>(kDriverHeight), 0.f, 1.f };
     ID3D11RenderTargetView* rtvs[] = { m_scaledRtv.get() };
 
     m_context->OMSetRenderTargets(1, rtvs, nullptr);
-    m_context->ClearRenderTargetView(m_scaledRtv.get(), clearColor);
     m_context->RSSetViewports(1, &viewport);
     m_context->VSSetShader(m_vertexShader.get(), nullptr, 0);
     m_context->PSSetShader(m_pixelShader.get(), nullptr, 0);
     ID3D11SamplerState* samplers[] = { m_samplerState.get() };
     m_context->PSSetSamplers(0, 1, samplers);
-    ID3D11ShaderResourceView* srvs[] = { sourceSrv.get() };
+    ID3D11ShaderResourceView* srvs[] = { m_sourceSrv.get() };
     m_context->PSSetShaderResources(0, 1, srvs);
     m_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     m_context->Draw(3, 0);
