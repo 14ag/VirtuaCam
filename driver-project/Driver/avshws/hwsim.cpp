@@ -63,7 +63,8 @@ CHardwareSimulation (
     IN IHardwareSink *HardwareSink
     ) :
     m_HardwareSink (HardwareSink),
-    m_ScatterGatherMappingsMax (SCATTER_GATHER_MAPPINGS_MAX)
+    m_ScatterGatherMappingsMax (SCATTER_GATHER_MAPPINGS_MAX),
+    m_ScatterGatherLookasideInitialized (FALSE)
 
 /*++
 
@@ -107,14 +108,18 @@ Return Value:
 
     KeInitializeSpinLock (&m_ListLock);
     KeInitializeSpinLock (&m_FrameLock);
-    ExInitializeNPagedLookasideList(
+    NTSTATUS LookasideStatus = ExInitializeLookasideListEx(
         &m_ScatterGatherLookaside,
         NULL,
         NULL,
+        NonPagedPoolNx,
         0,
         sizeof(SCATTER_GATHER_ENTRY),
         kScatterGatherEntryTag,
         0);
+    if (NT_SUCCESS(LookasideStatus)) {
+        m_ScatterGatherLookasideInitialized = TRUE;
+    }
 
 }
 
@@ -122,7 +127,9 @@ CHardwareSimulation::
 ~CHardwareSimulation (
     )
 {
-    ExDeleteNPagedLookasideList(&m_ScatterGatherLookaside);
+    if (m_ScatterGatherLookasideInitialized) {
+        ExDeleteLookasideListEx(&m_ScatterGatherLookaside);
+    }
 }
 
 /*************************************************/
@@ -236,8 +243,8 @@ Return Value:
     // Allocate a scratch buffer for the synthesizer.
     //
     m_SynthesisBuffer = reinterpret_cast <PUCHAR> (
-        ExAllocatePoolWithTag (
-            NonPagedPoolNx,
+        ExAllocatePool2 (
+            POOL_FLAG_NON_PAGED,
             m_ImageSize,
             AVSHWS_POOLTAG
             )
@@ -251,8 +258,8 @@ Return Value:
 	// Allocate a temporary frame buffer;
 	//
 	m_TemporaryBuffer = reinterpret_cast <PUCHAR> (
-		ExAllocatePoolWithTag(
-			NonPagedPoolNx,
+		ExAllocatePool2(
+			POOL_FLAG_NON_PAGED,
 			m_ImageSize,
 			AVSHWS_POOLTAG
 			)
@@ -262,17 +269,14 @@ Return Value:
 		Status = STATUS_INSUFFICIENT_RESOURCES;
 	}
 
-	RtlZeroMemory(m_TemporaryBuffer, m_ImageSize);
-
     m_DefaultFrameBuffer = reinterpret_cast<PUCHAR>(
-        ExAllocatePoolWithTag(
-            NonPagedPoolNx,
+        ExAllocatePool2(
+            POOL_FLAG_NON_PAGED,
             m_ImageSize,
             AVSHWS_POOLTAG));
     if (!m_DefaultFrameBuffer) {
         Status = STATUS_INSUFFICIENT_RESOURCES;
     } else {
-        RtlZeroMemory(m_DefaultFrameBuffer, m_ImageSize);
         if (m_ImageSynth && m_ImageSynth->GetBytesPerPixel() == 3) {
             for (ULONG i = 0; i + 2 < m_ImageSize; i += 3) {
                 m_DefaultFrameBuffer[i] = 0xFF; // B channel in BGR24
@@ -527,7 +531,11 @@ Return Value:
         // 
         // Release the scatter / gather entry back to our lookaside. 
         // 
-        ExFreeToNPagedLookasideList(&m_ScatterGatherLookaside, SGEntry);
+        if (m_ScatterGatherLookasideInitialized) {
+            ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
+        } else {
+            ExFreePoolWithTag(SGEntry, kScatterGatherEntryTag);
+        }
     } 
 
     m_NumMappingsCompleted = 0;
@@ -618,10 +626,21 @@ Return Value:
 
 {
     ULONG MappingsInserted = 0;
-    PSCATTER_GATHER_ENTRY Entry =
-        reinterpret_cast <PSCATTER_GATHER_ENTRY> (
-            ExAllocateFromNPagedLookasideList(&m_ScatterGatherLookaside)
+    PSCATTER_GATHER_ENTRY Entry = NULL;
+
+    if (m_ScatterGatherLookasideInitialized) {
+        Entry = reinterpret_cast <PSCATTER_GATHER_ENTRY> (
+            ExAllocateFromLookasideListEx(&m_ScatterGatherLookaside)
             );
+    } else {
+        Entry = reinterpret_cast <PSCATTER_GATHER_ENTRY> (
+            ExAllocatePool2(
+                POOL_FLAG_NON_PAGED,
+                sizeof(SCATTER_GATHER_ENTRY),
+                kScatterGatherEntryTag
+                )
+            );
+    }
 
     if (!Entry) {
         return 0;
@@ -753,7 +772,11 @@ Return Value:
         //
         // Release the scatter / gather entry back to our lookaside.
         //
-        ExFreeToNPagedLookasideList(&m_ScatterGatherLookaside, SGEntry);
+        if (m_ScatterGatherLookasideInitialized) {
+            ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
+        } else {
+            ExFreePoolWithTag(SGEntry, kScatterGatherEntryTag);
+        }
 
     }
 

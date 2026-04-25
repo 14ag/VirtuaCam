@@ -92,7 +92,8 @@ private:
     //
     KSPIN_LOCK m_ListLock;
     LIST_ENTRY m_ScatterGatherMappings;
-    NPAGED_LOOKASIDE_LIST m_ScatterGatherLookaside;
+    LOOKASIDE_LIST_EX m_ScatterGatherLookaside;
+    BOOLEAN m_ScatterGatherLookasideInitialized;
 
     //
     // The current state of the fake hardware.

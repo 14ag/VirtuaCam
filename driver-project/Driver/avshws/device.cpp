@@ -22,6 +22,25 @@
 
 #include "avshws.h"
 
+static
+POOL_FLAGS
+AvshwsPoolTypeToFlags(
+    _In_ POOL_TYPE PoolType
+    )
+{
+    if (PoolType == PagedPool) {
+        return POOL_FLAG_PAGED;
+    }
+
+#ifdef POOL_FLAG_NON_PAGED_EXECUTE
+    if (PoolType == NonPagedPoolExecute) {
+        return POOL_FLAG_NON_PAGED_EXECUTE;
+    }
+#endif
+
+    return POOL_FLAG_NON_PAGED;
+}
+
 PVOID operator new
 (
     size_t          iSize,
@@ -31,13 +50,7 @@ PVOID operator new
     POOL_TYPE       poolType
 )
 {
-    PVOID result = ExAllocatePoolWithTag(poolType,iSize,'wNCK');
-
-    if (result) {
-        RtlZeroMemory(result,iSize);
-    }
-
-    return result;
+    return ExAllocatePool2(AvshwsPoolTypeToFlags(poolType), iSize, 'wNCK');
 }
 
 PVOID operator new
@@ -50,13 +63,7 @@ PVOID operator new
     ULONG           tag
 )
 {
-    PVOID result = ExAllocatePoolWithTag(poolType,iSize,tag);
-
-    if (result) {
-        RtlZeroMemory(result,iSize);
-    }
-
-    return result;
+    return ExAllocatePool2(AvshwsPoolTypeToFlags(poolType), iSize, tag);
 }
 
 PVOID 
@@ -69,14 +76,7 @@ operator new[](
     ULONG           tag
 )
 {
-    PVOID result = ExAllocatePoolWithTag(poolType, iSize, tag);
-
-    if (result)
-    {
-        RtlZeroMemory(result, iSize);
-    }
-
-    return result;
+    return ExAllocatePool2(AvshwsPoolTypeToFlags(poolType), iSize, tag);
 }
 
 /*++
@@ -103,7 +103,7 @@ operator delete[](
 {
     if (pVoid)
     {
-        ExFreePool(pVoid);
+        ExFreePoolWithTag(pVoid, 0);
     }
 }
 
@@ -134,7 +134,7 @@ void __cdecl operator delete
 {
     if (pVoid)
     {
-        ExFreePool(pVoid);
+        ExFreePoolWithTag(pVoid, 0);
     }
 }
 
@@ -165,7 +165,7 @@ void __cdecl operator delete[]
 {
     if (pVoid)
     {
-        ExFreePool(pVoid);
+        ExFreePoolWithTag(pVoid, 0);
     }
 }
 
@@ -175,7 +175,7 @@ void __cdecl operator delete
     )
 {
     if (pVoid) {
-        ExFreePool(pVoid);
+        ExFreePoolWithTag(pVoid, 0);
     }
 }
 

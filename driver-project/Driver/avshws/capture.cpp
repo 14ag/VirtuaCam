@@ -266,8 +266,8 @@ Return Value:
             VideoInfoHeader);
 
     m_VideoInfoHeader = reinterpret_cast <PKS_VIDEOINFOHEADER> (
-        ExAllocatePoolWithTag (
-            NonPagedPoolNx,
+        ExAllocatePool2 (
+            POOL_FLAG_NON_PAGED,
             KS_SIZE_VIDEOHEADER (ConnectionHeader),
             AVSHWS_POOLTAG
             )
@@ -289,7 +289,7 @@ Return Value:
 
     if (!NT_SUCCESS (Status)) {
 
-        ExFreePool (m_VideoInfoHeader);
+        ExFreePoolWithTag (m_VideoInfoHeader, AVSHWS_POOLTAG);
         return NULL;
 
     } else {
