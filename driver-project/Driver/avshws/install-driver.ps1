@@ -52,7 +52,8 @@ function Assert-Administrator {
 function Invoke-NativeProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [int[]]$AllowedExitCodes = @(0)
     )
 
     $all = @($Arguments)
@@ -63,7 +64,7 @@ function Invoke-NativeProcess {
         $output | ForEach-Object { Write-Log $_ }
     }
 
-    if ($LASTEXITCODE -ne 0) {
+    if ($AllowedExitCodes -notcontains $LASTEXITCODE) {
         Exit-WithCode -Code 5 -Message ("{0} failed with exit code {1}." -f $FilePath, $LASTEXITCODE)
     }
 }
@@ -77,7 +78,8 @@ function Import-TestCertificateIfPresent {
     }
 
     if (-not (Test-Path -LiteralPath $Path)) {
-        Exit-WithCode -Code 3 -Message "Test certificate not found: $Path"
+        Write-Log "Test certificate not found ($Path). Continuing without cert import (TESTSIGNING mode expected)."
+        return
     }
 
     $tempCert = Join-Path $env:TEMP ("avshws-cert-{0}.cer" -f [Guid]::NewGuid().ToString("N"))
@@ -97,6 +99,32 @@ function Get-AvshwsDevices {
 
     Get-CimInstance Win32_PnPEntity |
         Where-Object { $_.PNPDeviceID -like ("ROOT\{0}\*" -f $Id) }
+}
+
+function Remove-ExistingDriverPackageIfRequested {
+    param([string]$Id)
+
+    if (-not $ForceDriverRebind) {
+        return
+    }
+
+    $signedDrivers = Get-CimInstance Win32_PnPSignedDriver |
+        Where-Object { $_.DeviceID -like ("ROOT\{0}\*" -f $Id) -and $_.InfName }
+
+    $infNames = @($signedDrivers | Select-Object -ExpandProperty InfName -Unique)
+    if ($infNames.Count -eq 0) {
+        Write-Log "ForceDriverRebind: no existing OEM INF bound to ROOT\\$Id."
+        return
+    }
+
+    foreach ($inf in $infNames) {
+        if ($inf -match '^oem\d+\.inf$') {
+            Write-Log "ForceDriverRebind: removing existing package $inf"
+            Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/delete-driver", $inf, "/uninstall", "/force") -AllowedExitCodes @(0,259,3010)
+        } else {
+            Write-Log "ForceDriverRebind: skipping non-OEM INF '$inf'"
+        }
+    }
 }
 
 function Assert-Prereqs {
@@ -125,7 +153,7 @@ function Assert-Prereqs {
         Exit-WithCode -Code 3 -Message "PackageRoot not found: $PackageRoot"
     }
 
-    foreach ($f in @($InfPath, (Join-Path $PackageRoot "avshws.sys"), (Join-Path $PackageRoot "avshws.cat"))) {
+    foreach ($f in @($InfPath, (Join-Path $PackageRoot "avshws.sys"))) {
         if (-not (Test-Path -LiteralPath $f)) {
             Exit-WithCode -Code 3 -Message "Required package file missing: $f"
         }
@@ -133,7 +161,7 @@ function Assert-Prereqs {
 
     if (-not $SkipCertificateImport) {
         if (-not (Test-Path -LiteralPath $CertificatePath)) {
-            Exit-WithCode -Code 3 -Message "Certificate missing: $CertificatePath"
+            Write-Log "Certificate missing ($CertificatePath). Continuing without cert import."
         }
     }
 
@@ -297,7 +325,9 @@ $resolvedInf = (Resolve-Path -LiteralPath $InfPath).Path
 
 Import-TestCertificateIfPresent -Path $CertificatePath
 
-Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $resolvedInf, "/install")
+Remove-ExistingDriverPackageIfRequested -Id $HardwareId
+
+Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $resolvedInf, "/install") -AllowedExitCodes @(0,259)
 
 $existingDevices = @(Get-AvshwsDevices -Id $HardwareId)
 if ($existingDevices.Count -eq 0) {
