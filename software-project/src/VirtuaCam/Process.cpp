@@ -14,6 +14,7 @@
 #include <mfreadwrite.h>
 #include <sddl.h>
 #include <atomic>
+#include <tlhelp32.h>
 
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
@@ -28,6 +29,8 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
+    constexpr wchar_t kClientRequestEventName[] = L"VirtuaCamClientRequest";
+
     struct HString
     {
         HSTRING value = nullptr;
@@ -112,7 +115,7 @@ namespace
     }
 }
 
-bool ParseCommandLine(const WCHAR* cmdLine, std::wstring& type, std::wstring& args)
+    bool ParseCommandLine(const WCHAR* cmdLine, std::wstring& type, std::wstring& args)
 {
     UNREFERENCED_PARAMETER(cmdLine);
 
@@ -418,6 +421,121 @@ namespace BuiltInCaptureProducer
 
         RoUninitialize();
     }
+
+    bool IsProcessRunning(const wchar_t* processName)
+    {
+        if (!processName || !*processName) {
+            return false;
+        }
+
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+
+        PROCESSENTRY32W pe = {};
+        pe.dwSize = sizeof(pe);
+        bool found = false;
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                if (_wcsicmp(pe.szExeFile, processName) == 0) {
+                    found = true;
+                    break;
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+        return found;
+    }
+
+    std::wstring GetDefaultVirtuaCamExePath()
+    {
+        wchar_t modulePath[MAX_PATH] = {};
+        if (!GetModuleFileNameW(nullptr, modulePath, ARRAYSIZE(modulePath))) {
+            return L"VirtuaCam.exe";
+        }
+
+        std::wstring path = modulePath;
+        size_t slash = path.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            path.resize(slash + 1);
+        }
+        path += L"VirtuaCam.exe";
+        return path;
+    }
+
+    std::wstring GetVirtuaCamExePathFromRegistryOrDefault()
+    {
+        HKEY hKey = nullptr;
+        wchar_t value[MAX_PATH] = {};
+        DWORD valueSize = sizeof(value);
+        DWORD valueType = 0;
+
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\VirtuaCam", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            const LSTATUS status = RegQueryValueExW(hKey, L"VirtuaCamExe", nullptr, &valueType, reinterpret_cast<LPBYTE>(value), &valueSize);
+            RegCloseKey(hKey);
+            if (status == ERROR_SUCCESS && valueType == REG_SZ && value[0] != L'\0') {
+                return value;
+            }
+        }
+        return GetDefaultVirtuaCamExePath();
+    }
+
+    bool LaunchVirtuaCamStartup()
+    {
+        std::wstring exePath = GetVirtuaCamExePathFromRegistryOrDefault();
+
+        SHELLEXECUTEINFOW sei = {};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpFile = exePath.c_str();
+        sei.lpParameters = L"/startup";
+        sei.nShow = SW_HIDE;
+        if (!ShellExecuteExW(&sei)) {
+            VirtuaCamLog::LogWin32(std::format(L"ShellExecuteExW failed for {}", exePath), GetLastError());
+            return false;
+        }
+
+        if (sei.hProcess) {
+            CloseHandle(sei.hProcess);
+        }
+        return true;
+    }
+
+    DWORD WINAPI WatcherThreadProc(LPVOID)
+    {
+        int launchFailCount = 0;
+        while (true) {
+            HANDLE requestEvent = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kClientRequestEventName);
+            if (!requestEvent) {
+                Sleep(2000);
+                continue;
+            }
+
+            while (true) {
+                DWORD waitResult = WaitForSingleObject(requestEvent, 2000);
+                if (waitResult == WAIT_TIMEOUT) {
+                    continue;
+                }
+                if (waitResult != WAIT_OBJECT_0) {
+                    break;
+                }
+
+                if (!IsProcessRunning(L"VirtuaCam.exe")) {
+                    if (launchFailCount < 3) {
+                        if (LaunchVirtuaCamStartup()) {
+                            launchFailCount = 0;
+                        } else {
+                            launchFailCount++;
+                        }
+                    }
+                }
+                ResetEvent(requestEvent);
+            }
+
+            CloseHandle(requestEvent);
+        }
+    }
 }
 
 namespace BuiltInCameraProducer
@@ -718,10 +836,20 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 
     std::wstring producerType, producerArgs;
-    if (!ParseCommandLine(lpCmdLine, producerType, producerArgs))
-    {
-        VirtuaCamLog::LogLine(L"ParseCommandLine failed");
-        return 1;
+    const bool hasProducerType = ParseCommandLine(lpCmdLine, producerType, producerArgs);
+
+    if (!hasProducerType) {
+        VirtuaCamLog::LogLine(L"No --type provided; running watcher mode");
+        HANDLE watcherThread = CreateThread(nullptr, 0, BuiltInCaptureProducer::WatcherThreadProc, nullptr, 0, nullptr);
+        if (!watcherThread) {
+            VirtuaCamLog::LogWin32(L"CreateThread failed (watcher mode)", GetLastError());
+            CoUninitialize();
+            return 10;
+        }
+        WaitForSingleObject(watcherThread, INFINITE);
+        CloseHandle(watcherThread);
+        CoUninitialize();
+        return 0;
     }
 
     ProducerModule module;

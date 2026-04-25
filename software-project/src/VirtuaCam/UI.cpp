@@ -21,6 +21,7 @@ using namespace Microsoft::WRL;
 extern const VirtuaCam::Discovery* GetGlobalDiscovery();
 extern void InformBroker();
 void ShutdownSystem();
+extern void RequestDriverDisconnect();
 
 extern const SourceState& GetMainSourceState();
 extern void SetSourceMode(SourceMode newMode, DWORD_PTR context);
@@ -403,10 +404,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             else if (id == ID_TRAY_PREVIEW_WINDOW) CreatePreviewWindow();
             else if (id == ID_TRAY_ABOUT) DialogBox(g_instance, MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, About);
-            else if (id == ID_TRAY_EXIT) DestroyWindow(hwnd);
+            else if (id == ID_TRAY_EXIT) {
+                RequestDriverDisconnect();
+                DestroyWindow(hwnd);
+            }
         }
         break;
     }
+    case WM_QUERYENDSESSION:
+        RequestDriverDisconnect();
+        return TRUE;
+    case WM_ENDSESSION:
+        if (wParam) {
+            RequestDriverDisconnect();
+        }
+        return 0;
     case WM_DESTROY:
         PostQuitMessage(0);
         break;

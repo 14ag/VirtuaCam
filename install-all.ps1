@@ -3,7 +3,8 @@ param(
     [string]$OutputRoot = "",
     [string]$BuildConfig = "Release",
     [switch]$SkipDriverInstall,
-    [switch]$SkipDllRegister
+    [switch]$SkipDllRegister,
+    [switch]$Uninstall
 )
 
 # Set-StrictMode -Version Latest
@@ -26,6 +27,24 @@ Write-Host "============================================================" -Foreg
 Write-Host " Install All"
 Write-Host "============================================================" -ForegroundColor Green
 Write-Info "OutputRoot: $OutputRoot"
+
+$runKeyPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+$virtuaCamRegPath = "HKLM:\SOFTWARE\VirtuaCam"
+$installDir = $softwareBin
+$processExe = Join-Path $installDir "VirtuaCamProcess.exe"
+$virtuaCamExe = Join-Path $installDir "VirtuaCam.exe"
+
+if ($Uninstall) {
+    Write-Step "Uninstall startup and VirtuaCam registry entries"
+    Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCamProcess" -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCam" -ErrorAction SilentlyContinue
+    Remove-Item -Path $virtuaCamRegPath -Recurse -ErrorAction SilentlyContinue
+    Write-Success "Uninstall cleanup complete"
+    Write-Host "`n============================================================" -ForegroundColor Green
+    Write-Host " INSTALL-ALL UNINSTALL COMPLETED"
+    Write-Host "============================================================" -ForegroundColor Green
+    exit 0
+}
 
 Write-Step "Verify artifacts"
 foreach ($p in @(
@@ -69,6 +88,16 @@ if (-not $SkipDllRegister) {
 } else {
     Write-Info "Skip DLL register"
 }
+
+Write-Step "Configure VirtuaCam registry and startup"
+New-Item -Path $virtuaCamRegPath -Force | Out-Null
+Set-ItemProperty -Path $virtuaCamRegPath -Name "InstallDir" -Value $installDir
+Set-ItemProperty -Path $virtuaCamRegPath -Name "VirtuaCamExe" -Value $virtuaCamExe
+Set-ItemProperty -Path $virtuaCamRegPath -Name "ProcessExe" -Value $processExe
+
+Set-ItemProperty -Path $runKeyPath -Name "VirtuaCamProcess" -Value "`"$processExe`""
+Set-ItemProperty -Path $runKeyPath -Name "VirtuaCam" -Value "`"$virtuaCamExe`" /startup"
+Write-Success "Configured HKLM\\SOFTWARE\\VirtuaCam and HKCU Run keys"
 
 Write-Host "`n============================================================" -ForegroundColor Green
 Write-Host " INSTALL-ALL SUCCEEDED"

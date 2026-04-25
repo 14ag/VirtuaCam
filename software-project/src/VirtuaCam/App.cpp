@@ -17,6 +17,7 @@ static HWND g_hMainWnd = NULL;
 static std::unique_ptr<WASAPICapture> g_audioCapture;
 static std::unique_ptr<VirtuaCam::Discovery> g_discovery;
 static std::unique_ptr<DriverBridge> g_driverBridge;
+static bool g_disconnectAttempted = false;
 
 typedef void (*PFN_InitializeBroker)();
 typedef void (*PFN_ShutdownBroker)();
@@ -54,11 +55,13 @@ bool IsRunningAsAdmin();
 bool GetDriverBridgeStatus();
 HRESULT LoadBroker();
 void ShutdownSystem();
+void RequestDriverDisconnect();
 void OnIdle();
 void TrySendBrokerFrameToDriver(bool brokerFrameRendered);
 void InformBroker();
 void LoadSettings();
 void SaveSettings();
+bool HasArg(const std::wstring& cmdLine, const wchar_t* arg);
 
 bool GetPipTlEnabled() { return g_showPipTL; }
 bool GetPipTrEnabled() { return g_showPipTR; }
@@ -215,6 +218,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     logOpts.allocConsoleIfMissing = false;
     VirtuaCamLog::Init(logOpts);
 
+    const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
+    const bool silentStart = HasArg(cmdLine, L"/startup") || HasArg(cmdLine, L"-startup");
+    if (silentStart) {
+        VirtuaCamLog::LogLine(L"Startup mode: /startup (tray-silent)");
+    }
+
     LoadSettings();
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 
@@ -252,10 +261,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     if (FAILED(hrDriver)) {
         VirtuaCamLog::LogHr(L"DriverBridge::Initialize failed", hrDriver);
         VirtuaCamLog::LogLine(std::format(L"DriverBridge last error: {}", g_driverBridge->GetLastError()));
-        std::wstring message =
-            L"DriverBridge failed to connect to the avshws kernel driver.\n"
-            L"Make sure driver-project is installed.";
-        VirtuaCamLog::ShowAndLogError(g_hMainWnd, message.c_str(), L"Error", hrDriver);
+        if (!silentStart) {
+            std::wstring message =
+                L"DriverBridge failed to connect to the avshws kernel driver.\n"
+                L"Make sure driver-project is installed.";
+            VirtuaCamLog::ShowAndLogError(g_hMainWnd, message.c_str(), L"Error", hrDriver);
+        }
+    } else {
+        HRESULT hrConnect = g_driverBridge->Connect();
+        if (FAILED(hrConnect)) {
+            VirtuaCamLog::LogHr(L"DriverBridge::Connect failed", hrConnect);
+        } else if (hrConnect == S_FALSE) {
+            VirtuaCamLog::LogLine(L"DriverBridge::Connect skipped (unsupported by current driver)");
+        } else {
+            VirtuaCamLog::LogLine(L"DriverBridge::Connect succeeded");
+        }
     }
 
     VirtuaCamLog::LogLine(L"Entering message loop.");
@@ -365,6 +385,8 @@ HRESULT LoadBroker() {
 }
 
 void ShutdownSystem() {
+    RequestDriverDisconnect();
+
     if (g_audioCapture) {
         g_audioCapture->StopCapture();
         g_audioCapture.reset();
@@ -400,6 +422,27 @@ void ShutdownSystem() {
     }
 
     UI_Shutdown();
+}
+
+void RequestDriverDisconnect()
+{
+    if (g_disconnectAttempted) {
+        return;
+    }
+    g_disconnectAttempted = true;
+
+    if (!g_driverBridge || !g_driverBridge->IsActive()) {
+        return;
+    }
+
+    HRESULT hr = g_driverBridge->Disconnect();
+    if (FAILED(hr)) {
+        VirtuaCamLog::LogHr(L"DriverBridge::Disconnect failed", hr);
+    } else if (hr == S_FALSE) {
+        VirtuaCamLog::LogLine(L"DriverBridge::Disconnect skipped (unsupported by current driver)");
+    } else {
+        VirtuaCamLog::LogLine(L"DriverBridge::Disconnect succeeded");
+    }
 }
 
 bool IsRunningAsAdmin() {
@@ -440,4 +483,24 @@ void SaveSettings() {
         RegSetValueExW(hKey, REG_VAL_PIPBL, 0, REG_DWORD, (const BYTE*)&dwValueBL, sizeof(dwValueBL));
         RegCloseKey(hKey);
     }
+}
+
+bool HasArg(const std::wstring& cmdLine, const wchar_t* arg)
+{
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(cmdLine.c_str(), &argc);
+    if (!argv) {
+        return false;
+    }
+
+    bool found = false;
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i] && _wcsicmp(argv[i], arg) == 0) {
+            found = true;
+            break;
+        }
+    }
+
+    LocalFree(argv);
+    return found;
 }

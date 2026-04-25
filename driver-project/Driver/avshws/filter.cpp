@@ -99,7 +99,7 @@ Return Value:
 
 }
 
-//  Get KSPROPERTY_CUSTOMCONTROL_DUMMY.
+//  Get VIRTUACAM_PROP_FRAME.
 NTSTATUS
 CCaptureFilter::
 GetData(
@@ -118,7 +118,7 @@ GetData(
 	return STATUS_SUCCESS;
 }
 
-//  Set KSPROPERTY_CUSTOMCONTROL_DUMMY.
+//  Set VIRTUACAM_PROP_FRAME.
 NTSTATUS
 CCaptureFilter::
 SetData(
@@ -152,6 +152,44 @@ SetData(
 	return STATUS_SUCCESS;
 }
 
+// Set VIRTUACAM_PROP_CONNECT.
+NTSTATUS
+CCaptureFilter::
+SetConnect(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    UNREFERENCED_PARAMETER(Request);
+    UNREFERENCED_PARAMETER(Data);
+    PAGED_CODE();
+
+    CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
+    CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
+    device->ConnectClient();
+    return STATUS_SUCCESS;
+}
+
+// Set VIRTUACAM_PROP_DISCONNECT.
+NTSTATUS
+CCaptureFilter::
+SetDisconnect(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    UNREFERENCED_PARAMETER(Request);
+    UNREFERENCED_PARAMETER(Data);
+    PAGED_CODE();
+
+    CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
+    CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
+    device->DisconnectClient();
+    return STATUS_SUCCESS;
+}
+
 /**************************************************************************
 
 	PROPERTY TABLE STUFF
@@ -161,7 +199,7 @@ SetData(
 DEFINE_KSPROPERTY_TABLE(CustomPropertyTable)
 {
 	{
-		0,											//PropertyId
+		VIRTUACAM_PROP_FRAME,                       //PropertyId
 		(PFNKSHANDLER)&CCaptureFilter::GetData,		//GetPropertyHandler
 		(ULONG)sizeof(KSPROPERTY),					//MinProperty
 		(ULONG)0,								//MinData
@@ -171,7 +209,31 @@ DEFINE_KSPROPERTY_TABLE(CustomPropertyTable)
 		(PKSPROPERTY)NULL,							//Relations
 		(PFNKSHANDLER)NULL,							//SupportHandler
 		(ULONG)0									//SerializedSize
-	}
+	},
+    {
+        VIRTUACAM_PROP_CONNECT,                     //PropertyId
+        (PFNKSHANDLER)NULL,                         //GetPropertyHandler
+        (ULONG)sizeof(KSPROPERTY),                  //MinProperty
+        (ULONG)0,                                   //MinData
+        (PFNKSHANDLER)&CCaptureFilter::SetConnect,  //SetPropertyHandler
+        (PKSPROPERTY_VALUES)NULL,                   //Values
+        0,                                          //RelationsCount
+        (PKSPROPERTY)NULL,                          //Relations
+        (PFNKSHANDLER)NULL,                         //SupportHandler
+        (ULONG)0                                    //SerializedSize
+    },
+    {
+        VIRTUACAM_PROP_DISCONNECT,                     //PropertyId
+        (PFNKSHANDLER)NULL,                            //GetPropertyHandler
+        (ULONG)sizeof(KSPROPERTY),                     //MinProperty
+        (ULONG)0,                                      //MinData
+        (PFNKSHANDLER)&CCaptureFilter::SetDisconnect,  //SetPropertyHandler
+        (PKSPROPERTY_VALUES)NULL,                      //Values
+        0,                                             //RelationsCount
+        (PKSPROPERTY)NULL,                             //Relations
+        (PFNKSHANDLER)NULL,                            //SupportHandler
+        (ULONG)0                                       //SerializedSize
+    }
 };
 
 DEFINE_KSPROPERTY_SET_TABLE(PropertySetTable)

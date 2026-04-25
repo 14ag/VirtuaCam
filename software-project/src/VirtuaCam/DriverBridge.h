@@ -15,10 +15,14 @@ public:
     bool IsActive() const { return m_active; }
     const std::wstring& GetLastError() const { return m_lastError; }
 
+    HRESULT Connect();
+    HRESULT Disconnect();
     HRESULT SendFrame(ID3D11Texture2D* sourceTexture);
 
 private:
     static bool IsRecoverableSendFailure(HRESULT hr);
+    HRESULT EnsurePropertySetReady();
+    bool IsPropertySetSupported(ULONG propertyId, DWORD* supportFlags = nullptr);
     HRESULT FindDriverFilter();
     HRESULT ReinitializeAfterFailure(HRESULT failureHr);
     HRESULT EnsureGpuResources(ID3D11Texture2D* sourceTexture);

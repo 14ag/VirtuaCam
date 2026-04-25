@@ -61,3 +61,4 @@ Phase 1/1.2 Add diagnostic DbgPrint to driver complete
 2026-04-23 15:41:59 +03:00 Phase 6.3 output/software/bin no longer ships DirectPortMFCamera.dll or DirectPortMFGraphicsCapture.dll complete
 2026-04-23 15:41:59 +03:00 Phase 6.1 validation software-project/build.ps1 succeeded and output/software/bin verified
 2026-04-23 16:08:22 +03:00 Phase 6.1 move legacy MF/WinRT sources into VirtuaCamLegacy so default VirtuaCam tree has no winrt refs complete
+2026-04-25 04:37:56 +03:00 Phase 6.4 add implementation/phases/phase6.4-plan.md documenting driver/app coupling updates
