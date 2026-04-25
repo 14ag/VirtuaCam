@@ -659,6 +659,8 @@ Return Value:
                 m_AcquiredResources = FALSE;
             }
 
+            m_Device->NotifyCameraState(FALSE);
+
             break;
 
         case KSSTATE_ACQUIRE:
@@ -766,6 +768,7 @@ Return Value:
 
             if (NT_SUCCESS (Status)) {
                 m_HardwareState = HardwareRunning;
+                m_Device->NotifyCameraState(TRUE);
             }
 
             break;

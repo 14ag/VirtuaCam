@@ -15,7 +15,9 @@ namespace
     constexpr UINT kDriverFrameSize = kDriverWidth * kDriverHeight * kDriverBytesPerPixel;
 
     const GUID kDriverPropertySet = { 0xcb043957, 0x7b35, 0x456e, { 0x9b, 0x61, 0x55, 0x13, 0x93, 0x0f, 0x4d, 0x8e } };
-    constexpr ULONG kDriverPropertyId = 0;
+    constexpr ULONG kDriverPropertyIdFrame = 0;
+    constexpr ULONG kDriverPropertyIdConnect = 1;
+    constexpr ULONG kDriverPropertyIdDisconnect = 2;
 
     const char* kVertexShaderSource = R"(
 struct VS_OUTPUT { float4 Pos : SV_POSITION; float2 Tex : TEXCOORD; };
@@ -46,7 +48,7 @@ DriverBridge::~DriverBridge()
 HRESULT DriverBridge::Initialize()
 {
     m_lastError.clear();
-    RETURN_IF_FAILED(FindDriverFilter());
+    RETURN_IF_FAILED(EnsurePropertySetReady());
     m_active = true;
     VirtuaCamLog::LogLine(L"DriverBridge initialized");
     return S_OK;
@@ -107,7 +109,7 @@ HRESULT DriverBridge::FindDriverFilter()
         }
 
         DWORD supportFlags = 0;
-        if (FAILED(propertySet->QuerySupported(kDriverPropertySet, kDriverPropertyId, &supportFlags))) {
+        if (FAILED(propertySet->QuerySupported(kDriverPropertySet, kDriverPropertyIdFrame, &supportFlags))) {
             continue;
         }
 
@@ -205,12 +207,80 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
         }
     }
 
-    RETURN_HR_IF_NULL(E_POINTER, m_propertySet.get());
+    RETURN_IF_FAILED(EnsurePropertySetReady());
     RETURN_HR_IF(E_UNEXPECTED, m_rgbBuffer.size() != kDriverFrameSize);
 
-    HRESULT hr = m_propertySet->Set(kDriverPropertySet, kDriverPropertyId, nullptr, 0, m_rgbBuffer.data(), static_cast<ULONG>(m_rgbBuffer.size()));
+    HRESULT hr = m_propertySet->Set(kDriverPropertySet, kDriverPropertyIdFrame, nullptr, 0, m_rgbBuffer.data(), static_cast<ULONG>(m_rgbBuffer.size()));
     if (FAILED(hr)) {
         SetLastError(std::format(L"Driver property set failed: 0x{:08X}", static_cast<unsigned>(hr)));
+    }
+    return hr;
+}
+
+HRESULT DriverBridge::EnsurePropertySetReady()
+{
+    if (m_propertySet) {
+        return S_OK;
+    }
+    return FindDriverFilter();
+}
+
+bool DriverBridge::IsPropertySetSupported(ULONG propertyId, DWORD* supportFlags)
+{
+    if (supportFlags) {
+        *supportFlags = 0;
+    }
+
+    if (!m_propertySet) {
+        return false;
+    }
+
+    DWORD flags = 0;
+    if (FAILED(m_propertySet->QuerySupported(kDriverPropertySet, propertyId, &flags))) {
+        return false;
+    }
+    if (supportFlags) {
+        *supportFlags = flags;
+    }
+    return (flags & KSPROPERTY_SUPPORT_SET) == KSPROPERTY_SUPPORT_SET;
+}
+
+HRESULT DriverBridge::Connect()
+{
+    RETURN_IF_FAILED(EnsurePropertySetReady());
+
+    DWORD supportFlags = 0;
+    if (!IsPropertySetSupported(kDriverPropertyIdConnect, &supportFlags)) {
+        VirtuaCamLog::LogLine(std::format(
+            L"DriverBridge::Connect unsupported by driver (property {} support=0x{:08X}); continuing",
+            kDriverPropertyIdConnect,
+            supportFlags));
+        return S_FALSE;
+    }
+
+    HRESULT hr = m_propertySet->Set(kDriverPropertySet, kDriverPropertyIdConnect, nullptr, 0, nullptr, 0);
+    if (FAILED(hr)) {
+        SetLastError(std::format(L"Driver connect failed: 0x{:08X}", static_cast<unsigned>(hr)));
+    }
+    return hr;
+}
+
+HRESULT DriverBridge::Disconnect()
+{
+    RETURN_IF_FAILED(EnsurePropertySetReady());
+
+    DWORD supportFlags = 0;
+    if (!IsPropertySetSupported(kDriverPropertyIdDisconnect, &supportFlags)) {
+        VirtuaCamLog::LogLine(std::format(
+            L"DriverBridge::Disconnect unsupported by driver (property {} support=0x{:08X}); continuing",
+            kDriverPropertyIdDisconnect,
+            supportFlags));
+        return S_FALSE;
+    }
+
+    HRESULT hr = m_propertySet->Set(kDriverPropertySet, kDriverPropertyIdDisconnect, nullptr, 0, nullptr, 0);
+    if (FAILED(hr)) {
+        SetLastError(std::format(L"Driver disconnect failed: 0x{:08X}", static_cast<unsigned>(hr)));
     }
     return hr;
 }

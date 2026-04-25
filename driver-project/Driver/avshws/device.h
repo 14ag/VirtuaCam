@@ -316,4 +316,7 @@ public:
 	// Sets the virtual frame buffer of the device.
 	//
 	void SetData(PVOID data, ULONG dataLength);
+    void ConnectClient();
+    void DisconnectClient();
+    void NotifyCameraState(BOOLEAN isRunning);
 };

@@ -950,5 +950,28 @@ Return Value:
 
 void CCaptureDevice::SetData(PVOID data, ULONG dataLength)
 {
-	m_HardwareSimulation->SetData(data, dataLength);
+	if (m_HardwareSimulation) {
+        m_HardwareSimulation->SetData(data, dataLength);
+    }
+}
+
+void CCaptureDevice::ConnectClient()
+{
+    if (m_HardwareSimulation) {
+        m_HardwareSimulation->SetClientConnected(TRUE);
+    }
+}
+
+void CCaptureDevice::DisconnectClient()
+{
+    if (m_HardwareSimulation) {
+        m_HardwareSimulation->SetClientConnected(FALSE);
+    }
+}
+
+void CCaptureDevice::NotifyCameraState(BOOLEAN isRunning)
+{
+    if (m_HardwareSimulation) {
+        m_HardwareSimulation->NotifyCameraState(isRunning);
+    }
 }

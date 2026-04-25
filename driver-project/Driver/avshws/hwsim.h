@@ -77,6 +77,7 @@ private:
 	// A temporary frame buffer;
 	//
 	PUCHAR m_TemporaryBuffer;
+	PUCHAR m_DefaultFrameBuffer;
 
     //
     // Key information regarding the frames we generate.
@@ -142,6 +143,11 @@ private:
     //
     KDPC m_IsrFakeDpc;
     KTIMER m_IsrTimer;
+    KSPIN_LOCK m_FrameLock;
+    BOOLEAN m_ClientConnected;
+    LARGE_INTEGER m_LastFrameTime;
+    HANDLE m_ClientRequestEvent;
+    PKEVENT m_ClientRequestEventObject;
 
     //
     // The hardware sink that will be used for interrupt notifications.
@@ -292,5 +298,8 @@ public:
 	// Sets the virtual frame buffer of the simulation.
 	//
 	void SetData(PVOID data, ULONG dataLength);
+    void SetClientConnected(BOOLEAN connected);
+    BOOLEAN IsClientConnected();
+    void NotifyCameraState(BOOLEAN isRunning);
 };
 

@@ -26,6 +26,7 @@
 
 /*************************************************/
 KDEFERRED_ROUTINE SimulatedInterrupt;
+static const LONGLONG kClientHeartbeatTimeout100ns = 20000000LL;
 
 void
 SimulatedInterrupt (
@@ -104,6 +105,7 @@ Return Value:
     KeInitializeTimer (&m_IsrTimer);
 
     KeInitializeSpinLock (&m_ListLock);
+    KeInitializeSpinLock (&m_FrameLock);
 
 }
 
@@ -245,11 +247,43 @@ Return Value:
 	}
 
 	RtlZeroMemory(m_TemporaryBuffer, m_ImageSize);
-	
+
+    m_DefaultFrameBuffer = reinterpret_cast<PUCHAR>(
+        ExAllocatePoolWithTag(
+            NonPagedPoolNx,
+            m_ImageSize,
+            AVSHWS_POOLTAG));
+    if (!m_DefaultFrameBuffer) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+    } else {
+        RtlZeroMemory(m_DefaultFrameBuffer, m_ImageSize);
+        if (m_ImageSynth && m_ImageSynth->GetBytesPerPixel() == 3) {
+            for (ULONG i = 0; i + 2 < m_ImageSize; i += 3) {
+                m_DefaultFrameBuffer[i] = 0xFF; // B channel in BGR24
+            }
+        }
+    }
+
+    if (NT_SUCCESS(Status) && !m_ClientRequestEventObject) {
+        UNICODE_STRING eventName;
+        RtlInitUnicodeString(&eventName, L"\\BaseNamedObjects\\VirtuaCamClientRequest");
+        m_ClientRequestEventObject = IoCreateNotificationEvent(&eventName, &m_ClientRequestEvent);
+        if (!m_ClientRequestEventObject) {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        } else {
+            KeClearEvent(m_ClientRequestEventObject);
+        }
+    }
+
     //
     // If everything is ok, start issuing interrupts.
     //
     if (NT_SUCCESS (Status)) {
+        KIRQL irql;
+        KeAcquireSpinLock(&m_FrameLock, &irql);
+        m_ClientConnected = FALSE;
+        m_LastFrameTime.QuadPart = 0;
+        KeReleaseSpinLock(&m_FrameLock, irql);
 
         //
         // Set up the synthesizer with the width, height, and scratch buffer.
@@ -263,6 +297,25 @@ Return Value:
         m_HardwareState = HardwareRunning;
         KeSetTimer (&m_IsrTimer, NextTime, &m_IsrFakeDpc);
 
+    }
+    else {
+        if (m_ClientRequestEvent) {
+            ZwClose(m_ClientRequestEvent);
+            m_ClientRequestEvent = NULL;
+        }
+        m_ClientRequestEventObject = NULL;
+        if (m_DefaultFrameBuffer) {
+            ExFreePool(m_DefaultFrameBuffer);
+            m_DefaultFrameBuffer = NULL;
+        }
+        if (m_TemporaryBuffer) {
+            ExFreePool(m_TemporaryBuffer);
+            m_TemporaryBuffer = NULL;
+        }
+        if (m_SynthesisBuffer) {
+            ExFreePool(m_SynthesisBuffer);
+            m_SynthesisBuffer = NULL;
+        }
     }
 
     return Status;
@@ -424,6 +477,17 @@ Return Value:
 		ExFreePool(m_TemporaryBuffer);
 		m_TemporaryBuffer = NULL;
 	}
+
+    if (m_DefaultFrameBuffer) {
+        ExFreePool(m_DefaultFrameBuffer);
+        m_DefaultFrameBuffer = NULL;
+    }
+
+    if (m_ClientRequestEvent) {
+        ZwClose(m_ClientRequestEvent);
+        m_ClientRequestEvent = NULL;
+    }
+    m_ClientRequestEventObject = NULL;
 
     //
     // Protect the S/G list
@@ -737,7 +801,31 @@ Return Value:
 
 	if (m_HardwareState == HardwareRunning)
 	{
-		RtlCopyMemory(m_SynthesisBuffer, m_TemporaryBuffer, m_ImageSize);
+        BOOLEAN clientConnected = FALSE;
+        KeAcquireSpinLockAtDpcLevel(&m_FrameLock);
+        clientConnected = m_ClientConnected;
+        LARGE_INTEGER lastFrameTime = m_LastFrameTime;
+        KeReleaseSpinLockFromDpcLevel(&m_FrameLock);
+
+        if (clientConnected && lastFrameTime.QuadPart > 0) {
+            LARGE_INTEGER now;
+            KeQuerySystemTimePrecise(&now);
+            if ((now.QuadPart - lastFrameTime.QuadPart) > kClientHeartbeatTimeout100ns) {
+                KeAcquireSpinLockAtDpcLevel(&m_FrameLock);
+                m_ClientConnected = FALSE;
+                clientConnected = FALSE;
+                KeReleaseSpinLockFromDpcLevel(&m_FrameLock);
+            }
+        }
+
+        const PUCHAR sourceFrame = (clientConnected && m_TemporaryBuffer)
+            ? m_TemporaryBuffer
+            : (m_DefaultFrameBuffer ? m_DefaultFrameBuffer : m_TemporaryBuffer);
+		if (sourceFrame) {
+            RtlCopyMemory(m_SynthesisBuffer, sourceFrame, m_ImageSize);
+        } else {
+            RtlZeroMemory(m_SynthesisBuffer, m_ImageSize);
+        }
 
 		if (!NT_SUCCESS(FillScatterGatherBuffers())) {
 			InterlockedIncrement(PLONG(&m_NumFramesSkipped));
@@ -778,7 +866,7 @@ Return Value:
 
 void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 {
-	if (m_HardwareState != HardwareRunning) 
+	if (m_HardwareState != HardwareRunning)
 	{
 		return;
 	}
@@ -787,6 +875,15 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 	{
 		return;
 	}
+
+    KIRQL irql;
+    BOOLEAN clientConnected = FALSE;
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    clientConnected = m_ClientConnected;
+    KeReleaseSpinLock(&m_FrameLock, irql);
+    if (!clientConnected) {
+        return;
+    }
 
 	if (dataLength < m_Width * m_Height * 3)
 	{
@@ -800,4 +897,48 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 
 		RtlCopyMemory(buffer, dataLine, m_Width * 3);
 	}
+
+    LARGE_INTEGER now;
+    KeQuerySystemTimePrecise(&now);
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    m_LastFrameTime = now;
+    KeReleaseSpinLock(&m_FrameLock, irql);
+}
+
+void CHardwareSimulation::SetClientConnected(BOOLEAN connected)
+{
+    KIRQL irql;
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    m_ClientConnected = connected;
+    if (connected) {
+        KeQuerySystemTimePrecise(&m_LastFrameTime);
+    } else {
+        m_LastFrameTime.QuadPart = 0;
+    }
+    KeReleaseSpinLock(&m_FrameLock, irql);
+}
+
+BOOLEAN CHardwareSimulation::IsClientConnected()
+{
+    KIRQL irql;
+    BOOLEAN connected = FALSE;
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    connected = m_ClientConnected;
+    KeReleaseSpinLock(&m_FrameLock, irql);
+    return connected;
+}
+
+void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
+{
+    if (!m_ClientRequestEventObject) {
+        return;
+    }
+
+    if (isRunning) {
+        if (!IsClientConnected()) {
+            KeSetEvent(m_ClientRequestEventObject, IO_NO_INCREMENT, FALSE);
+        }
+    } else {
+        KeClearEvent(m_ClientRequestEventObject);
+    }
 }
