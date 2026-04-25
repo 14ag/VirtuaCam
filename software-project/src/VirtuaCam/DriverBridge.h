@@ -26,6 +26,7 @@ private:
     HRESULT FindDriverFilter();
     HRESULT ReinitializeAfterFailure(HRESULT failureHr);
     HRESULT EnsureGpuResources(ID3D11Texture2D* sourceTexture);
+    HRESULT EnsureSourceTextureView(ID3D11Texture2D* sourceTexture);
     HRESULT CreateShaders();
     HRESULT UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped);
     void SetLastError(const std::wstring& message) { m_lastError = message; }
@@ -41,6 +42,8 @@ private:
     wil::com_ptr_nothrow<ID3D11Texture2D> m_scaledTexture;
     wil::com_ptr_nothrow<ID3D11RenderTargetView> m_scaledRtv;
     wil::com_ptr_nothrow<ID3D11Texture2D> m_stagingTexture;
+    wil::com_ptr_nothrow<ID3D11Texture2D> m_sourceTexture;
+    wil::com_ptr_nothrow<ID3D11ShaderResourceView> m_sourceSrv;
     wil::com_ptr_nothrow<ID3D11VertexShader> m_vertexShader;
     wil::com_ptr_nothrow<ID3D11PixelShader> m_pixelShader;
     wil::com_ptr_nothrow<ID3D11SamplerState> m_samplerState;
