@@ -152,10 +152,9 @@ function Get-OutputPaths {
     $resolvedRoot = if ([string]::IsNullOrWhiteSpace($Root)) { $defaultRoot } else { $Root }
 
     return [pscustomobject]@{
-        Root    = $resolvedRoot
-        Build   = (Join-Path $resolvedRoot "driver\\build")
-        Package = (Join-Path $resolvedRoot "driver\\package")
-        Logs    = (Join-Path $resolvedRoot "logs")
+        Root       = $resolvedRoot
+        Logs       = (Join-Path $resolvedRoot "logs")
+        PackageTmp = (Join-Path $scriptDir ".package-work")
     }
 }
 
@@ -189,7 +188,7 @@ Write-Success "MSBuild: $msbuild"
 Assert-WdkPresent
 
 $out = Get-OutputPaths -Root $OutputRoot
-$null = New-Item -ItemType Directory -Force -Path $out.Build, $out.Package, $out.Logs
+$null = New-Item -ItemType Directory -Force -Path $out.Root, $out.Logs, $out.PackageTmp
 Write-Info "OutputRoot: $($out.Root)"
 
 Write-Step "Build (msbuild)"
@@ -208,12 +207,15 @@ Write-Success "Driver build complete: $BuildConfig|$Platform"
 Write-Step "Stage artifacts to output/"
 $driverRoot = Join-Path $scriptDir "Driver\\avshws"
 $srcBuildDir = Join-Path $driverRoot ("build\\{0}\\{1}" -f $Platform, $BuildConfig)
-$srcPkgDir = Join-Path $driverRoot ("package\\{0}\\{1}" -f $Platform, $BuildConfig)
 
 if (-not (Test-Path -LiteralPath $srcBuildDir)) { Fail "Driver build output dir missing: $srcBuildDir" }
-
-Copy-Item -LiteralPath (Join-Path $srcBuildDir "*") -Destination $out.Build -Recurse -Force
-Write-Success "Staged build outputs -> $($out.Build)"
+$legacyDriverDir = Join-Path $out.Root "driver"
+if (Test-Path -LiteralPath $legacyDriverDir) {
+    Remove-Item -LiteralPath $legacyDriverDir -Recurse -Force
+}
+if (Test-Path -LiteralPath $out.PackageTmp) {
+    Get-ChildItem -LiteralPath $out.PackageTmp -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # Always stage fresh sys from build output + INF from source tree.
 $freshSys = Join-Path $srcBuildDir "avshws.sys"
@@ -221,11 +223,8 @@ $freshInf = Join-Path $driverRoot "avshws.inf"
 if (-not (Test-Path -LiteralPath $freshSys)) { Fail "Fresh sys missing: $freshSys" }
 if (-not (Test-Path -LiteralPath $freshInf)) { Fail "INF missing: $freshInf" }
 
-# Avoid stale leftovers from prior builds in the package output folder.
-Get-ChildItem -LiteralPath $out.Package -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-
-Copy-Item -LiteralPath $freshSys -Destination (Join-Path $out.Package "avshws.sys") -Force
-Copy-Item -LiteralPath $freshInf -Destination (Join-Path $out.Package "avshws.inf") -Force
+Copy-Item -LiteralPath $freshSys -Destination (Join-Path $out.PackageTmp "avshws.sys") -Force
+Copy-Item -LiteralPath $freshInf -Destination (Join-Path $out.PackageTmp "avshws.inf") -Force
 
 Write-Step "Generate signed catalog"
 $inf2cat = Get-SdkToolPath -ToolName "Inf2Cat.exe" -Architecture "x86"
@@ -235,15 +234,15 @@ $signtool = Get-SdkToolPath -ToolName "signtool.exe" -Architecture "x64"
 if (-not $signtool) { Fail "signtool.exe not found in Windows Kits bin." }
 
 Invoke-NativeProcess -FilePath $inf2cat -Arguments @(
-    "/driver:$($out.Package)",
+    "/driver:$($out.PackageTmp)",
     "/os:10_X64"
 )
 
-$catPath = Join-Path $out.Package "avshws.cat"
+$catPath = Join-Path $out.PackageTmp "avshws.cat"
 if (-not (Test-Path -LiteralPath $catPath)) { Fail "Catalog generation failed: $catPath not found." }
 
 $cert = Get-OrCreateTestCodeSigningCertificate -SubjectCommonName "VirtualCameraDriver-TestSign"
-$cerPath = Join-Path $out.Package "VirtualCameraDriver-TestSign.cer"
+$cerPath = Join-Path $out.PackageTmp "VirtualCameraDriver-TestSign.cer"
 Export-Certificate -Cert $cert -FilePath $cerPath -Force | Out-Null
 
 Invoke-NativeProcess -FilePath $signtool -Arguments @(
@@ -255,7 +254,38 @@ Invoke-NativeProcess -FilePath $signtool -Arguments @(
     $catPath
 )
 
-Write-Success "Staged package -> $($out.Package)"
+foreach ($artifact in @(
+    "avshws.sys",
+    "avshws.inf",
+    "avshws.cat",
+    "VirtualCameraDriver-TestSign.cer",
+    "avshws.pdb"
+)) {
+    $existing = Join-Path $out.Root $artifact
+    if (Test-Path -LiteralPath $existing) {
+        Remove-Item -LiteralPath $existing -Force
+    }
+}
+
+foreach ($artifact in @(
+    "avshws.sys",
+    "avshws.inf",
+    "avshws.cat",
+    "VirtualCameraDriver-TestSign.cer"
+)) {
+    Copy-Item -LiteralPath (Join-Path $out.PackageTmp $artifact) -Destination (Join-Path $out.Root $artifact) -Force
+}
+
+$pdbPath = Join-Path $srcBuildDir "avshws.pdb"
+if (Test-Path -LiteralPath $pdbPath) {
+    Copy-Item -LiteralPath $pdbPath -Destination (Join-Path $out.Root "avshws.pdb") -Force
+}
+
+if (Test-Path -LiteralPath $out.PackageTmp) {
+    Remove-Item -LiteralPath $out.PackageTmp -Recurse -Force
+}
+
+Write-Success "Staged package -> $($out.Root)"
 
 Write-Host "`n============================================================" -ForegroundColor Green
 Write-Host " DRIVER BUILD SUCCEEDED"

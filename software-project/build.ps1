@@ -77,7 +77,7 @@ function Get-OutputBinDir {
     param([string]$Root)
 
     if ([string]::IsNullOrWhiteSpace($Root)) {
-        return (Join-Path $scriptDir "..\\output\\software\\bin")
+        return (Join-Path $scriptDir "..\\output")
     }
 
     $looksLikeBinDir = $Root -match '(?i)(^|[\\/])(software[\\/]+bin|bin)$'
@@ -85,7 +85,7 @@ function Get-OutputBinDir {
         return $Root
     }
 
-    return (Join-Path $Root "software\\bin")
+    return $Root
 }
 
 $OutputBinDir = Get-OutputBinDir -Root $OutputRoot
@@ -186,6 +186,12 @@ if (-not (Test-Path $ArtifactSourceDir)) { Exit-WithError "Build artifact direct
 
 $null = New-Item -ItemType Directory -Force -Path $OutputBinDir
 Write-Info "Output: $OutputBinDir"
+
+$legacySoftwareDir = Join-Path $OutputBinDir "software"
+if (Test-Path -LiteralPath $legacySoftwareDir) {
+    Remove-Item -LiteralPath $legacySoftwareDir -Recurse -Force
+    Write-Info "Removed legacy output dir: $legacySoftwareDir"
+}
 
 $allowed = @(
     "VirtuaCam.exe",

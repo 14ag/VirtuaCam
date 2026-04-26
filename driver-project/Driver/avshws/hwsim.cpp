@@ -425,16 +425,6 @@ Return Value:
 
 }
 
-/**************************************************************************
-
-    LOCKED CODE
-
-**************************************************************************/
-
-#ifdef ALLOC_PRAGMA
-#pragma code_seg()
-#endif // ALLOC_PRAGMA
-
 NTSTATUS
 CHardwareSimulation::
 Stop (
@@ -458,6 +448,8 @@ Return Value:
 --*/
 
 {
+    PAGED_CODE();
+
     KIRQL Irql;
     //
     // If the hardware is told to stop while it's running, we need to
@@ -546,6 +538,15 @@ Return Value:
 
 }
 
+/**************************************************************************
+
+    LOCKED CODE
+
+**************************************************************************/
+
+#ifdef ALLOC_PRAGMA
+#pragma code_seg()
+#endif // ALLOC_PRAGMA
 
 ULONG
 CHardwareSimulation::
@@ -817,9 +818,20 @@ Return Value:
 	if (m_HardwareState == HardwareRunning)
 	{
         BOOLEAN clientConnected = FALSE;
+        LARGE_INTEGER lastFrameTime = {};
+        PUCHAR sourceFrame = NULL;
+
         KeAcquireSpinLockAtDpcLevel(&m_FrameLock);
         clientConnected = m_ClientConnected;
-        LARGE_INTEGER lastFrameTime = m_LastFrameTime;
+        lastFrameTime = m_LastFrameTime;
+        sourceFrame = (clientConnected && m_TemporaryBuffer)
+            ? m_TemporaryBuffer
+            : (m_DefaultFrameBuffer ? m_DefaultFrameBuffer : m_TemporaryBuffer);
+        if (sourceFrame) {
+            RtlCopyMemory(m_SynthesisBuffer, sourceFrame, m_ImageSize);
+        } else {
+            RtlZeroMemory(m_SynthesisBuffer, m_ImageSize);
+        }
         KeReleaseSpinLockFromDpcLevel(&m_FrameLock);
 
         if (clientConnected && lastFrameTime.QuadPart > 0) {
@@ -831,15 +843,6 @@ Return Value:
                 clientConnected = FALSE;
                 KeReleaseSpinLockFromDpcLevel(&m_FrameLock);
             }
-        }
-
-        const PUCHAR sourceFrame = (clientConnected && m_TemporaryBuffer)
-            ? m_TemporaryBuffer
-            : (m_DefaultFrameBuffer ? m_DefaultFrameBuffer : m_TemporaryBuffer);
-		if (sourceFrame) {
-            RtlCopyMemory(m_SynthesisBuffer, sourceFrame, m_ImageSize);
-        } else {
-            RtlZeroMemory(m_SynthesisBuffer, m_ImageSize);
         }
 
 		if (!NT_SUCCESS(FillScatterGatherBuffers())) {
@@ -905,6 +908,10 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 		return;
 	}
 
+    LARGE_INTEGER now;
+    KeQuerySystemTimePrecise(&now);
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+
 	for (ULONG y = 0; y < m_Height; y++)
 	{
 		PUCHAR buffer = m_TemporaryBuffer + ((m_Width * 3) * (m_Height - 1 - y));
@@ -912,10 +919,6 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 
 		RtlCopyMemory(buffer, dataLine, m_Width * 3);
 	}
-
-    LARGE_INTEGER now;
-    KeQuerySystemTimePrecise(&now);
-    KeAcquireSpinLock(&m_FrameLock, &irql);
     m_LastFrameTime = now;
     KeReleaseSpinLock(&m_FrameLock, irql);
 }
