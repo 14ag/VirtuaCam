@@ -90,18 +90,9 @@ namespace
     {
         auto exeDir = GetExePathFs().parent_path();
         std::error_code ec;
-
-        // Expected layout: output/software/bin/ -> output/logs/
-        auto preferred = exeDir / L"..\\..\\logs";
+        auto preferred = exeDir / L"logs";
         std::filesystem::create_directories(preferred, ec);
-        if (!ec)
-            return preferred;
-
-        auto temp = std::filesystem::temp_directory_path(ec);
-        if (!ec)
-            return temp;
-
-        return exeDir;
+        return preferred;
     }
 
     void WriteLineLocked(const std::wstring& line)
@@ -207,10 +198,16 @@ namespace VirtuaCamLog
         if (g_initialized)
             return;
 
+        ConfigureDllSearchPaths();
+
+        if (!options.enabled)
+        {
+            g_logPath.clear();
+            return;
+        }
+
         bool allocConsole = options.allocConsoleIfMissing || WantsConsoleAlloc();
         (void)EnsureConsole(options.attachConsole, allocConsole);
-
-        ConfigureDllSearchPaths();
 
         auto logDir = GetLogDirFs();
         g_logPath = (logDir / options.logFileName).wstring();
@@ -239,6 +236,7 @@ namespace VirtuaCamLog
             CloseHandle(g_logFile);
             g_logFile = INVALID_HANDLE_VALUE;
         }
+        g_logPath.clear();
         g_initialized = false;
     }
 

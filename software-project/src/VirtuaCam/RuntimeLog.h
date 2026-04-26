@@ -11,6 +11,7 @@ namespace VirtuaCamLog
         PCWSTR logFileName = L"virtuacam-runtime.log";
         bool attachConsole = true;
         bool allocConsoleIfMissing = false;
+        bool enabled = false;
     };
 
     void Init(const InitOptions& options);

@@ -18,6 +18,7 @@ static std::unique_ptr<WASAPICapture> g_audioCapture;
 static std::unique_ptr<VirtuaCam::Discovery> g_discovery;
 static std::unique_ptr<DriverBridge> g_driverBridge;
 static bool g_disconnectAttempted = false;
+static bool g_debugLoggingEnabled = false;
 
 typedef void (*PFN_InitializeBroker)();
 typedef void (*PFN_ShutdownBroker)();
@@ -105,6 +106,9 @@ DWORD LaunchProducer(const std::wstring& key, const std::wstring& args)
     std::wstring exePath = childExe.wstring();
 
     std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, args);
+    if (g_debugLoggingEnabled) {
+        cmdLine += L" -debug";
+    }
     std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
     cmdLineMutable.push_back(L'\0');
 
@@ -212,13 +216,16 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
 }
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int) {
+    const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
+    g_debugLoggingEnabled = HasArg(cmdLine, L"-debug");
+
     VirtuaCamLog::InitOptions logOpts;
     logOpts.logFileName = L"virtuacam-runtime.log";
     logOpts.attachConsole = true;
     logOpts.allocConsoleIfMissing = false;
+    logOpts.enabled = g_debugLoggingEnabled;
     VirtuaCamLog::Init(logOpts);
 
-    const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
     const bool silentStart = HasArg(cmdLine, L"/startup") || HasArg(cmdLine, L"-startup");
     if (silentStart) {
         VirtuaCamLog::LogLine(L"Startup mode: /startup (tray-silent)");

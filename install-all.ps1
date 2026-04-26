@@ -18,8 +18,6 @@ function Fail { param([string]$Message) Write-Host $Message -ForegroundColor Red
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) { $OutputRoot = Join-Path $scriptDir "output" }
 
-$softwareBin = Join-Path $OutputRoot "software\\bin"
-$driverPkg = Join-Path $OutputRoot "driver\\package"
 $logsDir = Join-Path $OutputRoot "logs"
 $null = New-Item -ItemType Directory -Force -Path $logsDir
 
@@ -30,7 +28,7 @@ Write-Info "OutputRoot: $OutputRoot"
 
 $runKeyPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
 $virtuaCamRegPath = "HKLM:\SOFTWARE\VirtuaCam"
-$installDir = $softwareBin
+$installDir = $OutputRoot
 $processExe = Join-Path $installDir "VirtuaCamProcess.exe"
 $virtuaCamExe = Join-Path $installDir "VirtuaCam.exe"
 
@@ -48,10 +46,10 @@ if ($Uninstall) {
 
 Write-Step "Verify artifacts"
 foreach ($p in @(
-    (Join-Path $softwareBin "VirtuaCam.exe"),
-    (Join-Path $driverPkg "avshws.inf"),
-    (Join-Path $driverPkg "avshws.sys"),
-    (Join-Path $driverPkg "avshws.cat")
+    (Join-Path $OutputRoot "VirtuaCam.exe"),
+    (Join-Path $OutputRoot "avshws.inf"),
+    (Join-Path $OutputRoot "avshws.sys"),
+    (Join-Path $OutputRoot "avshws.cat")
 )) {
     if (-not (Test-Path -LiteralPath $p)) { Fail "Missing artifact: $p (run build-all.ps1 first)" }
 }
@@ -62,7 +60,7 @@ if (-not $SkipDriverInstall) {
     $drvInstall = Join-Path $scriptDir "driver-project\\Driver\\avshws\\install-driver.ps1"
     if (-not (Test-Path -LiteralPath $drvInstall)) { Fail "Missing: $drvInstall" }
     $logPath = Join-Path $logsDir "driver-install.log"
-    & $drvInstall -PackageRoot $driverPkg -LogPath $logPath
+    & $drvInstall -PackageRoot $OutputRoot -LogPath $logPath
     if ($LASTEXITCODE -ne 0) { Fail "Driver install failed (exit $LASTEXITCODE). See: $logPath" }
     Write-Success "Driver install OK (log: $logPath)"
 } else {
@@ -78,7 +76,7 @@ if (-not $SkipDllRegister) {
     }
 
     $regsvr32 = Join-Path $env:WINDIR "System32\\regsvr32.exe"
-    $clientDll = Join-Path $softwareBin "DirectPortClient.dll"
+    $clientDll = Join-Path $OutputRoot "DirectPortClient.dll"
     if (-not (Test-Path -LiteralPath $regsvr32)) { Fail "Missing regsvr32: $regsvr32" }
     if (-not (Test-Path -LiteralPath $clientDll)) { Fail "Missing staged DLL for registration: $clientDll" }
 

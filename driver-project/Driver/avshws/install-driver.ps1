@@ -13,7 +13,7 @@ param(
 # $PSScriptRoot is empty when the script is invoked without a fully qualified path.
 # $MyInvocation.MyCommand.Definition is always populated.
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
-$defaultPackageRoot = Join-Path $scriptDir "..\\..\\..\\output\\driver\\package"
+$defaultPackageRoot = Join-Path $scriptDir "..\\..\\..\\output"
 if (-not $PackageRoot) { $PackageRoot = $defaultPackageRoot }
 if (-not $InfPath) { $InfPath = Join-Path $PackageRoot "avshws.inf" }
 if (-not $CertificatePath) { $CertificatePath = Join-Path $PackageRoot "VirtualCameraDriver-TestSign.cer" }

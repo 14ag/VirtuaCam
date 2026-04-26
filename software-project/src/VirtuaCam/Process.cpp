@@ -115,6 +115,26 @@ namespace
         outValue = static_cast<int>(v);
         return true;
     }
+
+    bool HasArg(const std::wstring& cmdLine, const wchar_t* arg)
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(cmdLine.c_str(), &argc);
+        if (!argv) {
+            return false;
+        }
+
+        bool found = false;
+        for (int i = 1; i < argc; ++i) {
+            if (argv[i] && _wcsicmp(argv[i], arg) == 0) {
+                found = true;
+                break;
+            }
+        }
+
+        LocalFree(argv);
+        return found;
+    }
 }
 
     bool ParseCommandLine(const WCHAR* cmdLine, std::wstring& type, std::wstring& args)
@@ -486,12 +506,14 @@ namespace BuiltInCaptureProducer
     bool LaunchVirtuaCamStartup()
     {
         std::wstring exePath = GetVirtuaCamExePathFromRegistryOrDefault();
+        const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
+        const bool enableDebugLogging = HasArg(cmdLine, L"-debug");
 
         SHELLEXECUTEINFOW sei = {};
         sei.cbSize = sizeof(sei);
         sei.fMask = SEE_MASK_NOCLOSEPROCESS;
         sei.lpFile = exePath.c_str();
-        sei.lpParameters = L"/startup";
+        sei.lpParameters = enableDebugLogging ? L"/startup -debug" : L"/startup";
         sei.nShow = SW_HIDE;
         if (!ShellExecuteExW(&sei)) {
             VirtuaCamLog::LogWin32(std::format(L"ShellExecuteExW failed for {}", exePath), GetLastError());
@@ -831,10 +853,14 @@ void LoadProducerModule(const std::wstring& type, ProducerModule& module)
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lpCmdLine, _In_ int)
 {
+    const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
+    const bool enableDebugLogging = HasArg(cmdLine, L"-debug");
+
     VirtuaCamLog::InitOptions logOpts;
     logOpts.logFileName = L"virtuacam-process.log";
     logOpts.attachConsole = false;
     logOpts.allocConsoleIfMissing = false;
+    logOpts.enabled = enableDebugLogging;
     VirtuaCamLog::Init(logOpts);
 
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));

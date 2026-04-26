@@ -18,9 +18,6 @@ function Fail { param([string]$Message) Write-Host $Message -ForegroundColor Red
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) { $OutputRoot = Join-Path $scriptDir "output" }
 
-$softwareBin = Join-Path $OutputRoot "software\\bin"
-$driverBuild = Join-Path $OutputRoot "driver\\build"
-$driverPkg = Join-Path $OutputRoot "driver\\package"
 $logsDir = Join-Path $OutputRoot "logs"
 
 Write-Host "============================================================" -ForegroundColor Green
@@ -31,7 +28,15 @@ Write-Step "Prepare output layout"
 if ($Clean -and (Test-Path -LiteralPath $OutputRoot)) {
     Remove-Item -LiteralPath $OutputRoot -Recurse -Force
 }
-$null = New-Item -ItemType Directory -Force -Path $softwareBin, $driverBuild, $driverPkg, $logsDir
+$null = New-Item -ItemType Directory -Force -Path $OutputRoot, $logsDir
+foreach ($legacyDir in @(
+    (Join-Path $OutputRoot "software"),
+    (Join-Path $OutputRoot "driver")
+)) {
+    if (Test-Path -LiteralPath $legacyDir) {
+        Remove-Item -LiteralPath $legacyDir -Recurse -Force
+    }
+}
 Write-Info "OutputRoot: $OutputRoot"
 
 if (-not $SkipSoftware) {
@@ -40,7 +45,7 @@ if (-not $SkipSoftware) {
     if (-not (Test-Path -LiteralPath $swBuild)) { Fail "Missing: $swBuild" }
     & $swBuild -BuildConfig $BuildConfig -Clean:$Clean.IsPresent -OutputRoot $OutputRoot
     if ($LASTEXITCODE -ne 0) { Fail "Software build failed (exit $LASTEXITCODE)." }
-    Write-Success "Software staged -> $softwareBin"
+    Write-Success "Software staged -> $OutputRoot"
 } else {
     Write-Info "Skip software"
 }
@@ -51,22 +56,22 @@ if (-not $SkipDriver) {
     if (-not (Test-Path -LiteralPath $drvBuild)) { Fail "Missing: $drvBuild" }
     & $drvBuild -BuildConfig $BuildConfig -Platform "x64" -Clean:$Clean.IsPresent -OutputRoot $OutputRoot
     if ($LASTEXITCODE -ne 0) { Fail "Driver build failed (exit $LASTEXITCODE)." }
-    Write-Success "Driver staged -> $driverPkg"
+    Write-Success "Driver staged -> $OutputRoot"
 } else {
     Write-Info "Skip driver"
 }
 
 Write-Step "Validate required artifacts"
 $requiredSoftware = @(
-    (Join-Path $softwareBin "VirtuaCam.exe"),
-    (Join-Path $softwareBin "VirtuaCamProcess.exe"),
-    (Join-Path $softwareBin "DirectPortBroker.dll")
+    (Join-Path $OutputRoot "VirtuaCam.exe"),
+    (Join-Path $OutputRoot "VirtuaCamProcess.exe"),
+    (Join-Path $OutputRoot "DirectPortBroker.dll")
 )
 $requiredDriver = @(
-    (Join-Path $driverPkg "avshws.sys"),
-    (Join-Path $driverPkg "avshws.inf"),
-    (Join-Path $driverPkg "avshws.cat"),
-    (Join-Path $driverPkg "VirtualCameraDriver-TestSign.cer")
+    (Join-Path $OutputRoot "avshws.sys"),
+    (Join-Path $OutputRoot "avshws.inf"),
+    (Join-Path $OutputRoot "avshws.cat"),
+    (Join-Path $OutputRoot "VirtualCameraDriver-TestSign.cer")
 )
 
 foreach ($p in $requiredSoftware) {
@@ -79,14 +84,10 @@ Write-Success "Artifacts present"
 
 Write-Step "Artifact inventory"
 Write-Host ""
-Write-Host "Software: $softwareBin"
-Get-ChildItem -LiteralPath $softwareBin -File | Sort-Object Name | ForEach-Object { Write-Host ("  - {0} ({1:n0} bytes)" -f $_.Name, $_.Length) }
-Write-Host ""
-Write-Host "Driver package: $driverPkg"
-Get-ChildItem -LiteralPath $driverPkg -File | Sort-Object Name | ForEach-Object { Write-Host ("  - {0} ({1:n0} bytes)" -f $_.Name, $_.Length) }
+Write-Host "Artifacts: $OutputRoot"
+Get-ChildItem -LiteralPath $OutputRoot -File | Sort-Object Name | ForEach-Object { Write-Host ("  - {0} ({1:n0} bytes)" -f $_.Name, $_.Length) }
 Write-Host ""
 
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host " BUILD-ALL SUCCEEDED"
 Write-Host "============================================================" -ForegroundColor Green
-
