@@ -29,6 +29,10 @@
     <script>
         const video = document.getElementById('webcam');
 
+        function logInfo(message) {
+            console.log('[webcam.html] ' + message);
+        }
+
         async function startWebcam() {
             // check that mediaDevices API exists in this browser and context
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -41,6 +45,7 @@
             let hasCamera = false;
             try {
                 const devices = await navigator.mediaDevices.enumerateDevices();
+                logInfo('enumerateDevices returned ' + devices.length + ' device(s)');
                 hasCamera = devices.some(device => device.kind === 'videoinput');
             } catch (enumErr) {
                 // enumerateDevices failed - proceed anyway and let getUserMedia report the real error
@@ -64,10 +69,14 @@
                 // confirm the track is actually live after stream is attached
                 // a device may be detected but already in use or hardware-blocked
                 const track = stream.getVideoTracks()[0];
+                logInfo('selected track: ' + (track && track.label ? track.label : '(no label yet)'));
                 if (!track || track.readyState !== 'live') {
                     alert('Camera stream acquired but track is not live - device may be in use');
                     stream.getTracks().forEach(t => t.stop());
                     video.srcObject = null;
+                    logInfo('stream attached but track not live');
+                } else {
+                    logInfo('stream attached; readyState=' + track.readyState);
                 }
 
             } catch (error) {

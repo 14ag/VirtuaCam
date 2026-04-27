@@ -52,6 +52,29 @@ const WCHAR* REG_VAL_PIPTL = L"ShowPipTopLeft";
 const WCHAR* REG_VAL_PIPTR = L"ShowPipTopRight";
 const WCHAR* REG_VAL_PIPBL = L"ShowPipBottomLeft";
 
+const wchar_t* SourceModeToString(SourceMode mode)
+{
+    switch (mode) {
+    case SourceMode::Off: return L"Off";
+    case SourceMode::Camera: return L"Camera";
+    case SourceMode::Window: return L"Window";
+    case SourceMode::Consumer: return L"Consumer";
+    case SourceMode::Discovered: return L"Discovered";
+    default: return L"Unknown";
+    }
+}
+
+const wchar_t* PipPositionToString(PipPosition pos)
+{
+    switch (pos) {
+    case PipPosition::TL: return L"TL";
+    case PipPosition::TR: return L"TR";
+    case PipPosition::BL: return L"BL";
+    case PipPosition::BR: return L"BR";
+    default: return L"?";
+    }
+}
+
 bool IsRunningAsAdmin();
 bool GetDriverBridgeStatus();
 HRESULT LoadBroker();
@@ -109,15 +132,18 @@ DWORD LaunchProducer(const std::wstring& key, const std::wstring& args)
     if (g_debugLoggingEnabled) {
         cmdLine += L" -debug";
     }
+    VirtuaCamLog::LogLine(std::format(L"LaunchProducer request: key={} args={}", key, args));
     std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
     cmdLineMutable.push_back(L'\0');
 
     if (CreateProcessW(exePath.c_str(), cmdLineMutable.data(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
     {
         g_producerProcesses[key] = pi;
+        VirtuaCamLog::LogLine(std::format(L"LaunchProducer success: key={} pid={} args={}", key, pi.dwProcessId, args));
         Sleep(200);
         return pi.dwProcessId;
     }
+    VirtuaCamLog::LogLine(std::format(L"LaunchProducer failed: key={} args={}", key, args));
     VirtuaCamLog::LogWin32(std::format(L"CreateProcessW failed: {}", exePath), GetLastError());
     return 0;
 }
@@ -130,6 +156,11 @@ bool TryLaunchWindowProducer(
 {
     outPid = 0;
     outHwnd = reinterpret_cast<HWND>(context);
+
+    VirtuaCamLog::LogLine(std::format(
+        L"Window source request: key={} hwnd={}",
+        key,
+        static_cast<UINT64>(reinterpret_cast<UINT_PTR>(outHwnd))));
 
     if (!outHwnd) {
         VirtuaCamLog::LogLine(std::format(L"Skip window producer launch: {} received null hwnd", key));
@@ -150,6 +181,11 @@ bool TryLaunchWindowProducer(
 
 void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
     if (newMode == g_mainSourceState.mode && newMode != SourceMode::Window && newMode != SourceMode::Camera) return;
+
+    VirtuaCamLog::LogLine(std::format(
+        L"Main source selection: mode={} context={}",
+        SourceModeToString(newMode),
+        static_cast<UINT64>(context)));
 
     g_mainSourceState.pid = 0;
     g_mainSourceState.cameraIndex = -1;
@@ -185,6 +221,12 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
             break;
     }
     g_mainSourceState.mode = newMode;
+    VirtuaCamLog::LogLine(std::format(
+        L"Main source active: mode={} pid={} cameraIndex={} hwnd={}",
+        SourceModeToString(g_mainSourceState.mode),
+        g_mainSourceState.pid,
+        g_mainSourceState.cameraIndex,
+        static_cast<UINT64>(reinterpret_cast<UINT_PTR>(g_mainSourceState.hwnd))));
     InformBroker();
 }
 
@@ -201,6 +243,12 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
     SourceState& state = *state_ptr;
 
     if (newMode == state.mode && newMode != SourceMode::Window && newMode != SourceMode::Camera) return;
+
+    VirtuaCamLog::LogLine(std::format(
+        L"PIP source selection: slot={} mode={} context={}",
+        PipPositionToString(pos),
+        SourceModeToString(newMode),
+        static_cast<UINT64>(context)));
 
     state.pid = 0;
     state.cameraIndex = -1;
@@ -236,6 +284,13 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
              break;
     }
     state.mode = newMode;
+    VirtuaCamLog::LogLine(std::format(
+        L"PIP source active: slot={} mode={} pid={} cameraIndex={} hwnd={}",
+        PipPositionToString(pos),
+        SourceModeToString(state.mode),
+        state.pid,
+        state.cameraIndex,
+        static_cast<UINT64>(reinterpret_cast<UINT_PTR>(state.hwnd))));
     InformBroker();
 }
 
@@ -329,6 +384,7 @@ void OnIdle() {
 
 void TrySendBrokerFrameToDriver(bool brokerFrameRendered) {
     static bool s_loggedNullTexture = false;
+    static bool s_loggedFirstTexture = false;
 
     if (!brokerFrameRendered || !g_driverBridge || !g_driverBridge->IsActive() || !g_pfnGetSharedTexture) {
         return;
@@ -345,6 +401,10 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered) {
     }
 
     s_loggedNullTexture = false;
+    if (!s_loggedFirstTexture) {
+        VirtuaCamLog::LogLine(L"First broker shared texture acquired; sending frames to DriverBridge");
+        s_loggedFirstTexture = true;
+    }
 
     HRESULT hr = g_driverBridge->SendFrame(sharedTexture.get());
     if (FAILED(hr)) {
@@ -412,6 +472,7 @@ HRESULT LoadBroker() {
         return E_FAIL;
     }
     g_pfnInitializeBroker();
+    VirtuaCamLog::LogLine(L"DirectPortBroker initialized");
     return S_OK;
 }
 

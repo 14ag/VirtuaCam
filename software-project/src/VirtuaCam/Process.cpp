@@ -201,6 +201,8 @@ namespace BuiltInCaptureProducer
     static ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePool> g_framePool;
     static ComPtr<ABI::Windows::Graphics::Capture::IGraphicsCaptureSession> g_session;
     static std::atomic<bool> g_isCapturing = false;
+    static bool g_loggedFirstFrame = false;
+    static HWND g_captureTargetHwnd = nullptr;
 
     // Accessor to unwrap IDirect3DSurface -> underlying D3D11 texture.
     struct __declspec(uuid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")) IDirect3DDxgiInterfaceAccess : public IUnknown
@@ -365,6 +367,7 @@ namespace BuiltInCaptureProducer
         RETURN_HR_IF(E_INVALIDARG, !TryGetArgU64(argsStr, L"--hwnd", hwndVal));
         HWND hwndToCapture = reinterpret_cast<HWND>(hwndVal);
         RETURN_HR_IF_NULL(E_INVALIDARG, hwndToCapture);
+        g_captureTargetHwnd = hwndToCapture;
 
         RETURN_IF_FAILED(InitD3D11());
         RETURN_IF_FAILED(InitWgc(hwndToCapture));
@@ -374,6 +377,7 @@ namespace BuiltInCaptureProducer
         RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(size.Width), static_cast<UINT>(size.Height)));
 
         g_isCapturing = true;
+        g_loggedFirstFrame = false;
         return S_OK;
     }
 
@@ -409,6 +413,14 @@ namespace BuiltInCaptureProducer
         if (g_pManifestView) {
             InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
         }
+
+        if (!g_loggedFirstFrame) {
+            VirtuaCamLog::LogLine(std::format(
+                L"First producer frame: type=capture hwnd={} frameValue={}",
+                static_cast<UINT64>(reinterpret_cast<UINT_PTR>(g_captureTargetHwnd)),
+                newFenceValue));
+            g_loggedFirstFrame = true;
+        }
     }
 
     void ShutdownProducer()
@@ -434,6 +446,7 @@ namespace BuiltInCaptureProducer
 
         g_sharedD3D11Fence.Reset();
         g_sharedD3D11Texture.Reset();
+        g_captureTargetHwnd = nullptr;
 
         if (g_d3d11Context) g_d3d11Context->ClearState();
         g_d3d11Context4.Reset();
@@ -583,6 +596,7 @@ namespace BuiltInCameraProducer
     static long g_videoHeight = 0;
     static std::atomic<bool> g_isCapturing = false;
     static bool g_mfStarted = false;
+    static bool g_loggedFirstFrame = false;
 
     static HRESULT InitD3D11()
     {
@@ -750,6 +764,7 @@ namespace BuiltInCameraProducer
         RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(g_videoWidth), static_cast<UINT>(g_videoHeight)));
 
         g_isCapturing = true;
+        g_loggedFirstFrame = false;
         return S_OK;
     }
 
@@ -776,6 +791,15 @@ namespace BuiltInCameraProducer
         g_d3d11Context4->Signal(g_sharedD3D11Fence.Get(), newFenceValue);
         if (g_pManifestView) {
             InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
+        }
+
+        if (!g_loggedFirstFrame) {
+            VirtuaCamLog::LogLine(std::format(
+                L"First producer frame: type=camera size={}x{} frameValue={}",
+                g_videoWidth,
+                g_videoHeight,
+                newFenceValue));
+            g_loggedFirstFrame = true;
         }
     }
 
@@ -898,6 +922,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         if (module.hModule) FreeLibrary(module.hModule);
         return 3;
     }
+    VirtuaCamLog::LogLine(std::format(L"InitializeProducer success: type={} args={}", producerType, producerArgs));
     
     MSG msg = {};
     while (msg.message != WM_QUIT)
