@@ -225,8 +225,7 @@ They are no longer needed in the direct-driver path.
 - [ ] 7.3 Select a window/camera source in the VirtuaCam tray menu.
       Confirm Broker composites (telemetry shows "Connected").
 
-- [ ] 7.4 Open any webcam app (Camera app, OBS, Teams) and select the avshws
-      virtual camera device. Confirm live video feed appears.
+- [ ] 7.4 Open `software-project\webcam.html`. Confirm live video feed appears.
 
 - [ ] 7.5 Test graceful failure: uninstall driver, relaunch VirtuaCam.
       Confirm error is logged with exact HRESULT and app does not crash.
