@@ -738,7 +738,7 @@ void RenderPreviewFrame(HWND hwnd) {
         ComPtr<ID3D11Device1> device1;
         if (SUCCEEDED(g_device.As(&device1)))
         {
-            wil::unique_handle sharedHandle(GetHandleFromName(L"Global\\VirtuaCast_Broker_Texture"));
+            wil::unique_handle sharedHandle(GetHandleFromName(GetBrokerTextureName().c_str(), GENERIC_READ));
             if (sharedHandle)
             {
                 if (SUCCEEDED(device1->OpenSharedResource1(sharedHandle.get(), IID_PPV_ARGS(&g_uiSideTexture))))

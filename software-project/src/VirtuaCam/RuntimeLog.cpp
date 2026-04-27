@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "RuntimeLog.h"
+#include "Tools.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -212,11 +213,15 @@ namespace VirtuaCamLog
         auto logDir = GetLogDirFs();
         g_logPath = (logDir / options.logFileName).wstring();
 
+        wil::unique_hlocal_security_descriptor sd;
+        SECURITY_ATTRIBUTES sa = {};
+        (void)CreateCurrentUserOnlySecurityAttributes(sd, sa);
+
         g_logFile = CreateFileW(
             g_logPath.c_str(),
             FILE_APPEND_DATA,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
-            nullptr,
+            sa.lpSecurityDescriptor ? &sa : nullptr,
             OPEN_ALWAYS,
             FILE_ATTRIBUTE_NORMAL,
             nullptr);

@@ -33,6 +33,39 @@
             console.log('[webcam.html] ' + message);
         }
 
+        function choosePreferredCamera(devices) {
+            const videoInputs = devices.filter(device => device.kind === 'videoinput');
+            const preferred = videoInputs.find(device =>
+                /virtuacam|virtual camera|avshws/i.test(device.label || '')
+            );
+
+            if (preferred) {
+                logInfo('preferred virtual camera found: ' + preferred.label);
+                return {
+                    video: {
+                        deviceId: { exact: preferred.deviceId }
+                    },
+                    audio: false
+                };
+            }
+
+            if (videoInputs.length === 1) {
+                logInfo('single camera detected; selecting exact deviceId');
+                return {
+                    video: {
+                        deviceId: { exact: videoInputs[0].deviceId }
+                    },
+                    audio: false
+                };
+            }
+
+            logInfo('virtual camera label not detected; falling back to default video device');
+            return {
+                video: true,
+                audio: false
+            };
+        }
+
         async function startWebcam() {
             // check that mediaDevices API exists in this browser and context
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -43,8 +76,9 @@
             // enumerate devices to confirm at least one real videoinput exists
             // before requesting the stream
             let hasCamera = false;
+            let devices = [];
             try {
-                const devices = await navigator.mediaDevices.enumerateDevices();
+                devices = await navigator.mediaDevices.enumerateDevices();
                 logInfo('enumerateDevices returned ' + devices.length + ' device(s)');
                 hasCamera = devices.some(device => device.kind === 'videoinput');
             } catch (enumErr) {
@@ -59,10 +93,7 @@
             }
 
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: true,
-                    audio: false
-                });
+                const stream = await navigator.mediaDevices.getUserMedia(choosePreferredCamera(devices));
 
                 video.srcObject = stream;
 

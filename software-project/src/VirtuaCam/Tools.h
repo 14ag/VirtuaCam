@@ -16,7 +16,14 @@ const LSTATUS RegWriteKey(HKEY key, PCWSTR path, HKEY* outKey);
 const LSTATUS RegWriteValue(HKEY key, PCWSTR name, const std::wstring& value);
 const LSTATUS RegWriteValue(HKEY key, PCWSTR name, DWORD value);
 HRESULT RGB32ToNV12(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, UINT height, BYTE* output, ULONG ouputSize, LONG outputStride);
-HANDLE GetHandleFromName(const WCHAR* name);
+HANDLE GetHandleFromName(const WCHAR* name, DWORD desiredAccess = GENERIC_READ | GENERIC_WRITE);
+HRESULT CreateCurrentUserOnlySecurityAttributes(wil::unique_hlocal_security_descriptor& descriptor, SECURITY_ATTRIBUTES& sa);
+std::wstring GetProducerManifestName(DWORD pid);
+std::wstring GetProducerTextureName(DWORD pid);
+std::wstring GetProducerFenceName(DWORD pid);
+std::wstring GetBrokerManifestName();
+std::wstring GetBrokerTextureName();
+std::wstring GetBrokerFenceName();
 
 enum class VCamCommand;
 
