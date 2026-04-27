@@ -15,6 +15,7 @@
 #include <sddl.h>
 #include <atomic>
 #include <tlhelp32.h>
+#include <vector>
 
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
@@ -183,6 +184,13 @@ namespace
 
 namespace BuiltInCaptureProducer
 {
+    enum class CaptureBackend
+    {
+        None,
+        Wgc,
+        Gdi
+    };
+
     static ComPtr<ID3D11Device> g_d3d11Device;
     static ComPtr<ID3D11Device5> g_d3d11Device5;
     static ComPtr<ID3D11DeviceContext> g_d3d11Context;
@@ -203,6 +211,10 @@ namespace BuiltInCaptureProducer
     static std::atomic<bool> g_isCapturing = false;
     static bool g_loggedFirstFrame = false;
     static HWND g_captureTargetHwnd = nullptr;
+    static CaptureBackend g_captureBackend = CaptureBackend::None;
+    static UINT g_captureWidth = 0;
+    static UINT g_captureHeight = 0;
+    static std::vector<BYTE> g_gdiFrame;
 
     // Accessor to unwrap IDirect3DSurface -> underlying D3D11 texture.
     struct __declspec(uuid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")) IDirect3DDxgiInterfaceAccess : public IUnknown
@@ -358,6 +370,94 @@ namespace BuiltInCaptureProducer
         return S_OK;
     }
 
+    static HRESULT InitGdiCapture(HWND hwndToCapture)
+    {
+        RECT rc{};
+        if (!GetWindowRect(hwndToCapture, &rc)) {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+
+        const LONG width = rc.right - rc.left;
+        const LONG height = rc.bottom - rc.top;
+        RETURN_HR_IF(E_INVALIDARG, width <= 0 || height <= 0);
+
+        RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(width), static_cast<UINT>(height)));
+        g_captureWidth = static_cast<UINT>(width);
+        g_captureHeight = static_cast<UINT>(height);
+        g_gdiFrame.resize(static_cast<size_t>(g_captureWidth) * static_cast<size_t>(g_captureHeight) * 4);
+        return S_OK;
+    }
+
+    static HRESULT CaptureGdiFrame()
+    {
+        RETURN_HR_IF_NULL(E_HANDLE, g_captureTargetHwnd);
+
+        RECT rc{};
+        if (!GetWindowRect(g_captureTargetHwnd, &rc)) {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+
+        const UINT width = static_cast<UINT>(rc.right - rc.left);
+        const UINT height = static_cast<UINT>(rc.bottom - rc.top);
+        RETURN_HR_IF(E_INVALIDARG, width == 0 || height == 0);
+        RETURN_HR_IF(E_NOTIMPL, width != g_captureWidth || height != g_captureHeight);
+
+        HDC windowDc = GetWindowDC(g_captureTargetHwnd);
+        if (!windowDc) {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+
+        HDC memoryDc = CreateCompatibleDC(windowDc);
+        if (!memoryDc) {
+            ReleaseDC(g_captureTargetHwnd, windowDc);
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = static_cast<LONG>(width);
+        bmi.bmiHeader.biHeight = -static_cast<LONG>(height);
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = nullptr;
+        HBITMAP dib = CreateDIBSection(windowDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!dib || !bits) {
+            const DWORD err = GetLastError();
+            if (dib) {
+                DeleteObject(dib);
+            }
+            DeleteDC(memoryDc);
+            ReleaseDC(g_captureTargetHwnd, windowDc);
+            return HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
+        }
+
+        HGDIOBJ oldBitmap = SelectObject(memoryDc, dib);
+        BOOL copied = PrintWindow(g_captureTargetHwnd, memoryDc, 0);
+        if (!copied) {
+            copied = BitBlt(memoryDc, 0, 0, static_cast<int>(width), static_cast<int>(height), windowDc, 0, 0, SRCCOPY | CAPTUREBLT);
+        }
+
+        HRESULT hr = S_OK;
+        if (!copied) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+        } else {
+            const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+            if (g_gdiFrame.size() != byteCount) {
+                g_gdiFrame.resize(byteCount);
+            }
+            memcpy(g_gdiFrame.data(), bits, byteCount);
+            g_d3d11Context->UpdateSubresource(g_sharedD3D11Texture.Get(), 0, nullptr, g_gdiFrame.data(), width * 4, 0);
+        }
+
+        SelectObject(memoryDc, oldBitmap);
+        DeleteObject(dib);
+        DeleteDC(memoryDc);
+        ReleaseDC(g_captureTargetHwnd, windowDc);
+        return hr;
+    }
+
     HRESULT InitializeProducer(const wchar_t* args)
     {
         UINT64 hwndVal = 0;
@@ -366,13 +466,24 @@ namespace BuiltInCaptureProducer
         HWND hwndToCapture = reinterpret_cast<HWND>(hwndVal);
         RETURN_HR_IF_NULL(E_INVALIDARG, hwndToCapture);
         g_captureTargetHwnd = hwndToCapture;
+        g_captureBackend = CaptureBackend::None;
+        g_captureWidth = 0;
+        g_captureHeight = 0;
 
         RETURN_IF_FAILED(InitD3D11());
-        RETURN_IF_FAILED(InitWgc(hwndToCapture));
-
-        ABI::Windows::Graphics::SizeInt32 size{};
-        RETURN_IF_FAILED(g_captureItem->get_Size(&size));
-        RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(size.Width), static_cast<UINT>(size.Height)));
+        HRESULT hr = InitWgc(hwndToCapture);
+        if (SUCCEEDED(hr)) {
+            ABI::Windows::Graphics::SizeInt32 size{};
+            RETURN_IF_FAILED(g_captureItem->get_Size(&size));
+            RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(size.Width), static_cast<UINT>(size.Height)));
+            g_captureWidth = static_cast<UINT>(size.Width);
+            g_captureHeight = static_cast<UINT>(size.Height);
+            g_captureBackend = CaptureBackend::Wgc;
+        } else {
+            VirtuaCamLog::LogHr(L"InitWgc failed; falling back to GDI capture", hr);
+            RETURN_IF_FAILED(InitGdiCapture(hwndToCapture));
+            g_captureBackend = CaptureBackend::Gdi;
+        }
 
         g_isCapturing = true;
         g_loggedFirstFrame = false;
@@ -381,7 +492,33 @@ namespace BuiltInCaptureProducer
 
     void ProcessFrame()
     {
-        if (!g_isCapturing || !g_framePool) return;
+        if (!g_isCapturing) return;
+
+        if (g_captureBackend == CaptureBackend::Gdi) {
+            if (FAILED(CaptureGdiFrame())) {
+                return;
+            }
+
+            UINT64 newFenceValue = g_fenceValue.fetch_add(1) + 1;
+            g_d3d11Context4->Signal(g_sharedD3D11Fence.Get(), newFenceValue);
+
+            if (g_pManifestView) {
+                InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
+            }
+
+            if (!g_loggedFirstFrame) {
+                VirtuaCamLog::LogLine(std::format(
+                    L"First producer frame: type=capture-gdi hwnd={} size={}x{} frameValue={}",
+                    static_cast<UINT64>(reinterpret_cast<UINT_PTR>(g_captureTargetHwnd)),
+                    g_captureWidth,
+                    g_captureHeight,
+                    newFenceValue));
+                g_loggedFirstFrame = true;
+            }
+            return;
+        }
+
+        if (!g_framePool) return;
 
         ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFrame> frame;
         if (FAILED(g_framePool->TryGetNextFrame(frame.ReleaseAndGetAddressOf())) || !frame) {
@@ -445,6 +582,10 @@ namespace BuiltInCaptureProducer
         g_sharedD3D11Fence.Reset();
         g_sharedD3D11Texture.Reset();
         g_captureTargetHwnd = nullptr;
+        g_captureBackend = CaptureBackend::None;
+        g_captureWidth = 0;
+        g_captureHeight = 0;
+        g_gdiFrame.clear();
 
         if (g_d3d11Context) g_d3d11Context->ClearState();
         g_d3d11Context4.Reset();
@@ -911,8 +1052,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         return 2;
     }
 
-    if (FAILED(module.Initialize(producerArgs.c_str())))
+    const HRESULT initHr = module.Initialize(producerArgs.c_str());
+    if (FAILED(initHr))
     {
+        VirtuaCamLog::LogHr(std::format(L"InitializeProducer HRESULT: type={} args={}", producerType, producerArgs), initHr);
         VirtuaCamLog::LogLine(std::format(L"InitializeProducer failed: type={} args={}", producerType, producerArgs));
         module.Shutdown();
         if (module.hModule) FreeLibrary(module.hModule);

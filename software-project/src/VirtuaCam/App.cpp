@@ -86,6 +86,7 @@ void InformBroker();
 void LoadSettings();
 void SaveSettings();
 bool HasArg(const std::wstring& cmdLine, const wchar_t* arg);
+bool TryGetArgU64(const std::wstring& cmdLine, const wchar_t* arg, UINT64& outValue);
 
 bool GetPipTlEnabled() { return g_showPipTL; }
 bool GetPipTrEnabled() { return g_showPipTR; }
@@ -331,6 +332,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     }
 
     SetTimer(g_hMainWnd, 1, 1000, nullptr);
+    UINT64 startupWindowHwnd = 0;
+    if (TryGetArgU64(cmdLine, L"--source-window-hwnd", startupWindowHwnd)) {
+        VirtuaCamLog::LogLine(std::format(L"Startup source: window hwnd={}", startupWindowHwnd));
+        SetSourceMode(SourceMode::Window, static_cast<DWORD_PTR>(startupWindowHwnd));
+    } else if (HasArg(cmdLine, L"--source-consumer")) {
+        VirtuaCamLog::LogLine(L"Startup source: consumer");
+        SetSourceMode(SourceMode::Consumer, 0);
+    }
     InformBroker();
 
     g_audioCapture = std::make_unique<WASAPICapture>();
@@ -575,6 +584,35 @@ void SaveSettings() {
         RegSetValueExW(hKey, REG_VAL_PIPBL, 0, REG_DWORD, (const BYTE*)&dwValueBL, sizeof(dwValueBL));
         RegCloseKey(hKey);
     }
+}
+
+bool TryGetArgU64(const std::wstring& cmdLine, const wchar_t* arg, UINT64& outValue)
+{
+    outValue = 0;
+
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(cmdLine.c_str(), &argc);
+    if (!argv) {
+        return false;
+    }
+
+    bool found = false;
+    for (int i = 1; i < argc; ++i) {
+        if (!argv[i] || _wcsicmp(argv[i], arg) != 0 || (i + 1) >= argc || !argv[i + 1]) {
+            continue;
+        }
+
+        wchar_t* end = nullptr;
+        const UINT64 parsed = wcstoull(argv[i + 1], &end, 10);
+        if (end && end != argv[i + 1]) {
+            outValue = parsed;
+            found = true;
+        }
+        break;
+    }
+
+    LocalFree(argv);
+    return found;
 }
 
 bool HasArg(const std::wstring& cmdLine, const wchar_t* arg)
