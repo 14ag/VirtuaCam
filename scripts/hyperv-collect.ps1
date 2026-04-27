@@ -185,8 +185,13 @@ finally {
 
 if (-not [string]::IsNullOrWhiteSpace($HostDebuggerLogPath)) {
     $resolvedDebuggerLog = Resolve-HvPath -Path $HostDebuggerLogPath
+    $targetDebuggerLog = Join-Path $artifactDir (Split-Path -Leaf $resolvedDebuggerLog)
     if (Test-Path -LiteralPath $resolvedDebuggerLog) {
-        Copy-Item -LiteralPath $resolvedDebuggerLog -Destination (Join-Path $artifactDir (Split-Path -Leaf $resolvedDebuggerLog)) -Force
+        if ([System.StringComparer]::OrdinalIgnoreCase.Equals($resolvedDebuggerLog, $targetDebuggerLog)) {
+            Write-HvLog -Message ("Host debugger log already in artifact dir: {0}" -f $resolvedDebuggerLog) -LogPath $LogPath
+        } else {
+            Copy-Item -LiteralPath $resolvedDebuggerLog -Destination $targetDebuggerLog -Force
+        }
     } else {
         Write-HvLog -Message ("Host debugger log missing: {0}" -f $resolvedDebuggerLog) -LogPath $LogPath -Level WARN
     }
