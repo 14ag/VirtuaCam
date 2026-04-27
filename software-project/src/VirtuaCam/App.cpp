@@ -122,6 +122,32 @@ DWORD LaunchProducer(const std::wstring& key, const std::wstring& args)
     return 0;
 }
 
+bool TryLaunchWindowProducer(
+    const std::wstring& key,
+    DWORD_PTR context,
+    DWORD& outPid,
+    HWND& outHwnd)
+{
+    outPid = 0;
+    outHwnd = reinterpret_cast<HWND>(context);
+
+    if (!outHwnd) {
+        VirtuaCamLog::LogLine(std::format(L"Skip window producer launch: {} received null hwnd", key));
+        return false;
+    }
+
+    if (!IsWindow(outHwnd)) {
+        VirtuaCamLog::LogLine(std::format(L"Skip window producer launch: {} received stale hwnd {}", key, static_cast<UINT64>(reinterpret_cast<UINT_PTR>(outHwnd))));
+        outHwnd = nullptr;
+        return false;
+    }
+
+    outPid = LaunchProducer(
+        key,
+        L"--type capture --hwnd " + std::to_wstring(static_cast<UINT64>(reinterpret_cast<UINT_PTR>(outHwnd))));
+    return outPid != 0;
+}
+
 void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
     if (newMode == g_mainSourceState.mode && newMode != SourceMode::Window && newMode != SourceMode::Camera) return;
 
@@ -146,9 +172,8 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
             }
             break;
         case SourceMode::Window:
-            g_mainSourceState.hwnd = reinterpret_cast<HWND>(context);
-            if(g_mainSourceState.hwnd) {
-                g_mainSourceState.pid = LaunchProducer(L"main_window", L"--type capture --hwnd " + std::to_wstring((UINT64)g_mainSourceState.hwnd));
+            if (!TryLaunchWindowProducer(L"main_window", context, g_mainSourceState.pid, g_mainSourceState.hwnd)) {
+                newMode = SourceMode::Off;
             }
             break;
         case SourceMode::Discovered:
@@ -198,9 +223,8 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
             }
             break;
         case SourceMode::Window:
-            state.hwnd = reinterpret_cast<HWND>(context);
-            if (state.hwnd) {
-                state.pid = LaunchProducer(key_prefix + L"_window", L"--type capture --hwnd " + std::to_wstring((UINT64)state.hwnd));
+            if (!TryLaunchWindowProducer(key_prefix + L"_window", context, state.pid, state.hwnd)) {
+                newMode = SourceMode::Off;
             }
             break;
         case SourceMode::Discovered:

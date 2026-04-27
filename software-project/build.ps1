@@ -27,7 +27,7 @@ function Exit-WithError {
     Write-Host "=========================================================" -ForegroundColor Red
     exit 1
 }
-function Execute-Process {
+function Invoke-Process {
     param([string]$File, [array]$Arguments)
     Write-Host "  - Executing: $File $($Arguments -join ' ')"
     & $File $Arguments
@@ -106,11 +106,11 @@ if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) {
 
 if (-not (Test-Path $VcpkgRoot)) {
     Write-Host "  - vcpkg directory not found at '$VcpkgRoot'. Automatically cloning..." -ForegroundColor Yellow
-    Execute-Process "git" @("clone", "https://github.com/microsoft/vcpkg.git", $VcpkgRoot)
+    Invoke-Process "git" @("clone", "https://github.com/microsoft/vcpkg.git", $VcpkgRoot)
     
     Write-Host "  - Bootstrapping vcpkg..." -ForegroundColor Yellow
     $bootstrap = Join-Path $VcpkgRoot "bootstrap-vcpkg.bat"
-    Execute-Process "cmd.exe" @("/c", $bootstrap, "-disableMetrics")
+    Invoke-Process "cmd.exe" @("/c", $bootstrap, "-disableMetrics")
     
     Write-Success "vcpkg auto-installed successfully."
 } else {
@@ -155,27 +155,27 @@ if ($x64Compiler) {
     Write-Host "  - WARNING: Could not locate MSVC x64 compiler with vswhere. Falling back to CMake auto-detection." -ForegroundColor Yellow
 }
 
-Execute-Process "cmake" $cmake_config_args
+Invoke-Process "cmake" $cmake_config_args
 Write-Success "CMake configuration is up-to-date."
 
 # --- 3. Run CMake to Build the Project ---
 Write-Step "Building All Targets ($BuildConfig)"
 Write-Host "  - INFO: Starting build. This will be fast if no files have changed." -ForegroundColor Cyan
 $cmake_build_args = @("--build", $BuildDir, "--config", $BuildConfig)
-Execute-Process "cmake" $cmake_build_args
+Invoke-Process "cmake" $cmake_build_args
 Write-Success "Project build completed."
 
 # --- 4. Register or Unregister the Virtual Camera DLL (Optional) ---
 if ($Unregister) {
     Write-Step "Unregistering Virtual Camera DLL"
     $unregister_args = @("--build", $BuildDir, "--config", $BuildConfig, "--target", "unregister_vcam")
-    Execute-Process "cmake" $unregister_args
+    Invoke-Process "cmake" $unregister_args
     Write-Success "Unregistration command sent."
 }
 if ($Register) {
     Write-Step "Registering Virtual Camera DLL (requires Admin privileges)"
     $register_args = @("--build", $BuildDir, "--config", $BuildConfig, "--target", "register_vcam")
-    Execute-Process "cmake" $register_args
+    Invoke-Process "cmake" $register_args
     Write-Success "Registration command sent."
 }
 
