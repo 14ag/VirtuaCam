@@ -29,6 +29,152 @@ KDEFERRED_ROUTINE SimulatedInterrupt;
 static const LONGLONG kClientHeartbeatTimeout100ns = 20000000LL;
 static const ULONG kScatterGatherEntryTag = 'nEGS';
 
+namespace
+{
+    const UCHAR kPlaceholderBlue = 217;
+    const UCHAR kPlaceholderGreen = 26;
+    const UCHAR kPlaceholderRed = 13;
+
+    const UCHAR kPlaceholderTextBlue = 64;
+    const UCHAR kPlaceholderTextGreen = 255;
+    const UCHAR kPlaceholderTextRed = 38;
+
+    const UCHAR kFontP[16][16] = {
+        {0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0},
+        {0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,1,1,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,1,1,0,0,0,0,0,0,0},
+        {0,0,1,1,1,1,1,1,1,0,0,0,0,0,0,0},
+        {0,0,1,1,1,1,1,1,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+    };
+
+    const UCHAR kFontC[16][16] = {
+        {0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,0},
+        {0,0,0,1,1,0,0,0,1,1,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,1,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,1,1,0,0,0,0,0,1,0,0,0,0,0,0},
+        {0,0,0,1,1,0,0,0,1,1,0,0,0,0,0,0},
+        {0,0,0,0,1,1,1,1,1,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+    };
+
+    void FillPlaceholderFrameRgb24(
+        _Out_writes_bytes_(imageSize) PUCHAR buffer,
+        ULONG width,
+        ULONG height,
+        ULONG imageSize)
+    {
+        if (!buffer || width == 0 || height == 0) {
+            return;
+        }
+
+        RtlZeroMemory(buffer, imageSize);
+
+        const ULONG stride = width * 3;
+        for (ULONG y = 0; y < height; ++y) {
+            UCHAR* row = buffer + (stride * y);
+            const ULONG scanlineTint = (y & 1) ? 10 : 0;
+
+            for (ULONG x = 0; x < width; ++x) {
+                const ULONG pixel = x * 3;
+                row[pixel + 0] = static_cast<UCHAR>(kPlaceholderBlue - scanlineTint);
+                row[pixel + 1] = static_cast<UCHAR>(kPlaceholderGreen + (scanlineTint / 3));
+                row[pixel + 2] = static_cast<UCHAR>(kPlaceholderRed + (scanlineTint / 4));
+            }
+        }
+
+        ULONG glyphScale = height / 40;
+        if ((width / 80) < glyphScale) {
+            glyphScale = width / 80;
+        }
+        if (glyphScale < 2) {
+            glyphScale = 2;
+        }
+        const ULONG glyphWidth = 16 * glyphScale;
+        const ULONG glyphHeight = 16 * glyphScale;
+        const ULONG glyphGap = 6 * glyphScale;
+        ULONG marginX = width / 16;
+        ULONG marginY = height / 14;
+        if (marginX < 12) {
+            marginX = 12;
+        }
+        if (marginY < 12) {
+            marginY = 12;
+        }
+        const ULONG totalWidth = (2 * glyphWidth) + glyphGap;
+
+        if (glyphWidth == 0 || glyphHeight == 0 || totalWidth >= width || glyphHeight >= height) {
+            return;
+        }
+
+        const ULONG originX = width - marginX - totalWidth;
+        const ULONG originY = marginY;
+
+        for (ULONG py = 0; py < glyphHeight; ++py) {
+            ULONG fontY = py / glyphScale;
+            if (fontY > 15) {
+                fontY = 15;
+            }
+            const ULONG rowY = originY + py;
+            if (rowY >= height) {
+                break;
+            }
+
+            for (ULONG px = 0; px < totalWidth; ++px) {
+                ULONG fontX = 0;
+                BOOLEAN drawPixel = FALSE;
+
+                if (px < glyphWidth) {
+                    fontX = px / glyphScale;
+                    if (fontX > 15) {
+                        fontX = 15;
+                    }
+                    drawPixel = (kFontP[fontY][fontX] != 0);
+                } else if (px >= (glyphWidth + glyphGap)) {
+                    fontX = (px - glyphWidth - glyphGap) / glyphScale;
+                    if (fontX > 15) {
+                        fontX = 15;
+                    }
+                    drawPixel = (kFontC[fontY][fontX] != 0);
+                }
+
+                if (!drawPixel) {
+                    continue;
+                }
+
+                const ULONG rowX = originX + px;
+                if (rowX >= width) {
+                    continue;
+                }
+
+                UCHAR* pixel = buffer + (rowY * stride) + (rowX * 3);
+                pixel[0] = kPlaceholderTextBlue;
+                pixel[1] = kPlaceholderTextGreen;
+                pixel[2] = kPlaceholderTextRed;
+            }
+        }
+    }
+}
+
 void
 SimulatedInterrupt (
     IN PKDPC Dpc,
@@ -278,9 +424,7 @@ Return Value:
         Status = STATUS_INSUFFICIENT_RESOURCES;
     } else {
         if (m_ImageSynth && m_ImageSynth->GetBytesPerPixel() == 3) {
-            for (ULONG i = 0; i + 2 < m_ImageSize; i += 3) {
-                m_DefaultFrameBuffer[i] = 0xFF; // B channel in BGR24
-            }
+            FillPlaceholderFrameRgb24(m_DefaultFrameBuffer, m_Width, m_Height, m_ImageSize);
         }
     }
 
