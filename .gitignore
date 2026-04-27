@@ -18,6 +18,7 @@ output/
 *.sln.docstates
 *.obj
 *.exe
+*.inf
 *.dll
 *.lib
 *.pdb
@@ -62,3 +63,4 @@ ipch/
 output/
 wiki/
 ignition.txt
+driver-project/Driver/avshws/avshws.inf
