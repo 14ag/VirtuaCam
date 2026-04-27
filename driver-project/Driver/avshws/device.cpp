@@ -354,7 +354,7 @@ Return Value:
 
 
 #ifdef ALLOC_PRAGMA
-#pragma code_seg()
+#pragma code_seg(push, avshws_pnpstopseg, ".text")
 #endif // ALLOC_PRAGMA
 
 void
@@ -381,6 +381,8 @@ Return Value:
 
 {
 
+    DbgPrint("[avshws] PnpStop begin device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
+
     if (m_HardwareSimulation) {
         (void)m_HardwareSimulation -> Stop ();
     }
@@ -399,7 +401,13 @@ Return Value:
         m_DmaAdapterObject = NULL;
     }
 
+    DbgPrint("[avshws] PnpStop end device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
+
 }
+
+#ifdef ALLOC_PRAGMA
+#pragma code_seg(pop, avshws_pnpstopseg)
+#endif // ALLOC_PRAGMA
 
 /*************************************************/
 
@@ -992,6 +1000,7 @@ void CCaptureDevice::SetData(PVOID data, ULONG dataLength)
 
 void CCaptureDevice::ConnectClient()
 {
+    DbgPrint("[avshws] ConnectClient device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
     if (m_HardwareSimulation) {
         m_HardwareSimulation->SetClientConnected(TRUE);
     }
@@ -999,6 +1008,7 @@ void CCaptureDevice::ConnectClient()
 
 void CCaptureDevice::DisconnectClient()
 {
+    DbgPrint("[avshws] DisconnectClient device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
     if (m_HardwareSimulation) {
         m_HardwareSimulation->SetClientConnected(FALSE);
     }
@@ -1006,6 +1016,7 @@ void CCaptureDevice::DisconnectClient()
 
 void CCaptureDevice::NotifyCameraState(BOOLEAN isRunning)
 {
+    DbgPrint("[avshws] NotifyCameraState device=%p running=%lu irql=%lu\n", this, (ULONG)isRunning, (ULONG)KeGetCurrentIrql());
     if (m_HardwareSimulation) {
         m_HardwareSimulation->NotifyCameraState(isRunning);
     }

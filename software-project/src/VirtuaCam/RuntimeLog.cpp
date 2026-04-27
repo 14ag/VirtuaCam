@@ -231,6 +231,15 @@ namespace VirtuaCamLog
         WriteLineLocked(std::format(L"[{}] logging init: {}", FormatTimestamp(), g_logPath));
         WriteLineLocked(std::format(L"[{}] exe: {}", FormatTimestamp(), GetExePath()));
         WriteLineLocked(std::format(L"[{}] cwd: {}", FormatTimestamp(), GetCurrentDir()));
+        if (const wchar_t* cmdLine = GetCommandLineW(); cmdLine && *cmdLine)
+        {
+            WriteLineLocked(std::format(L"[{}] cmdline: {}", FormatTimestamp(), cmdLine));
+        }
+        auto attemptId = GetEnvW(L"VIRTUACAM_ATTEMPT_ID");
+        if (!attemptId.empty())
+        {
+            WriteLineLocked(std::format(L"[{}] attempt-id: {}", FormatTimestamp(), attemptId));
+        }
     }
 
     void Shutdown()
