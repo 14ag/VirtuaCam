@@ -48,7 +48,7 @@ typedef struct _SCATTER_GATHER_ENTRY {
     PKSSTREAM_POINTER CloneEntry;
     PUCHAR Virtual;
     ULONG ByteCount;
-    ULONG MappingCount;
+    ULONG AdvanceCount;
 
 } SCATTER_GATHER_ENTRY, *PSCATTER_GATHER_ENTRY;
 

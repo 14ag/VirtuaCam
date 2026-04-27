@@ -428,7 +428,13 @@ Return Value:
         // because of the optimization of one stream pointer per frame, it
         // doesn't make complete sense.
         //
-        ULONG MappingsUsed =
+        if (Leading -> OffsetOut.Remaining == 0 ||
+            Leading -> OffsetOut.Remaining > Leading -> OffsetOut.Count) {
+            Status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        ULONG BytesUsed =
             m_Device -> ProgramScatterGatherMappings (
                 ClonePointer,
                 &(SPContext -> BufferVirtual),
@@ -441,13 +447,13 @@ Return Value:
         // logic, make a check to see if we completely used the mappings in
         // the leading edge.  Set a flag.
         //
-        if (MappingsUsed == Leading -> OffsetOut.Remaining) {
+        if (BytesUsed == Leading -> OffsetOut.Remaining) {
             m_PreviousStreamPointer = NULL;
         } else {
             m_PreviousStreamPointer = ClonePointer;
         }
 
-        if (MappingsUsed) {
+        if (BytesUsed) {
             //
             // If any mappings were added to scatter / gather queues, 
             // advance the leading edge by that number of mappings.  If 
@@ -461,7 +467,7 @@ Return Value:
                 KsStreamPointerAdvanceOffsets (
                     Leading,
                     0,
-                    MappingsUsed,
+                    BytesUsed,
                     FALSE
                     );
         } else {
@@ -1332,7 +1338,7 @@ Return Value:
 
 {
 
-    ULONG MappingsRemaining = NumMappings;
+    ULONG BytesRemaining = NumMappings;
 
     //
     // Walk through the clones list and delete clones whose time has come.
@@ -1340,21 +1346,18 @@ Return Value:
     //
     PKSSTREAM_POINTER Clone = KsPinGetFirstCloneStreamPointer (m_Pin);
 
-    while (MappingsRemaining && Clone) {
+    while (BytesRemaining && Clone) {
 
         PKSSTREAM_POINTER NextClone = KsStreamPointerGetNextClone (Clone);
-        ULONG MappingsToCount =
-            (MappingsRemaining > Clone -> OffsetOut.Remaining) ?
+        ULONG BytesToCount =
+            (BytesRemaining > Clone -> OffsetOut.Remaining) ?
                 Clone -> OffsetOut.Remaining :
-                MappingsRemaining;
+                BytesRemaining;
 
         //
-        // Update DataUsed according to the completed mappings.
+        // Update DataUsed according to the completed bytes.
         //
-        for (ULONG CurMapping = 0; CurMapping < MappingsToCount; CurMapping++) {
-            Clone -> StreamHeader -> DataUsed +=
-                Clone -> OffsetOut.Mappings [CurMapping].ByteCount;
-        }
+        Clone -> StreamHeader -> DataUsed += BytesToCount;
 
         // 
         // If we have completed all remaining mappings in this clone, it
@@ -1363,7 +1366,7 @@ Return Value:
         // has not yet been set.  If we have a clock, we can timestamp the
         // sample.
         //
-        if (MappingsToCount == Clone -> OffsetOut.Remaining) {
+        if (BytesToCount == Clone -> OffsetOut.Remaining) {
             Clone -> StreamHeader -> Duration =
                 m_VideoInfoHeader -> AvgTimePerFrame;
 
@@ -1426,7 +1429,7 @@ Return Value:
             // delete the clone.  We've already updated DataUsed above.
             //
 
-            MappingsRemaining -= MappingsToCount;
+            BytesRemaining -= BytesToCount;
             KsStreamPointerDelete (Clone);
 
         } else {
@@ -1438,11 +1441,11 @@ Return Value:
             (void)KsStreamPointerAdvanceOffsets (
                 Clone,
                 0,
-                Clone -> StreamHeader -> DataUsed,
+                BytesToCount,
                 FALSE
                 );
 
-            MappingsRemaining = 0;
+            BytesRemaining = 0;
 
         }
 
@@ -1458,7 +1461,7 @@ Return Value:
     // processing to happen again if we've completed mappings.
     //
     if (m_PendIo) {
-        m_PendIo = TRUE;
+        m_PendIo = FALSE;
         KsPinAttemptProcessing (m_Pin, TRUE);
     }
 

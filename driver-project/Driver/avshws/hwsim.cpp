@@ -785,9 +785,15 @@ Return Value:
 --*/
 
 {
-    ULONG MappingsInserted = 0;
-    ULONG TotalBytes = 0;
+    ULONG BytesInserted = 0;
     PSCATTER_GATHER_ENTRY Entry = NULL;
+
+    UNREFERENCED_PARAMETER(Mappings);
+    UNREFERENCED_PARAMETER(MappingStride);
+
+    if (!Clone || !Buffer || !*Buffer || MappingsCount == 0) {
+        return 0;
+    }
 
     if (m_ScatterGatherLookasideInitialized) {
         Entry = reinterpret_cast <PSCATTER_GATHER_ENTRY> (
@@ -807,38 +813,26 @@ Return Value:
         return 0;
     }
 
-    for (ULONG index = 0; index < MappingsCount; ++index) {
-        PKSMAPPING CurrentMapping =
-            reinterpret_cast <PKSMAPPING> (
-                reinterpret_cast <PUCHAR> (Mappings) + (index * MappingStride)
-                );
-        TotalBytes += CurrentMapping -> ByteCount;
-    }
-
     Entry -> Virtual    = *Buffer;
-    Entry -> ByteCount  = TotalBytes;
-    Entry -> MappingCount = MappingsCount;
+    Entry -> ByteCount  = MappingsCount;
+    Entry -> AdvanceCount = MappingsCount;
     Entry -> CloneEntry = Clone;
 
     //
     // Move forward before taking the list lock so the lock only protects
     // queue metadata updates.
     //
-    *Buffer += TotalBytes;
-    Mappings = reinterpret_cast <PKSMAPPING> (
-        (reinterpret_cast <PUCHAR> (Mappings) + (MappingsCount * MappingStride))
-        );
-    UNREFERENCED_PARAMETER(Mappings);
+    *Buffer += MappingsCount;
 
     KIRQL Irql;
     KeAcquireSpinLock (&m_ListLock, &Irql);
     InsertTailList (&m_ScatterGatherMappings, &(Entry -> ListEntry));
-    MappingsInserted = MappingsCount;
+    BytesInserted = MappingsCount;
     m_ScatterGatherMappingsQueued++;
-    m_ScatterGatherBytesQueued += TotalBytes;
+    m_ScatterGatherBytesQueued += MappingsCount;
     KeReleaseSpinLock (&m_ListLock, Irql);
 
-    return MappingsInserted;
+    return BytesInserted;
 
 }
 
@@ -917,22 +911,7 @@ Return Value:
             return STATUS_INVALID_PARAMETER;
         }
 
-        LONG Width = m_Width * (m_ImageSynth -> GetBytesPerPixel());
-        LONG Stride = Width;
-        if(SGEntry->CloneEntry->StreamHeader->Size >= sizeof(KSSTREAM_HEADER)+sizeof(KS_FRAME_INFO))
-        {
-            PKS_FRAME_INFO FrameInfo = reinterpret_cast <PKS_FRAME_INFO> (SGEntry->CloneEntry->StreamHeader+1);
-            if(FrameInfo->lSurfacePitch != 0)
-            {
-                Stride = FrameInfo->lSurfacePitch;
-                if(FrameInfo->lSurfacePitch < 0)
-                {
-                    Stride = -Stride;
-                }
-            }
-        }
-
-        if (Stride < Width) {
+        if (!SGEntry -> CloneEntry || !SGEntry -> CloneEntry -> StreamHeader) {
             if (m_ScatterGatherLookasideInitialized) {
                 ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
             } else {
@@ -941,9 +920,44 @@ Return Value:
             return STATUS_INVALID_PARAMETER;
         }
 
-        ULONGLONG RequiredBytes = Width;
+        LONG Width = m_Width * (m_ImageSynth -> GetBytesPerPixel());
+        LONG Stride = Width;
+        BOOLEAN BottomUp = FALSE;
+        if (SGEntry -> CloneEntry -> StreamHeader -> Size >=
+            sizeof (KSSTREAM_HEADER) + sizeof (KS_FRAME_INFO)) {
+            PKS_FRAME_INFO FrameInfo =
+                reinterpret_cast <PKS_FRAME_INFO> (
+                    SGEntry -> CloneEntry -> StreamHeader + 1
+                    );
+
+            if (FrameInfo -> lSurfacePitch != 0) {
+                if (FrameInfo -> lSurfacePitch == LONG_MIN) {
+                    if (m_ScatterGatherLookasideInitialized) {
+                        ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
+                    } else {
+                        ExFreePoolWithTag(SGEntry, kScatterGatherEntryTag);
+                    }
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                BottomUp = (FrameInfo -> lSurfacePitch < 0);
+                Stride = BottomUp ? -FrameInfo -> lSurfacePitch : FrameInfo -> lSurfacePitch;
+            }
+        }
+
+        if (Width <= 0 || Stride < Width) {
+            if (m_ScatterGatherLookasideInitialized) {
+                ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
+            } else {
+                ExFreePoolWithTag(SGEntry, kScatterGatherEntryTag);
+            }
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        ULONGLONG RowPitch = static_cast <ULONGLONG> (Stride);
+        ULONGLONG RequiredBytes = static_cast <ULONGLONG> (Width);
         if (m_Height > 0) {
-            RequiredBytes += static_cast <ULONGLONG> (Stride) * (m_Height - 1);
+            RequiredBytes += RowPitch * (m_Height - 1);
         }
         if (RequiredBytes > SGEntry -> ByteCount) {
             if (m_ScatterGatherLookasideInitialized) {
@@ -954,14 +968,24 @@ Return Value:
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
+        PUCHAR DestinationBase = SGEntry -> Virtual;
+        if (BottomUp && m_Height > 1) {
+            DestinationBase += RowPitch * (m_Height - 1);
+        }
+
         for(ULONG y = 0; y < m_Height; y++)
         {
-            RtlCopyMemory((SGEntry->Virtual+(ULONG)Stride*y), Buffer, Width);
+            PUCHAR Destination =
+                BottomUp ?
+                    (DestinationBase - (Stride * y)) :
+                    (DestinationBase + (Stride * y));
+
+            RtlCopyMemory(Destination, Buffer, Width);
             Buffer += Width;
             BufferRemaining -= Width;
         }
 
-        m_NumMappingsCompleted += SGEntry -> MappingCount;
+        m_NumMappingsCompleted += SGEntry -> AdvanceCount;
 
         //
         // Release the scatter / gather entry back to our lookaside.
