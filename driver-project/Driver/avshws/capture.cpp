@@ -1342,6 +1342,18 @@ Return Value:
     while (MappingsRemaining && Clone) {
 
         PKSSTREAM_POINTER NextClone = KsStreamPointerGetNextClone (Clone);
+        ULONG MappingsToCount =
+            (MappingsRemaining > Clone -> OffsetOut.Remaining) ?
+                Clone -> OffsetOut.Remaining :
+                MappingsRemaining;
+
+        //
+        // Update DataUsed according to the completed mappings.
+        //
+        for (ULONG CurMapping = 0; CurMapping < MappingsToCount; CurMapping++) {
+            Clone -> StreamHeader -> DataUsed +=
+                Clone -> OffsetOut.Mappings [CurMapping].ByteCount;
+        }
 
         // 
         // If we have completed all remaining mappings in this clone, it
@@ -1350,7 +1362,7 @@ Return Value:
         // has not yet been set.  If we have a clock, we can timestamp the
         // sample.
         //
-        if (Clone -> StreamHeader -> DataUsed >= Clone -> OffsetOut.Remaining) {
+        if (MappingsToCount == Clone -> OffsetOut.Remaining) {
             Clone -> StreamHeader -> Duration =
                 m_VideoInfoHeader -> AvgTimePerFrame;
 
@@ -1413,7 +1425,7 @@ Return Value:
             // delete the clone.  We've already updated DataUsed above.
             //
 
-            MappingsRemaining--;
+            MappingsRemaining -= MappingsToCount;
             KsStreamPointerDelete (Clone);
 
         } else {

@@ -771,6 +771,7 @@ Return Value:
 
 {
     ULONG MappingsInserted = 0;
+    ULONG TotalBytes = 0;
     PSCATTER_GATHER_ENTRY Entry = NULL;
 
     if (m_ScatterGatherLookasideInitialized) {
@@ -791,17 +792,26 @@ Return Value:
         return 0;
     }
 
+    for (ULONG index = 0; index < MappingsCount; ++index) {
+        PKSMAPPING CurrentMapping =
+            reinterpret_cast <PKSMAPPING> (
+                reinterpret_cast <PUCHAR> (Mappings) + (index * MappingStride)
+                );
+        TotalBytes += CurrentMapping -> ByteCount;
+    }
+
     Entry -> Virtual    = *Buffer;
-    Entry -> ByteCount  = MappingsCount;
+    Entry -> ByteCount  = TotalBytes;
+    Entry -> MappingCount = MappingsCount;
     Entry -> CloneEntry = Clone;
 
     //
     // Move forward before taking the list lock so the lock only protects
     // queue metadata updates.
     //
-    *Buffer += MappingsCount;
+    *Buffer += TotalBytes;
     Mappings = reinterpret_cast <PKSMAPPING> (
-        (reinterpret_cast <PUCHAR> (Mappings) + MappingStride)
+        (reinterpret_cast <PUCHAR> (Mappings) + (MappingsCount * MappingStride))
         );
     UNREFERENCED_PARAMETER(Mappings);
 
@@ -810,7 +820,7 @@ Return Value:
     InsertTailList (&m_ScatterGatherMappings, &(Entry -> ListEntry));
     MappingsInserted = MappingsCount;
     m_ScatterGatherMappingsQueued++;
-    m_ScatterGatherBytesQueued += MappingsCount;
+    m_ScatterGatherBytesQueued += TotalBytes;
     KeReleaseSpinLock (&m_ListLock, Irql);
 
     return MappingsInserted;
@@ -883,7 +893,7 @@ Return Value:
         //
         // Since we're software, we'll be accessing this by virtual address...
         //
-        ULONG BytesToCopy = 
+        ULONG BytesToCopy =
             (BufferRemaining < SGEntry -> ByteCount) ?
             BufferRemaining :
             SGEntry -> ByteCount;
@@ -912,7 +922,7 @@ Return Value:
             BufferRemaining -= Width;
         }
 
-        m_NumMappingsCompleted++;
+        m_NumMappingsCompleted += SGEntry -> MappingCount;
 
         //
         // Release the scatter / gather entry back to our lookaside.
