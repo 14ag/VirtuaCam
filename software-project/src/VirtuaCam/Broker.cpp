@@ -28,7 +28,6 @@ static LUID g_adapterLuid = {};
 static std::unique_ptr<VirtuaCam::Discovery> g_discovery;
 static std::unique_ptr<Multiplexer> g_multiplexer;
 
-const WCHAR* BROKER_MANIFEST_NAME = L"Global\\DirectPort_Producer_Manifest_VirtuaCast_Broker";
 static ComPtr<ID3D11Texture2D> g_sharedTex_Out;
 static ComPtr<ID3D11Fence> g_sharedFence_Out;
 static HANDLE g_hManifest_Out = nullptr;
@@ -110,19 +109,18 @@ HRESULT CreateSharingResources(UINT width, UINT height, DXGI_FORMAT format) {
     RETURN_IF_FAILED(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(g_sharedFence_Out.GetAddressOf())));
 
     wil::unique_hlocal_security_descriptor sd;
-    PSECURITY_DESCRIPTOR sd_ptr = nullptr;
-    THROW_IF_WIN32_BOOL_FALSE(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;AU)", SDDL_REVISION_1, &sd_ptr, NULL));
-    sd.reset(sd_ptr);
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), sd.get(), FALSE };
+    SECURITY_ATTRIBUTES sa = {};
+    RETURN_IF_FAILED(CreateCurrentUserOnlySecurityAttributes(sd, sa));
 
-    const wchar_t* textureName = L"Global\\VirtuaCast_Broker_Texture";
-    const wchar_t* fenceName = L"Global\\VirtuaCast_Broker_Fence";
+    const std::wstring textureName = GetBrokerTextureName();
+    const std::wstring fenceName = GetBrokerFenceName();
+    const std::wstring manifestName = GetBrokerManifestName();
     ComPtr<IDXGIResource1> r1;
     g_sharedTex_Out.As(&r1);
-    RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_ALL, textureName, &g_sharedNTHandle_Out));
-    RETURN_IF_FAILED(g_sharedFence_Out->CreateSharedHandle(&sa, GENERIC_ALL, fenceName, &g_sharedFenceHandle_Out));
+    RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, textureName.c_str(), &g_sharedNTHandle_Out));
+    RETURN_IF_FAILED(g_sharedFence_Out->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_sharedFenceHandle_Out));
 
-    g_hManifest_Out = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(BroadcastManifest), BROKER_MANIFEST_NAME);
+    g_hManifest_Out = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(BroadcastManifest), manifestName.c_str());
     if (!g_hManifest_Out) return HRESULT_FROM_WIN32(GetLastError());
     
     g_pManifestView_Out = (BroadcastManifest*)MapViewOfFile(g_hManifest_Out, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BroadcastManifest));
@@ -132,8 +130,8 @@ HRESULT CreateSharingResources(UINT width, UINT height, DXGI_FORMAT format) {
     g_pManifestView_Out->width = width; g_pManifestView_Out->height = height;
     g_pManifestView_Out->format = format; g_pManifestView_Out->adapterLuid = g_adapterLuid;
     g_pManifestView_Out->command = VCamCommand::None;
-    wcscpy_s(g_pManifestView_Out->textureName, _countof(g_pManifestView_Out->textureName), textureName);
-    wcscpy_s(g_pManifestView_Out->fenceName, _countof(g_pManifestView_Out->fenceName), fenceName);
+    wcscpy_s(g_pManifestView_Out->textureName, _countof(g_pManifestView_Out->textureName), textureName.c_str());
+    wcscpy_s(g_pManifestView_Out->fenceName, _countof(g_pManifestView_Out->fenceName), fenceName.c_str());
     return S_OK;
 }
 

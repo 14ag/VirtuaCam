@@ -68,19 +68,18 @@ HRESULT InitOutputResources()
     ComPtr<ID3D11Device5> device5; g_device.As(&device5);
     RETURN_IF_FAILED(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&g_sharedOutFence)));
     
-    wil::unique_hlocal_security_descriptor sd; PSECURITY_DESCRIPTOR sd_ptr = nullptr;
-    THROW_IF_WIN32_BOOL_FALSE(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;AU)", SDDL_REVISION_1, &sd_ptr, NULL));
-    sd.reset(sd_ptr);
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), sd.get(), FALSE };
+    wil::unique_hlocal_security_descriptor sd;
+    SECURITY_ATTRIBUTES sa = {};
+    RETURN_IF_FAILED(CreateCurrentUserOnlySecurityAttributes(sd, sa));
 
     DWORD pid = GetCurrentProcessId();
-    std::wstring manifestName = L"DirectPort_Producer_Manifest_" + std::to_wstring(pid);
-    std::wstring textureName = L"Global\\DirectPortTexture_" + std::to_wstring(pid);
-    std::wstring fenceName = L"Global\\DirectPortFence_" + std::to_wstring(pid);
+    std::wstring manifestName = GetProducerManifestName(pid);
+    std::wstring textureName = GetProducerTextureName(pid);
+    std::wstring fenceName = GetProducerFenceName(pid);
 
     ComPtr<IDXGIResource1> r1; g_sharedOutTexture.As(&r1);
-    RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_ALL, textureName.c_str(), &g_sharedOutTextureHandle));
-    RETURN_IF_FAILED(g_sharedOutFence->CreateSharedHandle(&sa, GENERIC_ALL, fenceName.c_str(), &g_sharedOutFenceHandle));
+    RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, textureName.c_str(), &g_sharedOutTextureHandle));
+    RETURN_IF_FAILED(g_sharedOutFence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_sharedOutFenceHandle));
     
     g_hManifestOut = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(BroadcastManifest), manifestName.c_str());
     RETURN_HR_IF_NULL(E_FAIL, g_hManifestOut);

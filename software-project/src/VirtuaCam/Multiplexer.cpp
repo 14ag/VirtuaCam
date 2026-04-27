@@ -170,7 +170,7 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
     }
 
     for (auto& res : m_producerResources) {
-        wil::unique_handle hManifest(OpenFileMappingW(FILE_MAP_READ, FALSE, (L"DirectPort_Producer_Manifest_" + std::to_wstring(res.pid)).c_str()));
+        wil::unique_handle hManifest(OpenFileMappingW(FILE_MAP_READ, FALSE, GetProducerManifestName(res.pid).c_str()));
         if (!hManifest) continue;
         BroadcastManifest* pView = (BroadcastManifest*)MapViewOfFile(hManifest.get(), FILE_MAP_READ, 0, 0, sizeof(BroadcastManifest));
         if (!pView) continue;

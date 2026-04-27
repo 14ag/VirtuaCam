@@ -321,15 +321,13 @@ namespace BuiltInCaptureProducer
         RETURN_IF_FAILED(g_d3d11Device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&g_sharedD3D11Fence)));
 
         DWORD pid = GetCurrentProcessId();
-        std::wstring manifestName = L"DirectPort_Producer_Manifest_" + std::to_wstring(pid);
-        std::wstring texName = L"Global\\DirectPortTexture_" + std::to_wstring(pid);
-        std::wstring fenceName = L"Global\\DirectPortFence_" + std::to_wstring(pid);
+        std::wstring manifestName = GetProducerManifestName(pid);
+        std::wstring texName = GetProducerTextureName(pid);
+        std::wstring fenceName = GetProducerFenceName(pid);
 
         wil::unique_hlocal_security_descriptor sd;
-        PSECURITY_DESCRIPTOR sd_ptr = nullptr;
-        THROW_IF_WIN32_BOOL_FALSE(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;AU)", SDDL_REVISION_1, &sd_ptr, NULL));
-        sd.reset(sd_ptr);
-        SECURITY_ATTRIBUTES sa = { sizeof(sa), sd.get(), FALSE };
+        SECURITY_ATTRIBUTES sa = {};
+        RETURN_IF_FAILED(CreateCurrentUserOnlySecurityAttributes(sd, sa));
 
         g_hManifest = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(BroadcastManifest), manifestName.c_str());
         if (!g_hManifest) return HRESULT_FROM_WIN32(GetLastError());
@@ -354,8 +352,8 @@ namespace BuiltInCaptureProducer
 
         ComPtr<IDXGIResource1> r1;
         g_sharedD3D11Texture.As(&r1);
-        RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_ALL, texName.c_str(), &g_hSharedTextureHandle));
-        RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_ALL, fenceName.c_str(), &g_hSharedFenceHandle));
+        RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, texName.c_str(), &g_hSharedTextureHandle));
+        RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_hSharedFenceHandle));
 
         return S_OK;
     }
@@ -623,15 +621,13 @@ namespace BuiltInCameraProducer
         RETURN_IF_FAILED(g_d3d11Device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&g_sharedD3D11Fence)));
 
         DWORD pid = GetCurrentProcessId();
-        std::wstring manifestName = L"DirectPort_Producer_Manifest_" + std::to_wstring(pid);
-        std::wstring texName = L"Global\\DirectPortTexture_" + std::to_wstring(pid);
-        std::wstring fenceName = L"Global\\DirectPortFence_" + std::to_wstring(pid);
+        std::wstring manifestName = GetProducerManifestName(pid);
+        std::wstring texName = GetProducerTextureName(pid);
+        std::wstring fenceName = GetProducerFenceName(pid);
 
         wil::unique_hlocal_security_descriptor sd;
-        PSECURITY_DESCRIPTOR sd_ptr = nullptr;
-        THROW_IF_WIN32_BOOL_FALSE(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;AU)", SDDL_REVISION_1, &sd_ptr, NULL));
-        sd.reset(sd_ptr);
-        SECURITY_ATTRIBUTES sa = { sizeof(sa), sd.get(), FALSE };
+        SECURITY_ATTRIBUTES sa = {};
+        RETURN_IF_FAILED(CreateCurrentUserOnlySecurityAttributes(sd, sa));
 
         g_hManifest = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(BroadcastManifest), manifestName.c_str());
         if (!g_hManifest) return HRESULT_FROM_WIN32(GetLastError());
@@ -656,8 +652,8 @@ namespace BuiltInCameraProducer
 
         ComPtr<IDXGIResource1> r1;
         g_sharedD3D11Texture.As(&r1);
-        RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_ALL, texName.c_str(), &g_hSharedTextureHandle));
-        RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_ALL, fenceName.c_str(), &g_hSharedFenceHandle));
+        RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, texName.c_str(), &g_hSharedTextureHandle));
+        RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_hSharedFenceHandle));
 
         return S_OK;
     }

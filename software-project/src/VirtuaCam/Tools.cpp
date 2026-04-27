@@ -2,6 +2,7 @@
 #include "Tools.h"
 #include "Enumerator.h"
 #include <d3d12.h>
+#include <sddl.h>
 
 std::string to_string(const std::wstring& ws)
 {
@@ -306,7 +307,7 @@ HRESULT RGB32ToNV12(BYTE* input, ULONG inputSize, LONG inputStride, UINT width, 
     return S_OK;
 }
 
-HANDLE GetHandleFromName(const WCHAR* name)
+HANDLE GetHandleFromName(const WCHAR* name, DWORD desiredAccess)
 {
     wil::com_ptr_nothrow<ID3D12Device> d3d12Device;
     if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12Device))))
@@ -314,8 +315,87 @@ HANDLE GetHandleFromName(const WCHAR* name)
         return NULL;
     }
     HANDLE handle = nullptr;
-    d3d12Device->OpenSharedHandleByName(name, GENERIC_ALL, &handle);
+    d3d12Device->OpenSharedHandleByName(name, desiredAccess, &handle);
     return handle;
+}
+
+HRESULT CreateCurrentUserOnlySecurityAttributes(wil::unique_hlocal_security_descriptor& descriptor, SECURITY_ATTRIBUTES& sa)
+{
+    sa = {};
+
+    wil::unique_handle token;
+    RETURN_LAST_ERROR_IF(!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, token.put()));
+
+    DWORD needed = 0;
+    GetTokenInformation(token.get(), TokenUser, nullptr, 0, &needed);
+    RETURN_LAST_ERROR_IF(GetLastError() != ERROR_INSUFFICIENT_BUFFER);
+
+    std::vector<BYTE> buffer(needed);
+    RETURN_LAST_ERROR_IF(!GetTokenInformation(token.get(), TokenUser, buffer.data(), needed, &needed));
+
+    const TOKEN_USER* tokenUser = reinterpret_cast<const TOKEN_USER*>(buffer.data());
+    RETURN_HR_IF(E_FAIL, !tokenUser || !tokenUser->User.Sid);
+
+    wil::unique_hlocal_string sidString;
+    RETURN_LAST_ERROR_IF(!ConvertSidToStringSidW(tokenUser->User.Sid, sidString.put()));
+
+    std::wstring sddl = std::format(
+        L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{})",
+        sidString.get());
+
+    PSECURITY_DESCRIPTOR sdPtr = nullptr;
+    RETURN_LAST_ERROR_IF(!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl.c_str(),
+        SDDL_REVISION_1,
+        &sdPtr,
+        nullptr));
+
+    descriptor.reset(sdPtr);
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = descriptor.get();
+    sa.bInheritHandle = FALSE;
+    return S_OK;
+}
+
+namespace
+{
+    constexpr wchar_t kLocalPrefix[] = L"Local\\";
+    constexpr wchar_t kProducerManifestPrefix[] = L"DirectPort_Producer_Manifest_";
+    constexpr wchar_t kProducerTexturePrefix[] = L"DirectPortTexture_";
+    constexpr wchar_t kProducerFencePrefix[] = L"DirectPortFence_";
+    constexpr wchar_t kBrokerManifestBase[] = L"DirectPort_Producer_Manifest_VirtuaCast_Broker";
+    constexpr wchar_t kBrokerTextureBase[] = L"VirtuaCast_Broker_Texture";
+    constexpr wchar_t kBrokerFenceBase[] = L"VirtuaCast_Broker_Fence";
+}
+
+std::wstring GetProducerManifestName(DWORD pid)
+{
+    return std::format(L"{}{}{}", kLocalPrefix, kProducerManifestPrefix, pid);
+}
+
+std::wstring GetProducerTextureName(DWORD pid)
+{
+    return std::format(L"{}{}{}", kLocalPrefix, kProducerTexturePrefix, pid);
+}
+
+std::wstring GetProducerFenceName(DWORD pid)
+{
+    return std::format(L"{}{}{}", kLocalPrefix, kProducerFencePrefix, pid);
+}
+
+std::wstring GetBrokerManifestName()
+{
+    return std::wstring(kLocalPrefix) + kBrokerManifestBase;
+}
+
+std::wstring GetBrokerTextureName()
+{
+    return std::wstring(kLocalPrefix) + kBrokerTextureBase;
+}
+
+std::wstring GetBrokerFenceName()
+{
+    return std::wstring(kLocalPrefix) + kBrokerFenceBase;
 }
 
 void TraceMFAttributes(IUnknown* unknown, PCWSTR prefix)
