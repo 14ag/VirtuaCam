@@ -444,6 +444,9 @@ Return Value:
         if (!m_ClientRequestEventObject) {
             Status = STATUS_INSUFFICIENT_RESOURCES;
         } else {
+            ObReferenceObject(m_ClientRequestEventObject);
+            ZwClose(m_ClientRequestEvent);
+            m_ClientRequestEvent = NULL;
             KeClearEvent(m_ClientRequestEventObject);
         }
     }
@@ -476,7 +479,10 @@ Return Value:
             ZwClose(m_ClientRequestEvent);
             m_ClientRequestEvent = NULL;
         }
-        m_ClientRequestEventObject = NULL;
+        if (m_ClientRequestEventObject) {
+            ObDereferenceObject(m_ClientRequestEventObject);
+            m_ClientRequestEventObject = NULL;
+        }
         if (m_DefaultFrameBuffer) {
             ExFreePoolWithTag(m_DefaultFrameBuffer, AVSHWS_POOLTAG);
             m_DefaultFrameBuffer = NULL;
@@ -578,6 +584,10 @@ Return Value:
 
 }
 
+#ifdef ALLOC_PRAGMA
+#pragma code_seg()
+#endif // ALLOC_PRAGMA
+
 NTSTATUS
 CHardwareSimulation::
 Stop (
@@ -601,8 +611,6 @@ Return Value:
 --*/
 
 {
-    PAGED_CODE();
-
     KIRQL Irql;
 
     KeCancelTimer (&m_IsrTimer);
@@ -658,7 +666,10 @@ Return Value:
         ZwClose(m_ClientRequestEvent);
         m_ClientRequestEvent = NULL;
     }
-    m_ClientRequestEventObject = NULL;
+    if (m_ClientRequestEventObject) {
+        ObDereferenceObject(m_ClientRequestEventObject);
+        m_ClientRequestEventObject = NULL;
+    }
 
     //
     // Protect the S/G list

@@ -353,6 +353,10 @@ Return Value:
 /*************************************************/
 
 
+#ifdef ALLOC_PRAGMA
+#pragma code_seg()
+#endif // ALLOC_PRAGMA
+
 void
 CCaptureDevice::
 PnpStop (
@@ -377,8 +381,6 @@ Return Value:
 
 {
 
-    PAGED_CODE();
-
     if (m_HardwareSimulation) {
         (void)m_HardwareSimulation -> Stop ();
     }
@@ -400,6 +402,10 @@ Return Value:
 }
 
 /*************************************************/
+
+#ifdef ALLOC_PRAGMA
+#pragma code_seg("PAGE")
+#endif // ALLOC_PRAGMA
 
 
 NTSTATUS
