@@ -323,7 +323,7 @@ Return Value:
     // subsequent start.  Hardware drivers with resources should evaluate
     // resources and make changes on 2nd start.
     //
-    if (NT_SUCCESS(Status) && (!m_Device -> Started)) {
+    if (NT_SUCCESS(Status) && !m_HardwareSimulation) {
 
         m_HardwareSimulation = new (NonPagedPoolNx, 'miSH') CHardwareSimulation (this);
         if (!m_HardwareSimulation) {
@@ -341,6 +341,7 @@ Return Value:
 
             if (!NT_SUCCESS (Status)) {
                 delete m_HardwareSimulation;
+                m_HardwareSimulation = NULL;
             }
         }
     }
@@ -599,6 +600,10 @@ Return Value:
 
     PAGED_CODE();
 
+    if (!m_HardwareSimulation) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
     m_LastMappingsCompleted = 0;
     m_InterruptTime = 0;
 
@@ -653,6 +658,10 @@ Return Value:
 
     PAGED_CODE();
 
+    if (!m_HardwareSimulation) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
     return
         m_HardwareSimulation -> Pause (
             Pausing
@@ -687,6 +696,10 @@ Return Value:
 {
 
     PAGED_CODE();
+
+    if (!m_HardwareSimulation) {
+        return STATUS_SUCCESS;
+    }
 
     return
         m_HardwareSimulation -> Stop ();
@@ -736,7 +749,9 @@ Return Value:
 
     PAGED_CODE();
 
-    
+    if (!m_HardwareSimulation) {
+        return 0;
+    }
 
     return 
         m_HardwareSimulation -> ProgramScatterGatherMappings (
@@ -784,6 +799,9 @@ Return Value:
 --*/
 
 {
+    if (!m_HardwareSimulation) {
+        return m_InterruptTime;
+    }
 
     return m_InterruptTime;
 
@@ -815,6 +833,9 @@ Return Value:
 --*/
 
 {
+    if (!m_HardwareSimulation || !m_CaptureSink) {
+        return;
+    }
 
     m_InterruptTime++;
 

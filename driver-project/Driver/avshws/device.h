@@ -290,7 +290,7 @@ public:
     Interrupt (
         );
 
-    LONG GetDroppedFrameCount(){return m_HardwareSimulation->GetSkippedFrameCount();};
+    LONG GetDroppedFrameCount(){return m_HardwareSimulation ? m_HardwareSimulation->GetSkippedFrameCount() : 0;};
 
 
 
