@@ -135,7 +135,7 @@ SetData(
 	ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.InputBufferLength;
 
 	if (bufferLength <= sizeof(KSPROPERTY) || Data == NULL) {
-		return STATUS_SUCCESS;
+		return STATUS_INVALID_PARAMETER;
 	}
 
 	ULONG dataLength = bufferLength - sizeof(KSPROPERTY);
