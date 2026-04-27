@@ -50,6 +50,19 @@ Run:
 2. Pick a source from tray menu
 3. Select the virtual camera in your target app
 
+## Hyper-V driver test loop
+
+Use Hyper-V guest `driver-test` for crash repro, verifier, dump collection, and kernel debugger attach:
+
+```powershell
+.\scripts\hyperv-driver-loop.ps1 -GuestUser Administrator
+```
+
+Helper entry points:
+
+- `.\scripts\hyperv-kd.ps1`
+- `.\scripts\hyperv-collect.ps1`
+
 ## Runtime shape
 
 ```text
