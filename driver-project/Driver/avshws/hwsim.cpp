@@ -585,7 +585,7 @@ Return Value:
 }
 
 #ifdef ALLOC_PRAGMA
-#pragma code_seg()
+#pragma code_seg(push, avshws_stopseg, ".text")
 #endif // ALLOC_PRAGMA
 
 NTSTATUS
@@ -612,6 +612,7 @@ Return Value:
 
 {
     KIRQL Irql;
+    DbgPrint("[avshws] HwSim::Stop begin sim=%p state=%lu queued=%lu irql=%lu\n", this, (ULONG)m_HardwareState, m_ScatterGatherMappingsQueued, (ULONG)KeGetCurrentIrql());
 
     KeCancelTimer (&m_IsrTimer);
 
@@ -704,9 +705,15 @@ Return Value:
     m_ScatterGatherBytesQueued = 0;
     KeReleaseSpinLock (&m_ListLock, Irql);
 
+    DbgPrint("[avshws] HwSim::Stop end sim=%p queued=%lu irql=%lu\n", this, m_ScatterGatherMappingsQueued, (ULONG)KeGetCurrentIrql());
+
     return STATUS_SUCCESS;
 
 }
+
+#ifdef ALLOC_PRAGMA
+#pragma code_seg(pop, avshws_stopseg)
+#endif // ALLOC_PRAGMA
 
 /**************************************************************************
 
@@ -1140,6 +1147,9 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     KeQuerySystemTimePrecise(&now);
     KeAcquireSpinLock(&m_FrameLock, &irql);
 
+    static volatile LONG s_hwFrameSequence = 0;
+    LONG seq = _InterlockedIncrement(&s_hwFrameSequence);
+
 	for (ULONG y = 0; y < m_Height; y++)
 	{
 		PUCHAR buffer = m_TemporaryBuffer + ((m_Width * 3) * (m_Height - 1 - y));
@@ -1149,6 +1159,9 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 	}
     m_LastFrameTime = now;
     KeReleaseSpinLock(&m_FrameLock, irql);
+    if (seq <= 3 || seq % 30 == 0) {
+        DbgPrint("[avshws] HwSim::SetData frame=%ld len=%lu client=%lu irql=%lu\n", seq, dataLength, (ULONG)clientConnected, (ULONG)KeGetCurrentIrql());
+    }
 }
 
 void CHardwareSimulation::SetClientConnected(BOOLEAN connected)
@@ -1162,6 +1175,7 @@ void CHardwareSimulation::SetClientConnected(BOOLEAN connected)
         m_LastFrameTime.QuadPart = 0;
     }
     KeReleaseSpinLock(&m_FrameLock, irql);
+    DbgPrint("[avshws] HwSim::SetClientConnected connected=%lu irql=%lu\n", (ULONG)connected, (ULONG)KeGetCurrentIrql());
 }
 
 BOOLEAN CHardwareSimulation::IsClientConnected()
@@ -1176,6 +1190,7 @@ BOOLEAN CHardwareSimulation::IsClientConnected()
 
 void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
 {
+    DbgPrint("[avshws] HwSim::NotifyCameraState running=%lu connected=%lu irql=%lu\n", (ULONG)isRunning, (ULONG)IsClientConnected(), (ULONG)KeGetCurrentIrql());
     if (!m_ClientRequestEventObject) {
         return;
     }

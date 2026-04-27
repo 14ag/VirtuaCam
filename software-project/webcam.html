@@ -6,31 +6,227 @@
     <style>
         body {
             margin: 0;
-            background: #111;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
+            min-height: 100vh;
+            background:
+                radial-gradient(circle at top, rgba(70, 128, 197, 0.35), transparent 45%),
+                linear-gradient(180deg, #10151d 0%, #090c11 100%);
             color: white;
-            font-family: Arial, sans-serif;
+            font-family: "Segoe UI", Arial, sans-serif;
+        }
+        .layout {
+            min-height: 100vh;
+            display: grid;
+            grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+        }
+        .panel {
+            padding: 24px;
+            border-right: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(8, 12, 18, 0.72);
+            backdrop-filter: blur(12px);
+        }
+        .panel h1 {
+            margin: 0 0 12px;
+            font-size: 24px;
+            letter-spacing: 0.04em;
+        }
+        .panel p {
+            margin: 0 0 18px;
+            color: rgba(255, 255, 255, 0.72);
+            line-height: 1.5;
+        }
+        .status {
+            display: grid;
+            gap: 10px;
+        }
+        .status-row {
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.06);
+        }
+        .status-row strong {
+            display: block;
+            margin-bottom: 4px;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: rgba(255, 255, 255, 0.62);
+        }
+        .status-row span {
+            word-break: break-word;
+        }
+        .status-row.error span {
+            color: #ffb0b0;
+        }
+        .viewport {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 28px;
+        }
+        .video-shell {
+            width: min(92vw, 1100px);
+            aspect-ratio: 16 / 9;
+            border-radius: 18px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(0, 0, 0, 0.4);
+            box-shadow: 0 18px 60px rgba(0, 0, 0, 0.4);
+            overflow: hidden;
+            position: relative;
         }
         video {
-            width: 80%;
-            max-width: 800px;
-            border: 2px solid #444;
-            border-radius: 8px;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+            background: #020406;
+        }
+        .overlay {
+            position: absolute;
+            inset: auto 18px 18px 18px;
+            padding: 10px 14px;
+            border-radius: 999px;
+            background: rgba(5, 8, 12, 0.74);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: rgba(255, 255, 255, 0.88);
+            font-size: 14px;
+            letter-spacing: 0.02em;
+        }
+        @media (max-width: 900px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
+            .panel {
+                border-right: 0;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            }
+            .viewport {
+                padding: 16px;
+            }
         }
     </style>
 </head>
 <body>
-
-    <video id="webcam" autoplay playsinline></video>
+    <div class="layout">
+        <aside class="panel">
+            <h1>VM Webcam Probe</h1>
+            <p>Machine-friendly page for guest Chrome proof. Status stays visible. Errors stay inspectable.</p>
+            <div class="status">
+                <div class="status-row">
+                    <strong>Phase</strong>
+                    <span id="phase">starting</span>
+                </div>
+                <div class="status-row">
+                    <strong>Device</strong>
+                    <span id="device">waiting</span>
+                </div>
+                <div class="status-row">
+                    <strong>Track</strong>
+                    <span id="track">waiting</span>
+                </div>
+                <div class="status-row">
+                    <strong>Video Size</strong>
+                    <span id="dimensions">0x0</span>
+                </div>
+                <div class="status-row">
+                    <strong>Enumerated Cameras</strong>
+                    <span id="enumerate-count">0</span>
+                </div>
+                <div class="status-row error">
+                    <strong>Error</strong>
+                    <span id="error">none</span>
+                </div>
+            </div>
+        </aside>
+        <main class="viewport">
+            <div class="video-shell">
+                <video id="webcam" autoplay playsinline muted></video>
+                <div class="overlay" id="overlay">Waiting for webcam...</div>
+            </div>
+        </main>
+    </div>
 
     <script>
         const video = document.getElementById('webcam');
+        const phaseEl = document.getElementById('phase');
+        const deviceEl = document.getElementById('device');
+        const trackEl = document.getElementById('track');
+        const dimensionsEl = document.getElementById('dimensions');
+        const enumerateCountEl = document.getElementById('enumerate-count');
+        const errorEl = document.getElementById('error');
+        const overlayEl = document.getElementById('overlay');
+        const webcamLogs = [];
+
+        const webcamStatus = {
+            phase: 'starting',
+            enumerateCount: 0,
+            selectedDeviceLabel: '',
+            selectedDeviceId: '',
+            trackLabel: '',
+            trackState: '',
+            videoWidth: 0,
+            videoHeight: 0,
+            errorName: '',
+            errorMessage: '',
+            updatedAt: new Date().toISOString()
+        };
+
+        window.__webcamStatus = webcamStatus;
+        window.__webcamLogs = webcamLogs;
 
         function logInfo(message) {
-            console.log('[webcam.html] ' + message);
+            const line = '[webcam.html] ' + message;
+            webcamLogs.push(line);
+            if (webcamLogs.length > 200) {
+                webcamLogs.shift();
+            }
+            console.log(line);
+        }
+
+        function renderStatus() {
+            phaseEl.textContent = webcamStatus.phase;
+            deviceEl.textContent = webcamStatus.selectedDeviceLabel || webcamStatus.selectedDeviceId || 'default';
+            trackEl.textContent = webcamStatus.trackLabel
+                ? webcamStatus.trackLabel + ' (' + (webcamStatus.trackState || 'unknown') + ')'
+                : (webcamStatus.trackState || 'waiting');
+            dimensionsEl.textContent = webcamStatus.videoWidth + 'x' + webcamStatus.videoHeight;
+            enumerateCountEl.textContent = String(webcamStatus.enumerateCount);
+            errorEl.textContent = webcamStatus.errorName
+                ? webcamStatus.errorName + ': ' + webcamStatus.errorMessage
+                : 'none';
+            overlayEl.textContent = webcamStatus.phase === 'live'
+                ? 'Live feed ' + webcamStatus.videoWidth + 'x' + webcamStatus.videoHeight
+                : 'Phase: ' + webcamStatus.phase;
+        }
+
+        function updateStatus(patch) {
+            Object.assign(webcamStatus, patch, {
+                updatedAt: new Date().toISOString()
+            });
+            renderStatus();
+        }
+
+        function setError(name, message) {
+            updateStatus({
+                phase: 'error',
+                errorName: name || 'UnknownError',
+                errorMessage: message || ''
+            });
+            logInfo('error state: ' + webcamStatus.errorName + ' - ' + webcamStatus.errorMessage);
+        }
+
+        function attachVideoListeners() {
+            video.addEventListener('loadedmetadata', () => {
+                updateStatus({
+                    videoWidth: video.videoWidth || 0,
+                    videoHeight: video.videoHeight || 0
+                });
+            });
+            video.addEventListener('resize', () => {
+                updateStatus({
+                    videoWidth: video.videoWidth || 0,
+                    videoHeight: video.videoHeight || 0
+                });
+            });
         }
 
         function choosePreferredCamera(devices) {
@@ -50,11 +246,9 @@
             }
 
             if (videoInputs.length === 1) {
-                logInfo('single camera detected; selecting exact deviceId');
+                logInfo('single camera detected; using default video selection');
                 return {
-                    video: {
-                        deviceId: { exact: videoInputs[0].deviceId }
-                    },
+                    video: true,
                     audio: false
                 };
             }
@@ -67,60 +261,91 @@
         }
 
         async function startWebcam() {
-            // check that mediaDevices API exists in this browser and context
+            attachVideoListeners();
+
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                alert('Camera API not available - use HTTPS or a modern browser');
+                setError('MediaDevicesUnavailable', 'Camera API not available. Use localhost/HTTPS and modern browser.');
                 return;
             }
 
-            // enumerate devices to confirm at least one real videoinput exists
-            // before requesting the stream
             let hasCamera = false;
             let devices = [];
             try {
                 devices = await navigator.mediaDevices.enumerateDevices();
                 logInfo('enumerateDevices returned ' + devices.length + ' device(s)');
                 hasCamera = devices.some(device => device.kind === 'videoinput');
+                updateStatus({
+                    phase: 'enumerated',
+                    enumerateCount: devices.filter(device => device.kind === 'videoinput').length
+                });
             } catch (enumErr) {
-                // enumerateDevices failed - proceed anyway and let getUserMedia report the real error
-                // this can happen on some browsers before permissions are granted
                 hasCamera = true;
+                logInfo('enumerateDevices failed: ' + (enumErr && enumErr.message ? enumErr.message : enumErr));
             }
 
             if (!hasCamera) {
-                alert('No camera device detected on this system');
+                setError('NoCameraDetected', 'No camera device detected on this system');
                 return;
             }
 
             try {
-                const stream = await navigator.mediaDevices.getUserMedia(choosePreferredCamera(devices));
+                let stream;
+                const requestedConstraints = choosePreferredCamera(devices);
+                updateStatus({
+                    phase: 'requesting',
+                    selectedDeviceId: requestedConstraints.video && requestedConstraints.video.deviceId ? requestedConstraints.video.deviceId.exact : '',
+                    selectedDeviceLabel: ''
+                });
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia(requestedConstraints);
+                } catch (initialError) {
+                    if (initialError && (initialError.name === 'OverconstrainedError' || initialError.name === 'NotFoundError')) {
+                        logInfo('preferred constraints failed; retrying with default video device');
+                        stream = await navigator.mediaDevices.getUserMedia({
+                            video: true,
+                            audio: false
+                        });
+                    } else {
+                        throw initialError;
+                    }
+                }
 
                 video.srcObject = stream;
 
-                // confirm the track is actually live after stream is attached
-                // a device may be detected but already in use or hardware-blocked
                 const track = stream.getVideoTracks()[0];
                 logInfo('selected track: ' + (track && track.label ? track.label : '(no label yet)'));
+                updateStatus({
+                    selectedDeviceLabel: track && track.label ? track.label : webcamStatus.selectedDeviceLabel,
+                    trackLabel: track && track.label ? track.label : '',
+                    trackState: track && track.readyState ? track.readyState : '',
+                    videoWidth: video.videoWidth || 0,
+                    videoHeight: video.videoHeight || 0
+                });
+
                 if (!track || track.readyState !== 'live') {
-                    alert('Camera stream acquired but track is not live - device may be in use');
                     stream.getTracks().forEach(t => t.stop());
                     video.srcObject = null;
-                    logInfo('stream attached but track not live');
+                    setError('TrackNotLive', 'Camera stream acquired but track is not live');
                 } else {
+                    updateStatus({
+                        phase: 'live',
+                        trackState: track.readyState,
+                        errorName: '',
+                        errorMessage: '',
+                        videoWidth: video.videoWidth || 0,
+                        videoHeight: video.videoHeight || 0
+                    });
                     logInfo('stream attached; readyState=' + track.readyState);
                 }
 
             } catch (error) {
-                // surface the specific DOMException name for easier diagnosis
-                // NotAllowedError means permission denied
-                // NotFoundError means no device matched the constraints
-                // NotReadableError means hardware or OS blocked the device
                 const reason = error.name || 'UnknownError';
                 console.error('Webcam error - ' + reason + ' - ' + error.message);
-                alert('Unable to access webcam\nReason: ' + reason + '\n' + error.message);
+                setError(reason, error.message || '');
             }
         }
 
+        renderStatus();
         startWebcam();
     </script>
 

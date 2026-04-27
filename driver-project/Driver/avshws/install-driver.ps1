@@ -327,7 +327,7 @@ Import-TestCertificateIfPresent -Path $CertificatePath
 
 Remove-ExistingDriverPackageIfRequested -Id $HardwareId
 
-Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $resolvedInf, "/install") -AllowedExitCodes @(0,259)
+Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $resolvedInf, "/install") -AllowedExitCodes @(0,259,3010)
 
 $existingDevices = @(Get-AvshwsDevices -Id $HardwareId)
 if ($existingDevices.Count -eq 0) {

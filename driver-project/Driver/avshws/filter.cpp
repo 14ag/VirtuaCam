@@ -140,16 +140,16 @@ SetData(
 	PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
 	ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.InputBufferLength;
 
-	if (bufferLength <= sizeof(KSPROPERTY) || Data == NULL) {
+	if (bufferLength == 0 || Data == NULL) {
 		return STATUS_INVALID_PARAMETER;
 	}
 
-	ULONG dataLength = bufferLength - sizeof(KSPROPERTY);
+	ULONG dataLength = bufferLength;
 
 	static volatile LONG s_driverFrameCount = 0;
 	LONG n = _InterlockedIncrement(&s_driverFrameCount);
-	if (n % 30 == 0) {
-		DbgPrint("[avshws] SetData called, frame #%ld received, len=%lu\n", n, dataLength);
+	if (n <= 3 || n % 30 == 0) {
+		DbgPrint("[avshws] SetData frame=%ld len=%lu irql=%lu\n", n, dataLength, (ULONG)KeGetCurrentIrql());
 	}
 
 	CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
@@ -173,6 +173,9 @@ SetConnect(
 
     CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
     CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
+    static volatile LONG s_connectSequence = 0;
+    LONG seq = _InterlockedIncrement(&s_connectSequence);
+    DbgPrint("[avshws] SetConnect seq=%ld irql=%lu\n", seq, (ULONG)KeGetCurrentIrql());
     device->ConnectClient();
     return STATUS_SUCCESS;
 }
@@ -192,6 +195,9 @@ SetDisconnect(
 
     CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
     CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
+    static volatile LONG s_disconnectSequence = 0;
+    LONG seq = _InterlockedIncrement(&s_disconnectSequence);
+    DbgPrint("[avshws] SetDisconnect seq=%ld irql=%lu\n", seq, (ULONG)KeGetCurrentIrql());
     device->DisconnectClient();
     return STATUS_SUCCESS;
 }

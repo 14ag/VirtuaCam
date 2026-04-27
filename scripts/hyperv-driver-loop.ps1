@@ -9,6 +9,7 @@ param(
     [switch]$EnableVerifier,
     [switch]$EnableKernelDebug,
     [ValidateSet("None", "VirtuaCam", "CameraApp", "WebcamHtml")][string]$ReproMode = "CameraApp",
+    [ValidateSet("Chrome", "Edge")][string]$Browser = "Chrome",
     [string]$ArtifactRoot = "",
     [string]$PipeName = "",
     [ValidateSet("kd", "windbg")][string]$Debugger = "kd",
@@ -207,13 +208,15 @@ try {
         Write-HvLog -Message ("Launching guest repro mode: {0}" -f $ReproMode) -LogPath $LogPath -Level STEP
         try {
             $reproInfo = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
-                param($PackageRoot, $Mode, $WaitSeconds, $HtmlPath)
+                param($PackageRoot, $Mode, $WaitSeconds, $HtmlPath, $Browser)
 
                 $exe = Join-Path $PackageRoot "VirtuaCam.exe"
                 $proc = Join-Path $PackageRoot "VirtuaCamProcess.exe"
+                $chrome = Join-Path ${env:ProgramFiles} "Google\Chrome\Application\chrome.exe"
                 $edge = Join-Path ${env:ProgramFiles(x86)} "Microsoft\Edge\Application\msedge.exe"
+                $browserExe = if ($Browser -eq "Chrome" -and (Test-Path -LiteralPath $chrome)) { $chrome } elseif (Test-Path -LiteralPath $edge) { $edge } else { $chrome }
 
-                Get-Process -Name "VirtuaCam", "VirtuaCamProcess", "WindowsCamera" -ErrorAction SilentlyContinue |
+                Get-Process -Name "VirtuaCam", "VirtuaCamProcess", "WindowsCamera", "chrome", "msedge" -ErrorAction SilentlyContinue |
                     Stop-Process -Force -ErrorAction SilentlyContinue
 
                 if (Test-Path -LiteralPath $proc) {
@@ -229,8 +232,8 @@ try {
                         Start-Process "microsoft.windows.camera:" | Out-Null
                     }
                     "WebcamHtml" {
-                        if (Test-Path -LiteralPath $edge) {
-                            Start-Process -FilePath $edge -ArgumentList @("--new-window", $HtmlPath) | Out-Null
+                        if (Test-Path -LiteralPath $browserExe) {
+                            Start-Process -FilePath $browserExe -ArgumentList @("--new-window", $HtmlPath) | Out-Null
                         } elseif (Test-Path -LiteralPath $HtmlPath) {
                             Start-Process -FilePath $HtmlPath | Out-Null
                         }
@@ -245,10 +248,11 @@ try {
 
                 [pscustomobject]@{
                     Mode           = $Mode
+                    Browser        = $Browser
                     VirtuaCamAlive = [bool](Get-Process -Name "VirtuaCam" -ErrorAction SilentlyContinue)
                     ProcessAlive   = [bool](Get-Process -Name "VirtuaCamProcess" -ErrorAction SilentlyContinue)
                 }
-            } -ArgumentList $guestPackageRoot, $ReproMode, $ReproWaitSeconds, $guestWebcamHtml
+            } -ArgumentList $guestPackageRoot, $ReproMode, $ReproWaitSeconds, $guestWebcamHtml, $Browser
             $reproInfo | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $artifactDir "repro-result.json")
         }
         catch {

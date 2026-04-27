@@ -30,6 +30,26 @@
 #include <ksmedia.h>
 #include <ntintsafe.h>
 
+namespace
+{
+    const char* KsStateToStringLocal(KSSTATE state)
+    {
+        switch (state)
+        {
+        case KSSTATE_STOP:
+            return "STOP";
+        case KSSTATE_ACQUIRE:
+            return "ACQUIRE";
+        case KSSTATE_PAUSE:
+            return "PAUSE";
+        case KSSTATE_RUN:
+            return "RUN";
+        default:
+            return "UNKNOWN";
+        }
+    }
+}
+
 /**************************************************************************
 
     PAGEABLE CODE
@@ -559,6 +579,7 @@ Return Value:
 
     PKSSTREAM_POINTER Clone = KsPinGetFirstCloneStreamPointer (m_Pin);
     PKSSTREAM_POINTER NextClone = NULL;
+    ULONG deletedClones = 0;
 
     //
     // Walk through the clones, deleting them, and setting DataUsed to
@@ -570,10 +591,13 @@ Return Value:
 
         Clone -> StreamHeader -> DataUsed = 0;
         KsStreamPointerDelete (Clone);
+        deletedClones++;
 
         Clone = NextClone;
 
     }
+
+    DbgPrint("[avshws] CleanupReferences pin=%p deleted=%lu irql=%lu\n", m_Pin, deletedClones, (ULONG)KeGetCurrentIrql());
 
     return STATUS_SUCCESS;
 
@@ -617,6 +641,13 @@ Return Value:
     PAGED_CODE();
 
     NTSTATUS Status = STATUS_SUCCESS;
+    DbgPrint(
+        "[avshws] SetState pin=%p %s->%s hw=%lu irql=%lu\n",
+        m_Pin,
+        KsStateToStringLocal(FromState),
+        KsStateToStringLocal(ToState),
+        (ULONG)m_HardwareState,
+        (ULONG)KeGetCurrentIrql());
 
     switch (ToState) {
 
@@ -781,6 +812,14 @@ Return Value:
             break;
 
     }
+
+    DbgPrint(
+        "[avshws] SetState complete pin=%p %s->%s status=0x%08X hw=%lu\n",
+        m_Pin,
+        KsStateToStringLocal(FromState),
+        KsStateToStringLocal(ToState),
+        Status,
+        (ULONG)m_HardwareState);
 
     return Status;
 
