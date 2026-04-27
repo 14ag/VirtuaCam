@@ -12,6 +12,7 @@
 #include "Formats.h"
 #include "Discovery.h"
 #include "Multiplexer.h"
+#include "RuntimeLog.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -40,6 +41,51 @@ static std::mutex g_producerListMutex;
 static bool g_isGridMode = false;
 
 static BrokerState g_brokerState = BrokerState::Searching;
+static BrokerState g_lastLoggedBrokerState = static_cast<BrokerState>(-1);
+static bool g_loggedFirstCompositeAfterConnect = false;
+
+bool BrokerDebugLoggingEnabled()
+{
+    const wchar_t* cmdLine = GetCommandLineW();
+    return cmdLine && (wcsstr(cmdLine, L"-debug") != nullptr || wcsstr(cmdLine, L"/debug") != nullptr);
+}
+
+void EnsureBrokerLoggingInitialized()
+{
+    VirtuaCamLog::InitOptions logOpts;
+    logOpts.logFileName = L"virtuacam-runtime.log";
+    logOpts.attachConsole = false;
+    logOpts.allocConsoleIfMissing = false;
+    logOpts.enabled = BrokerDebugLoggingEnabled();
+    VirtuaCamLog::Init(logOpts);
+}
+
+const wchar_t* BrokerStateToString(BrokerState state)
+{
+    switch (state) {
+    case BrokerState::Searching: return L"Searching";
+    case BrokerState::Connected: return L"Connected";
+    case BrokerState::Failed: return L"Failed";
+    default: return L"Unknown";
+    }
+}
+
+void LogBrokerStateTransition(BrokerState newState, size_t discoveredStreamCount, size_t activeProducerPidCount)
+{
+    if (newState == g_lastLoggedBrokerState) {
+        return;
+    }
+
+    VirtuaCamLog::LogLine(std::format(
+        L"Broker state -> {} (mode={} discoveredStreams={} activeProducerPids={})",
+        BrokerStateToString(newState),
+        g_isGridMode ? L"Grid" : L"Priority",
+        discoveredStreamCount,
+        activeProducerPidCount));
+
+    g_lastLoggedBrokerState = newState;
+    g_loggedFirstCompositeAfterConnect = false;
+}
 
 void ShutdownSharing() {
     if (g_pManifestView_Out) UnmapViewOfFile(g_pManifestView_Out);
@@ -101,6 +147,7 @@ HRESULT InitD3D11_Broker() {
 
 extern "C" {
     BROKER_API void InitializeBroker() {
+        EnsureBrokerLoggingInitialized();
         CoInitializeEx(NULL, COINIT_MULTITHREADED);
         if (SUCCEEDED(InitD3D11_Broker())) {
             g_discovery = std::make_unique<VirtuaCam::Discovery>();
@@ -110,6 +157,7 @@ extern "C" {
             g_multiplexer->Initialize(g_device);
 
             CreateSharingResources(1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM);
+            VirtuaCamLog::LogLine(L"Broker initialize complete");
         }
     }
 
@@ -120,6 +168,8 @@ extern "C" {
         g_device.Reset();
         g_multiplexer.reset();
         g_discovery.reset();
+        VirtuaCamLog::LogLine(L"Broker shutdown complete");
+        VirtuaCamLog::Shutdown();
         CoUninitialize();
     }
     
@@ -139,11 +189,13 @@ extern "C" {
         const auto& allStreams = g_discovery->GetDiscoveredStreams();
         
         std::vector<VirtuaCam::DiscoveredSharedStream> streamsToMux;
+        size_t activeProducerPidCount = 0;
         
         {
             std::lock_guard<std::mutex> lock(g_producerListMutex);
             if (g_isGridMode) {
                 streamsToMux = allStreams;
+                activeProducerPidCount = allStreams.size();
             } else {
                 streamsToMux.reserve(g_producerPriorityList.size());
                 for (DWORD pid : g_producerPriorityList) {
@@ -155,6 +207,7 @@ extern "C" {
                         
                         if (it != allStreams.end()) {
                             streamsToMux.push_back(*it);
+                            activeProducerPidCount++;
                         } else {
                             streamsToMux.push_back({});
                         }
@@ -170,6 +223,8 @@ extern "C" {
         } else {
             g_brokerState = BrokerState::Failed;
         }
+
+        LogBrokerStateTransition(g_brokerState, allStreams.size(), activeProducerPidCount);
         
         g_multiplexer->CompositeFrames(streamsToMux, g_isGridMode);
 
@@ -181,6 +236,14 @@ extern "C" {
         context.As(&context4);
         UINT64 frameValue = g_multiplexer->GetOutputFrameValue();
         context4->Signal(g_sharedFence_Out.Get(), frameValue);
+
+        if (g_brokerState == BrokerState::Connected && !g_loggedFirstCompositeAfterConnect) {
+            VirtuaCamLog::LogLine(std::format(
+                L"Broker first composite after Connected: frameValue={} muxInputs={}",
+                frameValue,
+                streamsToMux.size()));
+            g_loggedFirstCompositeAfterConnect = true;
+        }
         
         InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView_Out->frameValue), frameValue);
         g_pManifestView_Out->command = VCamCommand::None;

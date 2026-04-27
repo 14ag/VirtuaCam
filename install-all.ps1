@@ -11,14 +11,31 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-function Write-Step { param([string]$Message) Write-Host "`n" -NoNewline; Write-Host "--- [STEP] $Message ---" -ForegroundColor Yellow }
-function Write-Success { param([string]$Message) Write-Host "  - SUCCESS:" -ForegroundColor Green -NoNewline; Write-Host " $Message" }
-function Write-Info { param([string]$Message) Write-Host "  - INFO:" -ForegroundColor Cyan -NoNewline; Write-Host " $Message" }
+function Write-InstallLog {
+    param([string]$Message)
+
+    if (-not $script:logPath) {
+        return
+    }
+
+    $logDir = Split-Path -Parent $script:logPath
+    if ($logDir) {
+        $null = New-Item -ItemType Directory -Force -Path $logDir
+    }
+
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff zzz"
+    Add-Content -LiteralPath $script:logPath -Value ("[{0}] {1}" -f $ts, $Message)
+}
+
+function Write-Step { param([string]$Message) Write-Host "`n" -NoNewline; Write-Host "--- [STEP] $Message ---" -ForegroundColor Yellow; Write-InstallLog "--- [STEP] $Message ---" }
+function Write-Success { param([string]$Message) Write-Host "  - SUCCESS:" -ForegroundColor Green -NoNewline; Write-Host " $Message"; Write-InstallLog "SUCCESS: $Message" }
+function Write-Info { param([string]$Message) Write-Host "  - INFO:" -ForegroundColor Cyan -NoNewline; Write-Host " $Message"; Write-InstallLog "INFO: $Message" }
 function Fail {
     param([string]$Message)
     Write-Host "`n==================== FATAL INSTALL ERROR ====================" -ForegroundColor Red
     Write-Host "  $Message" -ForegroundColor Red
     Write-Host "============================================================" -ForegroundColor Red
+    Write-InstallLog "FATAL: $Message"
     exit 1
 }
 
@@ -29,10 +46,15 @@ function Invoke-NativeProcess {
         [int[]]$AllowedExitCodes = @(0)
     )
 
-    Write-Host "> $FilePath $($Arguments -join ' ')"
+    $commandLine = "> $FilePath $($Arguments -join ' ')"
+    Write-Host $commandLine
+    Write-InstallLog $commandLine
     $output = & $FilePath @Arguments 2>&1
     if ($null -ne $output) {
-        $output | ForEach-Object { Write-Host $_ }
+        $output | ForEach-Object {
+            Write-Host $_
+            Write-InstallLog "$_"
+        }
     }
 
     if ($AllowedExitCodes -notcontains $LASTEXITCODE) {
