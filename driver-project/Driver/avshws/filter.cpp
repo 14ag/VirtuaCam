@@ -110,6 +110,12 @@ GetData(
 {
 	PAGED_CODE();
 
+	PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
+	ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
+	if (!Data || bufferLength < sizeof(DWORD)) {
+		return STATUS_BUFFER_TOO_SMALL;
+	}
+
 	PDWORD dataPtr = (PDWORD)Data;
 
 	*dataPtr = 0xAA77AA77;

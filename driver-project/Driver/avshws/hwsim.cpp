@@ -273,6 +273,15 @@ CHardwareSimulation::
 ~CHardwareSimulation (
     )
 {
+    if (m_HardwareState != HardwareStopped ||
+        m_SynthesisBuffer ||
+        m_TemporaryBuffer ||
+        m_DefaultFrameBuffer ||
+        m_ClientRequestEvent ||
+        m_ScatterGatherMappingsQueued) {
+        (void)Stop ();
+    }
+
     if (m_ScatterGatherLookasideInitialized) {
         ExDeleteLookasideListEx(&m_ScatterGatherLookaside);
     }
@@ -595,6 +604,9 @@ Return Value:
     PAGED_CODE();
 
     KIRQL Irql;
+
+    KeCancelTimer (&m_IsrTimer);
+
     //
     // If the hardware is told to stop while it's running, we need to
     // halt the interrupts first.  If we're already paused, this has
@@ -617,12 +629,15 @@ Return Value:
     }
 
     m_HardwareState = HardwareStopped;
+    m_StopHardware = FALSE;
 
     //
     // The image synthesizer may still be around.  Just for safety's
     // sake, NULL out the image synthesis buffer and toast it.
     //
-    m_ImageSynth -> SetBuffer (NULL);
+    if (m_ImageSynth) {
+        m_ImageSynth -> SetBuffer (NULL);
+    }
 
     if (m_SynthesisBuffer) {
         ExFreePoolWithTag (m_SynthesisBuffer, AVSHWS_POOLTAG);
@@ -893,13 +908,16 @@ Return Value:
         //
         // Since we're software, we'll be accessing this by virtual address...
         //
-        ULONG BytesToCopy =
-            (BufferRemaining < SGEntry -> ByteCount) ?
-            BufferRemaining :
-            SGEntry -> ByteCount;
+        if (!SGEntry -> Virtual || !m_ImageSynth) {
+            if (m_ScatterGatherLookasideInitialized) {
+                ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
+            } else {
+                ExFreePoolWithTag(SGEntry, kScatterGatherEntryTag);
+            }
+            return STATUS_INVALID_PARAMETER;
+        }
 
-        LONG Width = m_Width*(m_ImageSynth->GetBytesPerPixel());
-
+        LONG Width = m_Width * (m_ImageSynth -> GetBytesPerPixel());
         LONG Stride = Width;
         if(SGEntry->CloneEntry->StreamHeader->Size >= sizeof(KSSTREAM_HEADER)+sizeof(KS_FRAME_INFO))
         {
@@ -914,11 +932,32 @@ Return Value:
             }
         }
 
+        if (Stride < Width) {
+            if (m_ScatterGatherLookasideInitialized) {
+                ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
+            } else {
+                ExFreePoolWithTag(SGEntry, kScatterGatherEntryTag);
+            }
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        ULONGLONG RequiredBytes = Width;
+        if (m_Height > 0) {
+            RequiredBytes += static_cast <ULONGLONG> (Stride) * (m_Height - 1);
+        }
+        if (RequiredBytes > SGEntry -> ByteCount) {
+            if (m_ScatterGatherLookasideInitialized) {
+                ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
+            } else {
+                ExFreePoolWithTag(SGEntry, kScatterGatherEntryTag);
+            }
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
         for(ULONG y = 0; y < m_Height; y++)
         {
             RtlCopyMemory((SGEntry->Virtual+(ULONG)Stride*y), Buffer, Width);
             Buffer += Width;
-            BytesToCopy -= Width;
             BufferRemaining -= Width;
         }
 
