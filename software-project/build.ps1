@@ -64,6 +64,35 @@ function Get-X64CompilerPath {
     return $null
 }
 
+function Get-VcRedistX64Dir {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vswhere)) {
+        return $null
+    }
+
+    $installationPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Redist.14.Latest -property installationPath
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($installationPath)) {
+        return $null
+    }
+
+    $redistRoot = Join-Path $installationPath "VC\Redist\MSVC"
+    if (-not (Test-Path $redistRoot)) {
+        return $null
+    }
+
+    $redistDir = Get-ChildItem -Path $redistRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $redistDir) {
+        return $null
+    }
+
+    $crtDir = Join-Path $redistDir.FullName "x64\Microsoft.VC143.CRT"
+    if (Test-Path $crtDir) {
+        return $crtDir
+    }
+
+    return $null
+}
+
 # --- Main Script Body ---
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host " DirectPort Build Script (v10 - Incremental)"
@@ -200,6 +229,11 @@ $allowed = @(
     "DirectPortClient.dll",
     "DirectPortConsumer.dll"
 )
+$vcRuntimeArtifacts = @(
+    "msvcp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll"
+)
 
 # Clean out legacy producer DLLs if they were staged by older builds.
 foreach ($legacy in @("DirectPortMFCamera.dll", "DirectPortMFGraphicsCapture.dll")) {
@@ -226,6 +260,21 @@ foreach ($name in $allowed) {
     } else {
         Write-Host "  - WARNING: Missing build artifact (not staged): $name" -ForegroundColor Yellow
     }
+}
+
+$vcRedistDir = Get-VcRedistX64Dir
+if (-not $vcRedistDir) {
+    Exit-WithError "Visual C++ x64 runtime redist folder not found."
+}
+
+foreach ($name in $vcRuntimeArtifacts) {
+    $src = Join-Path $vcRedistDir $name
+    if (-not (Test-Path -LiteralPath $src)) {
+        Exit-WithError "Missing VC runtime artifact: $src"
+    }
+
+    Copy-Item -LiteralPath $src -Destination $OutputBinDir -Force
+    Write-Success "Staged: $name"
 }
 
 if ($copiedFiles -eq 0) {

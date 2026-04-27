@@ -76,6 +76,25 @@ function Get-X64CompilerPath {
     return $null
 }
 
+function Get-VcRedistX64Dir {
+    $vswhere = Get-VsWherePath
+    if (-not $vswhere) { return $null }
+
+    $installationPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Redist.14.Latest -property installationPath
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($installationPath)) { return $null }
+
+    $redistRoot = Join-Path $installationPath "VC\Redist\MSVC"
+    if (-not (Test-Path -LiteralPath $redistRoot)) { return $null }
+
+    $redistDir = Get-ChildItem -Path $redistRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+    if (-not $redistDir) { return $null }
+
+    $crtDir = Join-Path $redistDir.FullName "x64\Microsoft.VC143.CRT"
+    if (Test-Path -LiteralPath $crtDir) { return $crtDir }
+
+    return $null
+}
+
 function Get-WdkRoot {
     try {
         $roots = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots" -ErrorAction Stop
@@ -288,6 +307,12 @@ if (-not $SkipSoftware) {
         "DirectPortConsumer.dll"
     )
 
+    $vcRuntimeArtifacts = @(
+        "msvcp140.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll"
+    )
+
     foreach ($name in $softwareArtifacts) {
         $src = Join-Path $softwareArtifactDir $name
         if (-not (Test-Path -LiteralPath $src)) {
@@ -298,6 +323,19 @@ if (-not $SkipSoftware) {
         if (Test-Path -LiteralPath $pdb) {
             Copy-Item -LiteralPath $pdb -Destination $OutputRoot -Force
         }
+    }
+
+    $vcRedistDir = Get-VcRedistX64Dir
+    if (-not $vcRedistDir) {
+        Fail "Visual C++ x64 runtime redist folder not found."
+    }
+
+    foreach ($name in $vcRuntimeArtifacts) {
+        $src = Join-Path $vcRedistDir $name
+        if (-not (Test-Path -LiteralPath $src)) {
+            Fail "Missing VC runtime artifact: $src"
+        }
+        Copy-Item -LiteralPath $src -Destination $OutputRoot -Force
     }
 
     Write-Success "Software staged -> $OutputRoot"
@@ -394,7 +432,10 @@ $requiredSoftware = @(
     "VirtuaCamProcess.exe",
     "DirectPortBroker.dll",
     "DirectPortClient.dll",
-    "DirectPortConsumer.dll"
+    "DirectPortConsumer.dll",
+    "msvcp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll"
 )
 $requiredDriver = @(
     "avshws.sys",
