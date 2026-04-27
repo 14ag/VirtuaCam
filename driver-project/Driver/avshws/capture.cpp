@@ -290,6 +290,7 @@ Return Value:
     if (!NT_SUCCESS (Status)) {
 
         ExFreePoolWithTag (m_VideoInfoHeader, AVSHWS_POOLTAG);
+        m_VideoInfoHeader = NULL;
         return NULL;
 
     } else {

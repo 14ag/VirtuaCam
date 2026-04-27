@@ -379,6 +379,14 @@ Return Value:
 
     PAGED_CODE();
 
+    if (m_HardwareSimulation) {
+        (void)m_HardwareSimulation -> Stop ();
+    }
+
+    if (m_PinsWithResources) {
+        ReleaseHardwareResources ();
+    }
+
     if (m_DmaAdapterObject) {
         //
         // Return the DMA adapter back to the system.
@@ -893,9 +901,9 @@ CaptureDeviceDispatch = {
     CCaptureDevice::DispatchPnpStop,        // Pnp Stop
     NULL,                                   // Pnp Query Remove
     NULL,                                   // Pnp Cancel Remove
-    NULL,                                   // Pnp Remove
+    CCaptureDevice::DispatchPnpStop,        // Pnp Remove
     NULL,                                   // Pnp Query Capabilities
-    NULL,                                   // Pnp Surprise Removal
+    CCaptureDevice::DispatchPnpStop,        // Pnp Surprise Removal
     NULL,                                   // Power Query Power
     NULL,                                   // Power Set Power
     NULL                                    // Pnp Query Interface
