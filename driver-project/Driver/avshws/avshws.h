@@ -195,6 +195,7 @@ typedef struct _VIRTUACAM_DRIVER_STATUS {
     ULONG SetDataAcceptedCount;
     ULONG SetDataRejectedCount;
     ULONG LastSetDataReason;
+    ULONGLONG CompletedFrameCount;
     ULONGLONG LastFrameTime100ns;
 } VIRTUACAM_DRIVER_STATUS, *PVIRTUACAM_DRIVER_STATUS;
 
@@ -238,6 +239,11 @@ public:
     CompleteMappings (
         IN ULONG NumMappings
         ) = 0;
+
+    virtual
+    ULONGLONG
+    GetCompletedFrameCount (
+        ) const = 0;
 
 };
 

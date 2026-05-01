@@ -211,6 +211,14 @@ public:
         IN ULONG NumMappings
         );
 
+    virtual
+    ULONGLONG
+    GetCompletedFrameCount (
+        ) const
+    {
+        return static_cast<ULONGLONG>(m_FrameNumber);
+    }
+
     /*************************************************
 
         Dispatch Routines

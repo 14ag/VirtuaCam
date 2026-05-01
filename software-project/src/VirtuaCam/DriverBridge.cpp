@@ -46,6 +46,7 @@ namespace
         ULONG SetDataAcceptedCount = 0;
         ULONG SetDataRejectedCount = 0;
         ULONG LastSetDataReason = 0;
+        ULONGLONG CompletedFrameCount = 0;
         ULONGLONG LastFrameTime100ns = 0;
     };
 
@@ -357,7 +358,7 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
     }
 
     VirtuaCamLog::LogLine(std::format(
-        L"{} frame={} hw={} client={} queuedMappings={} queuedBytes={} completed={} skipped={} lastFill=0x{:08X} stride={} widthBytes={} required={} byteCount={} remaining={} lastSetLen={} setOk={} setReject={} rejectReason={} returned={}",
+        L"{} frame={} hw={} client={} queuedMappings={} queuedBytes={} completed={} completedFrames={} skipped={} lastFill=0x{:08X} stride={} widthBytes={} required={} byteCount={} remaining={} lastSetLen={} setOk={} setReject={} rejectReason={} returned={}",
         prefix ? prefix : L"Driver status",
         frameSequence,
         status.HardwareState,
@@ -365,6 +366,7 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
         status.ScatterGatherMappingsQueued,
         status.ScatterGatherBytesQueued,
         status.NumMappingsCompleted,
+        status.CompletedFrameCount,
         status.NumFramesSkipped,
         status.LastFillStatus,
         status.LastFillStride,

@@ -1782,9 +1782,9 @@ DECLARE_SIMPLE_FRAMING_EX (
 // This is the list of data ranges supported on the capture pin.  We support
 // two: one RGB24, and one YUY2.
 //
-const 
-PKSDATARANGE 
+const
+PKSDATARANGE
 CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
     (PKSDATARANGE) &FormatYUY2_Capture,
     (PKSDATARANGE) &FormatRGB24Bpp_Capture
-    };
+};

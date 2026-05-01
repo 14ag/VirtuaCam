@@ -1039,4 +1039,8 @@ void CCaptureDevice::QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status)
     if (m_HardwareSimulation) {
         m_HardwareSimulation->QueryStatus(status);
     }
+
+    if (m_CaptureSink) {
+        status->CompletedFrameCount = m_CaptureSink->GetCompletedFrameCount();
+    }
 }
