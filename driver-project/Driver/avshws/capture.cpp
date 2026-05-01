@@ -1785,5 +1785,6 @@ DECLARE_SIMPLE_FRAMING_EX (
 const 
 PKSDATARANGE 
 CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
+    (PKSDATARANGE) &FormatYUY2_Capture,
     (PKSDATARANGE) &FormatRGB24Bpp_Capture
     };

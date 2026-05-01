@@ -149,21 +149,11 @@ SetData(
 		return STATUS_INVALID_PARAMETER;
 	}
 
-	ULONG dataLength = bufferLength;
+	ULONG dataLength = VIRTUACAM_FRAME_BUFFER_SIZE;
 	CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
 	VIRTUACAM_DRIVER_STATUS driverStatus = {};
 	driverStatus.Size = sizeof(driverStatus);
 	device->QueryStatus(&driverStatus);
-
-	if (driverStatus.Width != 0 && driverStatus.Height != 0) {
-		ULONGLONG expectedLength64 =
-			static_cast<ULONGLONG>(driverStatus.Width) *
-			static_cast<ULONGLONG>(driverStatus.Height) *
-			3ull;
-		if (expectedLength64 <= MAXULONG && expectedLength64 > dataLength) {
-			dataLength = static_cast<ULONG>(expectedLength64);
-		}
-	}
 
     PUCHAR frameCopy = reinterpret_cast<PUCHAR>(
         ExAllocatePool2(

@@ -290,25 +290,6 @@ finally {
         netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=9223 | Out-Null
         netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=9223 connectaddress=127.0.0.1 connectport=9222 | Out-Null
 
-        $virtuaCamProcess = $null
-        if (Test-Path -LiteralPath $processExe) {
-            $virtuaCamProcess = Invoke-WithAttemptEnvironment -AttemptValue $AttemptId -Action {
-                Start-Process -FilePath $processExe -WorkingDirectory $PackageRoot -ArgumentList @("-debug") -WindowStyle Hidden -PassThru
-            }
-        }
-
-        $virtuaCamRuntime = $null
-        if (Test-Path -LiteralPath $runtimeExe) {
-            $virtuaCamRuntime = Invoke-WithAttemptEnvironment -AttemptValue $AttemptId -Action {
-                Start-Process -FilePath $runtimeExe -WorkingDirectory $PackageRoot -ArgumentList @("/startup", "-debug", "--source-window-hwnd", "$hwnd") -PassThru
-            }
-        }
-        else {
-            throw "VirtuaCam.exe missing: $runtimeExe"
-        }
-
-        Start-Sleep -Seconds 4
-
         $browserUrl = "file:///" + ($HtmlPath -replace "\\", "/")
         if ($ServeHttp) {
             Start-Process powershell.exe -ArgumentList @(
@@ -345,6 +326,25 @@ finally {
         $browserProc = $null
         $browserProc = Invoke-WithAttemptEnvironment -AttemptValue $AttemptId -Action {
             Start-Process -FilePath $browserExe -ArgumentList $defaultBrowserArgs -PassThru
+        }
+
+        Start-Sleep -Seconds 5
+
+        $virtuaCamProcess = $null
+        if (Test-Path -LiteralPath $processExe) {
+            $virtuaCamProcess = Invoke-WithAttemptEnvironment -AttemptValue $AttemptId -Action {
+                Start-Process -FilePath $processExe -WorkingDirectory $PackageRoot -ArgumentList @("-debug") -WindowStyle Hidden -PassThru
+            }
+        }
+
+        $virtuaCamRuntime = $null
+        if (Test-Path -LiteralPath $runtimeExe) {
+            $virtuaCamRuntime = Invoke-WithAttemptEnvironment -AttemptValue $AttemptId -Action {
+                Start-Process -FilePath $runtimeExe -WorkingDirectory $PackageRoot -ArgumentList @("/startup", "-debug", "--source-window-hwnd", "$hwnd") -PassThru
+            }
+        }
+        else {
+            throw "VirtuaCam.exe missing: $runtimeExe"
         }
 
         Start-Sleep -Seconds 6
