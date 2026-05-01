@@ -72,7 +72,17 @@ CCapturePin (
     IN PKSPIN Pin
     ) :
     m_Pin (Pin)
+    ,m_Device (NULL)
+    ,m_HardwareState (HardwareStopped)
+    ,m_Clock (NULL)
+    ,m_VideoInfoHeader (NULL)
+    ,m_VideoInfoHeaderSize (0)
+    ,m_PreviousStreamPointer (NULL)
+    ,m_PendIo (FALSE)
+    ,m_AcquiredResources (FALSE)
     ,m_PresentationTime (0)
+    ,m_FrameNumber (0)
+    ,m_DroppedFrames (0)
 
 /*++
 
@@ -252,6 +262,10 @@ Return Value:
 
 /*************************************************/
 
+#ifdef ALLOC_PRAGMA
+#pragma code_seg()
+#endif // ALLOC_PRAGMA
+
 
 PKS_VIDEOINFOHEADER 
 CCapturePin::
@@ -277,18 +291,46 @@ Return Value:
 --*/
 
 {
-
-    PAGED_CODE();
-
     PKS_VIDEOINFOHEADER ConnectionHeader =
         &((reinterpret_cast <PKS_DATAFORMAT_VIDEOINFOHEADER> 
             (m_Pin -> ConnectionFormat)) -> 
             VideoInfoHeader);
 
+    ULONG headerSize = KS_SIZE_VIDEOHEADER (ConnectionHeader);
+
+    if (m_VideoInfoHeader) {
+        if (headerSize > m_VideoInfoHeaderSize) {
+            DbgPrint("[avshws] CaptureVideoInfoHeader size mismatch old=%lu new=%lu irql=%lu\n",
+                m_VideoInfoHeaderSize,
+                headerSize,
+                (ULONG)KeGetCurrentIrql());
+            return NULL;
+        }
+
+        RtlCopyMemory (
+            m_VideoInfoHeader,
+            ConnectionHeader,
+            headerSize
+            );
+
+        DbgPrint("[avshws] CaptureVideoInfoHeader reuse header=%p size=%lu irql=%lu\n",
+            m_VideoInfoHeader,
+            headerSize,
+            (ULONG)KeGetCurrentIrql());
+
+        return m_VideoInfoHeader;
+    }
+
+    if (KeGetCurrentIrql() > PASSIVE_LEVEL) {
+        DbgPrint("[avshws] CaptureVideoInfoHeader missing header at IRQL=%lu\n",
+            (ULONG)KeGetCurrentIrql());
+        return NULL;
+    }
+
     m_VideoInfoHeader = reinterpret_cast <PKS_VIDEOINFOHEADER> (
         ExAllocatePool2 (
             POOL_FLAG_NON_PAGED,
-            KS_SIZE_VIDEOHEADER (ConnectionHeader),
+            headerSize,
             AVSHWS_POOLTAG
             )
         );
@@ -322,14 +364,24 @@ Return Value:
         RtlCopyMemory (
             m_VideoInfoHeader,
             ConnectionHeader,
-            KS_SIZE_VIDEOHEADER (ConnectionHeader)
+            headerSize
             );
+
+        m_VideoInfoHeaderSize = headerSize;
+        DbgPrint("[avshws] CaptureVideoInfoHeader alloc header=%p size=%lu irql=%lu\n",
+            m_VideoInfoHeader,
+            headerSize,
+            (ULONG)KeGetCurrentIrql());
 
     }
 
     return m_VideoInfoHeader;
 
 }
+
+#ifdef ALLOC_PRAGMA
+#pragma code_seg("PAGE")
+#endif // ALLOC_PRAGMA
 
 
 NTSTATUS
@@ -373,15 +425,6 @@ Return Value:
         PKSSTREAM_POINTER ClonePointer;
         PSTREAM_POINTER_CONTEXT SPContext = NULL;
 
-        //
-        // If no data is present in the Leading edge stream pointer, just 
-        // move on to the next frame
-        //
-        if ( NULL == Leading -> StreamHeader -> Data ) {
-            Status = KsStreamPointerAdvance(Leading);
-            continue;
-        }
-        //
         // For optimization sake in this particular sample, I will only keep
         // one clone stream pointer per frame.  This complicates the logic
         // here but simplifies the completions.
@@ -409,6 +452,30 @@ Return Value:
             // mapping corresponds to for the fake hardware.
             //
             if (NT_SUCCESS (Status)) {
+                PUCHAR BufferVirtual =
+                    reinterpret_cast<PUCHAR>(
+                        ClonePointer->StreamHeader->Data);
+
+                if (!BufferVirtual) {
+                    PMDL streamMdl = KsStreamPointerGetMdl(ClonePointer);
+                    if (streamMdl) {
+                        BufferVirtual = reinterpret_cast<PUCHAR>(
+                            MmGetSystemAddressForMdlSafe(
+                                streamMdl,
+                                NormalPagePriority));
+                    }
+                }
+
+                if (!BufferVirtual) {
+                    DbgPrint(
+                        "[avshws] Process missing writable sample VA pin=%p clone=%p irql=%lu\n",
+                        m_Pin,
+                        ClonePointer,
+                        (ULONG)KeGetCurrentIrql());
+                    KsStreamPointerDelete(ClonePointer);
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
 
                 //
                 // Set the stream header data used to 0.  We update this 
@@ -420,10 +487,7 @@ Return Value:
                 SPContext = reinterpret_cast <PSTREAM_POINTER_CONTEXT> 
                     (ClonePointer -> Context);
 
-                SPContext -> BufferVirtual = 
-                    reinterpret_cast <PUCHAR> (
-                        ClonePointer -> StreamHeader -> Data
-                        );
+                SPContext -> BufferVirtual = BufferVirtual;
             }
 
         } else {
@@ -605,6 +669,10 @@ Return Value:
 
 /*************************************************/
 
+#ifdef ALLOC_PRAGMA
+#pragma code_seg()
+#endif // ALLOC_PRAGMA
+
 
 NTSTATUS
 CCapturePin::
@@ -637,9 +705,6 @@ Return Value:
 --*/
 
 {
-
-    PAGED_CODE();
-
     NTSTATUS Status = STATUS_SUCCESS;
     DbgPrint(
         "[avshws] SetState pin=%p %s->%s hw=%lu irql=%lu\n",
@@ -824,6 +889,10 @@ Return Value:
     return Status;
 
 }
+
+#ifdef ALLOC_PRAGMA
+#pragma code_seg("PAGE")
+#endif // ALLOC_PRAGMA
 
 /*************************************************/
 
@@ -1406,6 +1475,8 @@ Return Value:
         // sample.
         //
         if (BytesToCount == Clone -> OffsetOut.Remaining) {
+            LONGLONG presentationTime = 0;
+
             Clone -> StreamHeader -> Duration =
                 m_VideoInfoHeader -> AvgTimePerFrame;
 
@@ -1418,21 +1489,17 @@ Return Value:
             //
             if (m_Clock) {
 
-                LONGLONG ClockTime = m_Clock -> GetTime ();
-
-                Clone -> StreamHeader -> PresentationTime.Time = ClockTime;
-
-                Clone -> StreamHeader -> OptionsFlags =
-                    KSSTREAM_HEADER_OPTIONSF_TIMEVALID |
-                    KSSTREAM_HEADER_OPTIONSF_DURATIONVALID;
+                presentationTime = m_Clock -> GetTime ();
 
             } else {
-	      //
-	      // If there is no clock, don't time stamp the packets.
-	      //
-	      Clone -> StreamHeader -> PresentationTime.Time = 0;
-	      
+                presentationTime = m_PresentationTime;
+                m_PresentationTime += m_VideoInfoHeader -> AvgTimePerFrame;
             }
+
+            Clone -> StreamHeader -> PresentationTime.Time = presentationTime;
+            Clone -> StreamHeader -> OptionsFlags |=
+                KSSTREAM_HEADER_OPTIONSF_TIMEVALID |
+                KSSTREAM_HEADER_OPTIONSF_DURATIONVALID;
 
             //
             // Increment the frame number.  This is the total count of frames which
@@ -1718,6 +1785,5 @@ DECLARE_SIMPLE_FRAMING_EX (
 const 
 PKSDATARANGE 
 CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
-    //(PKSDATARANGE) &FormatYUY2_Capture,
     (PKSDATARANGE) &FormatRGB24Bpp_Capture
     };

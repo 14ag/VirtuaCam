@@ -251,11 +251,17 @@ function Get-FailureInfo {
     )
 
     $proof = Read-JsonFile -Path $ProofResultPath
-    if ($proof -and $proof.errorClass) {
+    $proofErrorClassProp = $null
+    $proofErrorMessageProp = $null
+    if ($proof) {
+        $proofErrorClassProp = $proof.PSObject.Properties["errorClass"]
+        $proofErrorMessageProp = $proof.PSObject.Properties["errorMessage"]
+    }
+    if ($proofErrorClassProp -and $proofErrorClassProp.Value) {
         return [pscustomobject]@{
-            ErrorClass = [string]$proof.errorClass
-            ErrorSignature = [string]$proof.errorClass
-            Message = if ($proof.errorMessage) { [string]$proof.errorMessage } else { [string]$proof.errorClass }
+            ErrorClass = [string]$proofErrorClassProp.Value
+            ErrorSignature = [string]$proofErrorClassProp.Value
+            Message = if ($proofErrorMessageProp -and $proofErrorMessageProp.Value) { [string]$proofErrorMessageProp.Value } else { [string]$proofErrorClassProp.Value }
         }
     }
 
@@ -304,13 +310,15 @@ $holdLogPath = Join-Path $artifactDir "vm-session-host.log"
 $playwrightLogPath = Join-Path $artifactDir "playwright-vm-webcam-proof.log"
 $attemptStatePath = Join-Path $artifactDir "attempt-state.json"
 $proofResultPath = Join-Path $artifactDir "vm-webcam-proof.json"
+$priorAttemptState = Read-JsonFile -Path $attemptStatePath
+$nextAttemptId = if ($priorAttemptState) { [int]$priorAttemptState.attempt + 1 } else { 1 }
 
 $driverPackageRootPath = Resolve-HvPath -Path $DriverPackageRoot -BasePath $repoRoot
 $installDriverScript = Resolve-HvPath -Path "driver-project\Driver\avshws\install-driver.ps1" -BasePath $repoRoot
 $webcamHtml = Resolve-HvPath -Path "software-project\webcam.html" -BasePath $repoRoot
 $holdScript = Resolve-HvPath -Path "scripts\hyperv-hold-webcam-session.ps1" -BasePath $repoRoot
 $proofScript = Resolve-HvPath -Path "scripts\playwright-vm-webcam-proof.ps1" -BasePath $repoRoot
-$guestRoot = "C:\Temp\VirtuaCamHyperV\proof"
+$guestRoot = "C:\Temp\VirtuaCamHyperV\proof-$nextAttemptId"
 $guestPackageRoot = Join-Path $guestRoot (Split-Path -Path $driverPackageRootPath -Leaf)
 $guestScriptsRoot = Join-Path $guestRoot "scripts"
 $guestInstallDriver = Join-Path $guestScriptsRoot "install-driver.ps1"
@@ -323,6 +331,7 @@ $guestCred = Get-HvGuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext
 Write-HvLog -Message ("Hyper-V proof harness start for '{0}'" -f $VmName) -LogPath $LogPath -Level STEP
 Write-HvLog -Message ("ArtifactDir: {0}" -f $artifactDir) -LogPath $LogPath
 Write-HvLog -Message ("DriverPackageRoot: {0}" -f $driverPackageRootPath) -LogPath $LogPath
+Remove-Item -LiteralPath $sessionStatusPath, $stopSignalPath, $proofResultPath -Force -ErrorAction SilentlyContinue
 
 if (-not (Test-Path -LiteralPath $driverPackageRootPath)) {
     Fail-Hv -Message "Driver package root not found: $driverPackageRootPath" -LogPath $LogPath
@@ -447,12 +456,6 @@ try {
     }
 
     Remove-Item -LiteralPath $sessionStatusPath, $stopSignalPath, $proofResultPath -Force -ErrorAction SilentlyContinue
-
-    $nextAttemptId = 1
-    $priorAttemptState = Read-JsonFile -Path $attemptStatePath
-    if ($priorAttemptState) {
-        $nextAttemptId = [int]$priorAttemptState.attempt + 1
-    }
 
     $holdArgs = @(
         "-NoProfile",

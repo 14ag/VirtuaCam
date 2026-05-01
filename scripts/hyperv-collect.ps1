@@ -103,6 +103,7 @@ $guestRunRoot = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -Scrip
         return $sb.ToString()
     }
 
+    $guestRoot = Split-Path -Parent $PackageRoot
     $collectRoot = Join-Path $env:TEMP ("VirtuaCamHyperVCollect-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
     $null = New-Item -ItemType Directory -Force -Path $collectRoot
     $guestOut = Join-Path $collectRoot "guest"
@@ -159,6 +160,21 @@ $guestRunRoot = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -Scrip
                 Copy-Item -LiteralPath $src -Destination (Join-Path $pkgOut $name) -Recurse -Force
             }
         }
+    }
+
+    if ($guestRoot -and (Test-Path -LiteralPath $guestRoot)) {
+        $rootOut = Join-Path $guestOut "guest-root"
+        $null = New-Item -ItemType Directory -Force -Path $rootOut
+        foreach ($name in @("guest-session-status.json", "webcam.html")) {
+            $src = Join-Path $guestRoot $name
+            if (Test-Path -LiteralPath $src) {
+                Copy-Item -LiteralPath $src -Destination (Join-Path $rootOut $name) -Force
+            }
+        }
+        Get-ChildItem -LiteralPath $guestRoot -Filter "chrome_debug*.log" -File -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $rootOut $_.Name) -Force
+            }
     }
 
     return $collectRoot

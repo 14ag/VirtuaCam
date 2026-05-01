@@ -31,6 +31,7 @@ using Microsoft::WRL::ComPtr;
 namespace
 {
     constexpr wchar_t kClientRequestEventName[] = L"VirtuaCamClientRequest";
+    constexpr wchar_t kGlobalClientRequestEventName[] = L"Global\\VirtuaCamClientRequest";
     constexpr DWORD kWatcherOpenRetryMs = 1000;
     constexpr DWORD kProducerIdleWaitMs = 1;
 
@@ -680,6 +681,11 @@ namespace BuiltInCaptureProducer
 
     HANDLE OpenClientRequestEventHandle()
     {
+        HANDLE eventHandle = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kGlobalClientRequestEventName);
+        if (eventHandle) {
+            return eventHandle;
+        }
+
         return OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kClientRequestEventName);
     }
 

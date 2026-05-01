@@ -304,10 +304,11 @@ Return Value:
 
     if (!m_Device -> Started) {
         // Create the Filter for the device
+        WCHAR filterFactoryName[] = L"GLOBAL";
         KsAcquireDevice(m_Device);
         Status = KsCreateFilterFactory( m_Device->FunctionalDeviceObject,
                                         &CaptureFilterDescriptor,
-                                        L"GLOBAL",
+                                        filterFactoryName,
                                         NULL,
                                         KSCREATE_ITEM_FREEONSTOP,
                                         NULL,
@@ -412,7 +413,7 @@ Return Value:
 /*************************************************/
 
 #ifdef ALLOC_PRAGMA
-#pragma code_seg("PAGE")
+#pragma code_seg()
 #endif // ALLOC_PRAGMA
 
 
@@ -595,6 +596,10 @@ Return Value:
 
 /*************************************************/
 
+#ifdef ALLOC_PRAGMA
+#pragma code_seg()
+#endif // ALLOC_PRAGMA
+
 
 NTSTATUS
 CCaptureDevice::
@@ -619,9 +624,6 @@ Return Value:
 --*/
 
 {
-
-    PAGED_CODE();
-
     if (!m_HardwareSimulation) {
         return STATUS_DEVICE_NOT_READY;
     }
@@ -640,6 +642,10 @@ Return Value:
 
 
 }
+
+#ifdef ALLOC_PRAGMA
+#pragma code_seg()
+#endif // ALLOC_PRAGMA
 
 /*************************************************/
 
@@ -677,9 +683,6 @@ Return Value:
 --*/
 
 {
-
-    PAGED_CODE();
-
     if (!m_HardwareSimulation) {
         return STATUS_DEVICE_NOT_READY;
     }
@@ -716,9 +719,6 @@ Return Value:
 --*/
 
 {
-
-    PAGED_CODE();
-
     if (!m_HardwareSimulation) {
         return STATUS_SUCCESS;
     }
@@ -729,6 +729,10 @@ Return Value:
 }
 
 /*************************************************/
+
+#ifdef ALLOC_PRAGMA
+#pragma code_seg("PAGE")
+#endif // ALLOC_PRAGMA
 
 
 ULONG
@@ -1019,5 +1023,20 @@ void CCaptureDevice::NotifyCameraState(BOOLEAN isRunning)
     DbgPrint("[avshws] NotifyCameraState device=%p running=%lu irql=%lu\n", this, (ULONG)isRunning, (ULONG)KeGetCurrentIrql());
     if (m_HardwareSimulation) {
         m_HardwareSimulation->NotifyCameraState(isRunning);
+    }
+}
+
+void CCaptureDevice::QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status)
+{
+    if (!status) {
+        return;
+    }
+
+    RtlZeroMemory(status, sizeof(*status));
+    status->Size = sizeof(*status);
+    status->Version = 1;
+
+    if (m_HardwareSimulation) {
+        m_HardwareSimulation->QueryStatus(status);
     }
 }

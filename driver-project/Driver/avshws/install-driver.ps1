@@ -361,6 +361,24 @@ if ($finalDevices.Count -eq 0) {
     Exit-WithCode -Code 5 -Message "Install finished but no ROOT\\$HardwareId device was found."
 }
 
+foreach ($device in $finalDevices) {
+    if (-not [string]::IsNullOrWhiteSpace($device.PNPDeviceID)) {
+        Write-Log "Restarting device node: $($device.PNPDeviceID)"
+        Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/restart-device", $device.PNPDeviceID) -AllowedExitCodes @(0,259,3010)
+    }
+}
+
+Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/scan-devices")
+
+$cameraEnum = & "$env:WINDIR\System32\pnputil.exe" /enum-devices /class Camera 2>&1
+Write-Log "--- pnputil /enum-devices /class Camera (after restart) ---"
+if ($null -ne $cameraEnum) { $cameraEnum | ForEach-Object { Write-Log $_ } }
+
+$finalDevices = @(Get-AvshwsDevices -Id $HardwareId)
+if ($finalDevices.Count -eq 0) {
+    Exit-WithCode -Code 5 -Message "Device node disappeared after restart."
+}
+
 Write-Log ""
 Write-Log "Driver install complete."
 $finalDevices | ForEach-Object {
