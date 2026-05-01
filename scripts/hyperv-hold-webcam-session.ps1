@@ -99,10 +99,12 @@ try {
         $hwndFile = Join-Path $root "control-panel.hwnd.txt"
         $pidFile = Join-Path $root "control-panel.pid.txt"
         $panelScript = Join-Path $root "show-control-panel.ps1"
+        $panelStdOut = Join-Path $root "show-control-panel.stdout.log"
+        $panelStdErr = Join-Path $root "show-control-panel.stderr.log"
         $serverScript = Join-Path $root "serve-webcam.ps1"
-        $browserDebugLog = Join-Path $root "chrome_debug.log"
+        $browserDebugLog = Join-Path $root ("chrome_debug_{0}.log" -f $AttemptId)
         $guestStatusPath = Join-Path $root "guest-session-status.json"
-        $browserProfile = Join-Path $root (($Browser.ToLowerInvariant()) + "-profile")
+        $browserProfile = Join-Path $root (($Browser.ToLowerInvariant()) + "-profile-" + $AttemptId)
         $runtimeLog = Join-Path $PackageRoot "logs\virtuacam-runtime.log"
         $processLog = Join-Path $PackageRoot "logs\virtuacam-process.log"
         $processExe = Join-Path $PackageRoot "VirtuaCamProcess.exe"
@@ -110,7 +112,7 @@ try {
         $browserExe = Get-BrowserPath -RequestedBrowser $Browser
         $browserProcessName = if ($Browser -eq "Edge") { "msedge" } else { "chrome" }
 
-        $panelScriptText = @"
+$panelScriptText = @"
 param(
     [Parameter(Mandatory=`$true)][string]`$HwndPath,
     [Parameter(Mandatory=`$true)][string]`$PidPath,
@@ -119,13 +121,14 @@ param(
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+`$attemptText = if (`$AttemptId) { `$AttemptId } else { 'n/a' }
 `$form = New-Object System.Windows.Forms.Form
-`$form.Text = 'Control Panel'
+`$form.Text = 'Proof Window'
 `$form.StartPosition = 'CenterScreen'
 `$form.Size = New-Object System.Drawing.Size(900, 620)
 `$form.BackColor = [System.Drawing.Color]::FromArgb(24, 28, 34)
 `$header = New-Object System.Windows.Forms.Label
-`$header.Text = 'Virtual Camera Control Panel'
+`$header.Text = 'Virtual Camera Proof Window'
 `$header.ForeColor = [System.Drawing.Color]::White
 `$header.Font = New-Object System.Drawing.Font('Segoe UI', 18, [System.Drawing.FontStyle]::Bold)
 `$header.AutoSize = `$true
@@ -138,27 +141,27 @@ Add-Type -AssemblyName System.Drawing
 `$group.Location = New-Object System.Drawing.Point(24, 70)
 `$form.Controls.Add(`$group)
 `$preview = New-Object System.Windows.Forms.Panel
-`$preview.BackColor = [System.Drawing.Color]::FromArgb(52, 152, 219)
+`$preview.BackColor = [System.Drawing.Color]::White
 `$preview.Size = New-Object System.Drawing.Size(520, 360)
 `$preview.Location = New-Object System.Drawing.Point(24, 40)
 `$group.Controls.Add(`$preview)
 `$pc = New-Object System.Windows.Forms.Label
-`$pc.Text = 'CONTROL PANEL'
-`$pc.ForeColor = [System.Drawing.Color]::White
-`$pc.Font = New-Object System.Drawing.Font('Segoe UI', 28, [System.Drawing.FontStyle]::Bold)
+`$pc.Text = "VIRTUAL CAMERA PROOF`r`n`r`nAttempt: `$attemptText`r`n`r`nwebcam.html should show this text."
+`$pc.ForeColor = [System.Drawing.Color]::Black
+`$pc.Font = New-Object System.Drawing.Font('Consolas', 20, [System.Drawing.FontStyle]::Bold)
 `$pc.AutoSize = `$true
 `$pc.BackColor = [System.Drawing.Color]::Transparent
-`$pc.Location = New-Object System.Drawing.Point(70, 140)
+`$pc.Location = New-Object System.Drawing.Point(28, 46)
 `$preview.Controls.Add(`$pc)
 `$btn = New-Object System.Windows.Forms.Button
-`$btn.Text = 'Start Camera'
-`$btn.Size = New-Object System.Drawing.Size(140, 36)
+`$btn.Text = 'Driver Test Running'
+`$btn.Size = New-Object System.Drawing.Size(180, 36)
 `$btn.Location = New-Object System.Drawing.Point(580, 60)
 `$group.Controls.Add(`$btn)
 `$list = New-Object System.Windows.Forms.ListBox
 `$list.Size = New-Object System.Drawing.Size(220, 160)
 `$list.Location = New-Object System.Drawing.Point(580, 120)
-`$list.Items.AddRange(@('Virtual Camera Source', 'Window Capture', 'Producer: Control Panel'))
+`$list.Items.AddRange(@('Virtual Camera Source', 'Window Capture', 'Proof text window'))
 `$group.Controls.Add(`$list)
 `$status = New-Object System.Windows.Forms.Label
 `$status.Text = 'Status: Ready'
@@ -166,15 +169,9 @@ Add-Type -AssemblyName System.Drawing
 `$status.AutoSize = `$true
 `$status.Location = New-Object System.Drawing.Point(580, 310)
 `$group.Controls.Add(`$status)
-`$attempt = New-Object System.Windows.Forms.Label
-`$attempt.Text = if (`$AttemptId) { 'Attempt: ' + `$AttemptId } else { 'Attempt: n/a' }
-`$attempt.ForeColor = [System.Drawing.Color]::Gainsboro
-`$attempt.AutoSize = `$true
-`$attempt.Location = New-Object System.Drawing.Point(580, 340)
-`$group.Controls.Add(`$attempt)
 `$form.Add_Shown({
     param(`$sender, `$eventArgs)
-    [System.IO.File]::WriteAllText(`$HwndPath, ([int64]`$sender.Handle).ToString())
+    [System.IO.File]::WriteAllText(`$HwndPath, (`$sender.Handle.ToInt64()).ToString())
     [System.IO.File]::WriteAllText(`$PidPath, `$PID.ToString())
 })
 [System.Windows.Forms.Application]::Run(`$form)
@@ -237,11 +234,19 @@ finally {
 
         Get-Process -Name chrome, msedge, VirtuaCam, VirtuaCamProcess -ErrorAction SilentlyContinue |
             Stop-Process -Force -ErrorAction SilentlyContinue
+        foreach ($procName in @("chrome", "msedge", "VirtuaCam", "VirtuaCamProcess")) {
+            for ($wait = 0; $wait -lt 30; $wait++) {
+                if (-not (Get-Process -Name $procName -ErrorAction SilentlyContinue)) {
+                    break
+                }
+                Start-Sleep -Milliseconds 200
+            }
+        }
         Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
             Where-Object { $_.CommandLine -like "*serve-webcam.ps1*" } |
             Invoke-CimMethod -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null
 
-        Remove-Item -LiteralPath $hwndFile, $pidFile, $browserDebugLog, $guestStatusPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $hwndFile, $pidFile, $browserDebugLog, $guestStatusPath, $panelStdOut, $panelStdErr -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $browserProfile -Recurse -Force -ErrorAction SilentlyContinue
         New-Item -ItemType Directory -Force -Path $browserProfile | Out-Null
 
@@ -253,7 +258,7 @@ finally {
             "-HwndPath", $hwndFile,
             "-PidPath", $pidFile,
             "-AttemptId", $AttemptId
-        ) -PassThru
+        ) -RedirectStandardOutput $panelStdOut -RedirectStandardError $panelStdErr -PassThru
 
         $deadline = (Get-Date).AddSeconds(20)
         do {
@@ -264,6 +269,12 @@ finally {
         } while ((Get-Date) -lt $deadline)
 
         if (-not (Test-Path -LiteralPath $hwndFile)) {
+            if (Test-Path -LiteralPath $panelStdErr) {
+                $stderrText = (Get-Content -LiteralPath $panelStdErr -Raw -ErrorAction SilentlyContinue)
+                if ($stderrText) {
+                    throw ("Timed out waiting for control-panel hwnd file. stderr: " + $stderrText.Trim())
+                }
+            }
             throw "Timed out waiting for control-panel hwnd file."
         }
 

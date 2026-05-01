@@ -2,6 +2,7 @@
 
 #include "pch.h"
 #include <dshow.h>
+#include <dmksctrl.h>
 #include <vector>
 
 class DriverBridge
@@ -25,16 +26,20 @@ private:
     bool IsPropertySetSupported(ULONG propertyId, DWORD* supportFlags = nullptr);
     HRESULT FindDriverFilter();
     HRESULT ReinitializeAfterFailure(HRESULT failureHr);
+    HRESULT SetDriverProperty(ULONG propertyId, void* data, ULONG dataLength, ULONG* bytesReturned = nullptr);
+    HRESULT GetDriverProperty(ULONG propertyId, void* data, ULONG dataLength, ULONG* bytesReturned = nullptr);
     HRESULT EnsureGpuResources(ID3D11Texture2D* sourceTexture);
     HRESULT EnsureSourceTextureView(ID3D11Texture2D* sourceTexture);
     HRESULT CreateShaders();
     HRESULT UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped);
+    void LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequence);
     void SetLastError(const std::wstring& message) { m_lastError = message; }
 
     bool m_active = false;
     std::wstring m_lastError;
 
     wil::com_ptr_nothrow<IBaseFilter> m_filter;
+    wil::com_ptr_nothrow<IKsControl> m_ksControl;
     wil::com_ptr_nothrow<IKsPropertySet> m_propertySet;
 
     wil::com_ptr_nothrow<ID3D11Device> m_device;

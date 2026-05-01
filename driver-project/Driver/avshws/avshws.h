@@ -84,12 +84,16 @@ const ULONG DebugLevel = DEBUGLVL_TERSE;
 #endif
 
 #define FOURCC_YUY2         mmioFOURCC('Y', 'U', 'Y', '2')
+#define VIRTUACAM_FRAME_WIDTH 1280
+#define VIRTUACAM_FRAME_HEIGHT 720
+#define VIRTUACAM_FRAME_BYTES_PER_PIXEL 3
+#define VIRTUACAM_FRAME_BUFFER_SIZE (VIRTUACAM_FRAME_WIDTH * VIRTUACAM_FRAME_HEIGHT * VIRTUACAM_FRAME_BYTES_PER_PIXEL)
 //
 // CAPTURE_PIN_DATA_RANGE_COUNT:
 //
 // The number of ranges supported on the capture pin.
 //
-#define CAPTURE_PIN_DATA_RANGE_COUNT 1 // 2
+#define CAPTURE_PIN_DATA_RANGE_COUNT 1
 
 //
 // CAPTURE_FILTER_PIN_COUNT:
@@ -166,6 +170,33 @@ typedef enum _HARDWARE_STATE {
     HardwareRunning
 
 } HARDWARE_STATE, *PHARDWARE_STATE;
+
+typedef struct _VIRTUACAM_DRIVER_STATUS {
+    ULONG Size;
+    ULONG Version;
+    ULONG HardwareState;
+    ULONG ClientConnected;
+    ULONG Width;
+    ULONG Height;
+    ULONG ImageSize;
+    ULONG ScatterGatherMappingsQueued;
+    ULONG ScatterGatherBytesQueued;
+    ULONG NumMappingsCompleted;
+    ULONG NumFramesSkipped;
+    ULONG InterruptTime;
+    ULONG LastFillStatus;
+    ULONG LastFillStride;
+    ULONG LastFillWidthBytes;
+    ULONG LastFillRequiredBytes;
+    ULONG LastFillByteCount;
+    ULONG LastFillBufferRemaining;
+    ULONG LastCompletedDelta;
+    ULONG LastSetDataLength;
+    ULONG SetDataAcceptedCount;
+    ULONG SetDataRejectedCount;
+    ULONG LastSetDataReason;
+    ULONGLONG LastFrameTime100ns;
+} VIRTUACAM_DRIVER_STATUS, *PVIRTUACAM_DRIVER_STATUS;
 
 /*************************************************
 

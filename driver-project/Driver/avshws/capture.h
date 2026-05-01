@@ -80,6 +80,7 @@ private:
     // programmed via this video info header.
     //
     PKS_VIDEOINFOHEADER m_VideoInfoHeader;
+    ULONG m_VideoInfoHeaderSize;
 
     //
     // If we are unable to insert all of the mappings in a stream pointer into

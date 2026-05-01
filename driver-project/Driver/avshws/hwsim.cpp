@@ -28,6 +28,13 @@
 KDEFERRED_ROUTINE SimulatedInterrupt;
 static const LONGLONG kClientHeartbeatTimeout100ns = 20000000LL;
 static const ULONG kScatterGatherEntryTag = 'nEGS';
+static const ULONG kSetDataRejectNone = 0;
+static const ULONG kSetDataRejectNotRunning = 1;
+static const ULONG kSetDataRejectNoBuffer = 2;
+static const ULONG kSetDataRejectNotConnected = 3;
+static const ULONG kSetDataRejectNoSynth = 4;
+static const ULONG kSetDataRejectBadGeometry = 5;
+static const ULONG kSetDataRejectShortSource = 6;
 
 namespace
 {
@@ -173,6 +180,71 @@ namespace
             }
         }
     }
+
+    inline UCHAR ClampToByte(LONG value)
+    {
+        if (value < 0) {
+            return 0;
+        }
+        if (value > 255) {
+            return 255;
+        }
+        return static_cast<UCHAR>(value);
+    }
+
+    inline void Rgb24ToYuv(
+        UCHAR red,
+        UCHAR green,
+        UCHAR blue,
+        _Out_ UCHAR* y,
+        _Out_ UCHAR* u,
+        _Out_ UCHAR* v)
+    {
+        *y = ClampToByte((((66 * red) + (129 * green) + (25 * blue) + 128) >> 8) + 16);
+        *u = ClampToByte((((-38 * red) - (74 * green) + (112 * blue) + 128) >> 8) + 128);
+        *v = ClampToByte((((112 * red) - (94 * green) - (18 * blue) + 128) >> 8) + 128);
+    }
+
+    void ConvertRgb24ToYuy2Frame(
+        _Out_writes_bytes_(destinationLength) PUCHAR destination,
+        ULONG destinationLength,
+        _In_reads_bytes_(sourceLength) const UCHAR* source,
+        ULONG sourceLength,
+        ULONG width,
+        ULONG height)
+    {
+        UNREFERENCED_PARAMETER(destinationLength);
+        UNREFERENCED_PARAMETER(sourceLength);
+
+        const ULONG srcStride = width * 3;
+        const ULONG dstStride = width * 2;
+
+        for (ULONG y = 0; y < height; ++y) {
+            const UCHAR* srcRow = source + (srcStride * y);
+            UCHAR* dstRow = destination + (dstStride * y);
+
+            for (ULONG x = 0; x < width; x += 2) {
+                const UCHAR* pixel0 = srcRow + (x * 3);
+                const UCHAR* pixel1 = (x + 1 < width) ? (pixel0 + 3) : pixel0;
+
+                UCHAR y0 = 0;
+                UCHAR u0 = 0;
+                UCHAR v0 = 0;
+                UCHAR y1 = 0;
+                UCHAR u1 = 0;
+                UCHAR v1 = 0;
+
+                Rgb24ToYuv(pixel0[2], pixel0[1], pixel0[0], &y0, &u0, &v0);
+                Rgb24ToYuv(pixel1[2], pixel1[1], pixel1[0], &y1, &u1, &v1);
+
+                const ULONG dst = x * 2;
+                dstRow[dst + 0] = y0;
+                dstRow[dst + 1] = static_cast<UCHAR>(((ULONG)u0 + (ULONG)u1) / 2);
+                dstRow[dst + 2] = y1;
+                dstRow[dst + 3] = static_cast<UCHAR>(((ULONG)v0 + (ULONG)v1) / 2);
+            }
+        }
+    }
 }
 
 void
@@ -267,6 +339,18 @@ Return Value:
         m_ScatterGatherLookasideInitialized = TRUE;
     }
 
+    UNICODE_STRING eventName;
+    RtlInitUnicodeString(&eventName, L"\\BaseNamedObjects\\VirtuaCamClientRequest");
+    m_ClientRequestEventObject = IoCreateNotificationEvent(&eventName, &m_ClientRequestEvent);
+    if (m_ClientRequestEventObject) {
+        ObReferenceObject(m_ClientRequestEventObject);
+        ZwClose(m_ClientRequestEvent);
+        m_ClientRequestEvent = NULL;
+        KeClearEvent(m_ClientRequestEventObject);
+    } else {
+        DbgPrint("[avshws] IoCreateNotificationEvent failed in ctor sim=%p\n", this);
+    }
+
 }
 
 CHardwareSimulation::
@@ -281,6 +365,8 @@ CHardwareSimulation::
         m_ScatterGatherMappingsQueued) {
         (void)Stop ();
     }
+
+    ReleaseClientEventObject();
 
     if (m_ScatterGatherLookasideInitialized) {
         ExDeleteLookasideListEx(&m_ScatterGatherLookaside);
@@ -325,6 +411,53 @@ Return Value:
 
     return HwSim;
 
+}
+
+/*************************************************/
+
+#ifdef ALLOC_PRAGMA
+#pragma code_seg()
+#endif // ALLOC_PRAGMA
+
+void
+CHardwareSimulation::
+ReleaseFrameBuffers (
+    )
+{
+    if (m_ImageSynth) {
+        m_ImageSynth->SetBuffer(NULL);
+    }
+
+    if (m_SynthesisBuffer) {
+        ExFreePoolWithTag(m_SynthesisBuffer, AVSHWS_POOLTAG);
+        m_SynthesisBuffer = NULL;
+    }
+
+    if (m_TemporaryBuffer) {
+        ExFreePoolWithTag(m_TemporaryBuffer, AVSHWS_POOLTAG);
+        m_TemporaryBuffer = NULL;
+    }
+
+    if (m_DefaultFrameBuffer) {
+        ExFreePoolWithTag(m_DefaultFrameBuffer, AVSHWS_POOLTAG);
+        m_DefaultFrameBuffer = NULL;
+    }
+}
+
+void
+CHardwareSimulation::
+ReleaseClientEventObject (
+    )
+{
+    if (m_ClientRequestEvent) {
+        ZwClose(m_ClientRequestEvent);
+        m_ClientRequestEvent = NULL;
+    }
+
+    if (m_ClientRequestEventObject) {
+        ObDereferenceObject(m_ClientRequestEventObject);
+        m_ClientRequestEventObject = NULL;
+    }
 }
 
 /*************************************************/
@@ -375,9 +508,6 @@ Return Value:
 --*/
 
 {
-
-    PAGED_CODE();
-
     NTSTATUS Status = STATUS_SUCCESS;
 
     m_ImageSynth = ImageSynth;
@@ -391,6 +521,17 @@ Return Value:
     m_ScatterGatherMappingsQueued = 0;
     m_NumFramesSkipped = 0;
     m_InterruptTime = 0;
+    m_LastFillStatus = static_cast<ULONG>(STATUS_SUCCESS);
+    m_LastFillStride = 0;
+    m_LastFillWidthBytes = 0;
+    m_LastFillRequiredBytes = 0;
+    m_LastFillByteCount = 0;
+    m_LastFillBufferRemaining = 0;
+    m_LastCompletedDelta = 0;
+    m_LastSetDataLength = 0;
+    m_SetDataAcceptedCount = 0;
+    m_SetDataRejectedCount = 0;
+    m_LastSetDataReason = kSetDataRejectNone;
 
     KeQuerySystemTimePrecise (&m_StartTime);
 
@@ -438,17 +579,7 @@ Return Value:
     }
 
     if (NT_SUCCESS(Status) && !m_ClientRequestEventObject) {
-        UNICODE_STRING eventName;
-        RtlInitUnicodeString(&eventName, L"\\BaseNamedObjects\\VirtuaCamClientRequest");
-        m_ClientRequestEventObject = IoCreateNotificationEvent(&eventName, &m_ClientRequestEvent);
-        if (!m_ClientRequestEventObject) {
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-        } else {
-            ObReferenceObject(m_ClientRequestEventObject);
-            ZwClose(m_ClientRequestEvent);
-            m_ClientRequestEvent = NULL;
-            KeClearEvent(m_ClientRequestEventObject);
-        }
+        DbgPrint("[avshws] HwSim::Start no client-request event; continuing without side-channel sim=%p\n", this);
     }
 
     //
@@ -457,8 +588,12 @@ Return Value:
     if (NT_SUCCESS (Status)) {
         KIRQL irql;
         KeAcquireSpinLock(&m_FrameLock, &irql);
-        m_ClientConnected = FALSE;
-        m_LastFrameTime.QuadPart = 0;
+        m_HardwareState = HardwareRunning;
+        if (m_ClientConnected) {
+            KeQuerySystemTimePrecise(&m_LastFrameTime);
+        } else {
+            m_LastFrameTime.QuadPart = 0;
+        }
         KeReleaseSpinLock(&m_FrameLock, irql);
 
         //
@@ -470,36 +605,20 @@ Return Value:
         LARGE_INTEGER NextTime;
         NextTime.QuadPart = m_StartTime.QuadPart + m_TimePerFrame;
 
-        m_HardwareState = HardwareRunning;
         KeSetTimer (&m_IsrTimer, NextTime, &m_IsrFakeDpc);
 
     }
     else {
-        if (m_ClientRequestEvent) {
-            ZwClose(m_ClientRequestEvent);
-            m_ClientRequestEvent = NULL;
-        }
-        if (m_ClientRequestEventObject) {
-            ObDereferenceObject(m_ClientRequestEventObject);
-            m_ClientRequestEventObject = NULL;
-        }
-        if (m_DefaultFrameBuffer) {
-            ExFreePoolWithTag(m_DefaultFrameBuffer, AVSHWS_POOLTAG);
-            m_DefaultFrameBuffer = NULL;
-        }
-        if (m_TemporaryBuffer) {
-            ExFreePoolWithTag(m_TemporaryBuffer, AVSHWS_POOLTAG);
-            m_TemporaryBuffer = NULL;
-        }
-        if (m_SynthesisBuffer) {
-            ExFreePoolWithTag(m_SynthesisBuffer, AVSHWS_POOLTAG);
-            m_SynthesisBuffer = NULL;
-        }
+        ReleaseFrameBuffers();
     }
 
     return Status;
         
 }
+
+#ifdef ALLOC_PRAGMA
+#pragma code_seg()
+#endif // ALLOC_PRAGMA
 
 /*************************************************/
 
@@ -537,46 +656,54 @@ Return Value:
 --*/
 
 {
-
-    PAGED_CODE();
-
-    if (Pausing && m_HardwareState == HardwareRunning) {
+    if (Pausing) {
         //
         // If we were running, stop completing mappings, etc...
         //
-        m_StopHardware = TRUE;
-    
-        KeWaitForSingleObject (
-            &m_HardwareEvent,
-            Suspended,
-            KernelMode,
-            FALSE,
-            NULL
-            );
+        KIRQL irql;
+        KeCancelTimer(&m_IsrTimer);
+        (void)KeRemoveQueueDpc(&m_IsrFakeDpc);
 
-        NT_ASSERT (m_StopHardware == FALSE);
+        KeAcquireSpinLock(&m_FrameLock, &irql);
+        if (m_HardwareState == HardwareRunning) {
+            m_HardwareState = HardwarePaused;
+        }
+        KeReleaseSpinLock(&m_FrameLock, irql);
 
-        m_HardwareState = HardwarePaused; 
+        while (InterlockedCompareExchange(&m_DpcActive, 0, 0) != 0) {
+            KeStallExecutionProcessor(50);
+        }
 
-    } else if (!Pausing && m_HardwareState == HardwarePaused) {
+    } else {
+        BOOLEAN shouldRestart = FALSE;
 
         //
         // For unpausing the hardware, we need to compute the relative time
         // and restart interrupts.
         //
-        LARGE_INTEGER UnpauseTime;
+        KIRQL irql;
+        KeAcquireSpinLock(&m_FrameLock, &irql);
+        if (m_HardwareState == HardwarePaused) {
+            LARGE_INTEGER now;
+            KeQuerySystemTimePrecise(&now);
+            m_InterruptTime = (ULONG)(
+                (now.QuadPart - m_StartTime.QuadPart) /
+                m_TimePerFrame
+                );
+            m_HardwareState = HardwareRunning;
+            if (m_ClientConnected) {
+                m_LastFrameTime = now;
+            }
+            shouldRestart = TRUE;
+        }
+        KeReleaseSpinLock(&m_FrameLock, irql);
 
-        KeQuerySystemTimePrecise (&UnpauseTime);
-        m_InterruptTime = (ULONG) (
-            (UnpauseTime.QuadPart - m_StartTime.QuadPart) /
-            m_TimePerFrame
-            );
-
-        UnpauseTime.QuadPart = m_StartTime.QuadPart +
-            (m_InterruptTime + 1) * m_TimePerFrame;
-
-        m_HardwareState = HardwareRunning;
-        KeSetTimer (&m_IsrTimer, UnpauseTime, &m_IsrFakeDpc);
+        if (shouldRestart) {
+            LARGE_INTEGER UnpauseTime;
+            UnpauseTime.QuadPart = m_StartTime.QuadPart +
+                (m_InterruptTime + 1) * m_TimePerFrame;
+            KeSetTimer(&m_IsrTimer, UnpauseTime, &m_IsrFakeDpc);
+        }
 
     }
 
@@ -612,64 +739,45 @@ Return Value:
 
 {
     KIRQL Irql;
+    PUCHAR synthesisBuffer = NULL;
+    PUCHAR temporaryBuffer = NULL;
+    PUCHAR defaultFrameBuffer = NULL;
     DbgPrint("[avshws] HwSim::Stop begin sim=%p state=%lu queued=%lu irql=%lu\n", this, (ULONG)m_HardwareState, m_ScatterGatherMappingsQueued, (ULONG)KeGetCurrentIrql());
 
     KeCancelTimer (&m_IsrTimer);
+    (void)KeRemoveQueueDpc(&m_IsrFakeDpc);
 
-    //
-    // If the hardware is told to stop while it's running, we need to
-    // halt the interrupts first.  If we're already paused, this has
-    // already been done.
-    //
-    if (m_HardwareState == HardwareRunning) {
-    
-        m_StopHardware = TRUE;
-    
-        KeWaitForSingleObject (
-            &m_HardwareEvent,
-            Suspended,
-            KernelMode,
-            FALSE,
-            NULL
-            );
-    
-        NT_ASSERT (m_StopHardware == FALSE);
-
-    }
-
+    KeAcquireSpinLock(&m_FrameLock, &Irql);
     m_HardwareState = HardwareStopped;
     m_StopHardware = FALSE;
+    m_LastFrameTime.QuadPart = 0;
+    synthesisBuffer = m_SynthesisBuffer;
+    temporaryBuffer = m_TemporaryBuffer;
+    defaultFrameBuffer = m_DefaultFrameBuffer;
+    m_SynthesisBuffer = NULL;
+    m_TemporaryBuffer = NULL;
+    m_DefaultFrameBuffer = NULL;
+    KeReleaseSpinLock(&m_FrameLock, Irql);
 
-    //
-    // The image synthesizer may still be around.  Just for safety's
-    // sake, NULL out the image synthesis buffer and toast it.
-    //
+    while (InterlockedCompareExchange(&m_DpcActive, 0, 0) != 0 ||
+        InterlockedCompareExchange(&m_FrameWriteActive, 0, 0) != 0) {
+        KeStallExecutionProcessor(50);
+    }
+
     if (m_ImageSynth) {
-        m_ImageSynth -> SetBuffer (NULL);
+        m_ImageSynth->SetBuffer(NULL);
     }
 
-    if (m_SynthesisBuffer) {
-        ExFreePoolWithTag (m_SynthesisBuffer, AVSHWS_POOLTAG);
-        m_SynthesisBuffer = NULL;
+    if (synthesisBuffer) {
+        ExFreePoolWithTag(synthesisBuffer, AVSHWS_POOLTAG);
     }
 
-	if (m_TemporaryBuffer) {
-		ExFreePoolWithTag(m_TemporaryBuffer, AVSHWS_POOLTAG);
-		m_TemporaryBuffer = NULL;
-	}
-
-    if (m_DefaultFrameBuffer) {
-        ExFreePoolWithTag(m_DefaultFrameBuffer, AVSHWS_POOLTAG);
-        m_DefaultFrameBuffer = NULL;
+    if (temporaryBuffer) {
+        ExFreePoolWithTag(temporaryBuffer, AVSHWS_POOLTAG);
     }
 
-    if (m_ClientRequestEvent) {
-        ZwClose(m_ClientRequestEvent);
-        m_ClientRequestEvent = NULL;
-    }
-    if (m_ClientRequestEventObject) {
-        ObDereferenceObject(m_ClientRequestEventObject);
-        m_ClientRequestEventObject = NULL;
+    if (defaultFrameBuffer) {
+        ExFreePoolWithTag(defaultFrameBuffer, AVSHWS_POOLTAG);
     }
 
     //
@@ -963,7 +1071,14 @@ Return Value:
             }
         }
 
+        m_LastFillStride = static_cast<ULONG>(Stride);
+        m_LastFillWidthBytes = (Width > 0) ? static_cast<ULONG>(Width) : 0;
+        m_LastFillByteCount = SGEntry -> ByteCount;
+
         if (Width <= 0 || Stride < Width) {
+            m_LastFillStatus = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
+            m_LastFillRequiredBytes = 0;
+            m_LastFillBufferRemaining = BufferRemaining;
             if (m_ScatterGatherLookasideInitialized) {
                 ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
             } else {
@@ -977,7 +1092,10 @@ Return Value:
         if (m_Height > 0) {
             RequiredBytes += RowPitch * (m_Height - 1);
         }
+        m_LastFillRequiredBytes = static_cast<ULONG>(RequiredBytes <= MAXULONG ? RequiredBytes : MAXULONG);
         if (RequiredBytes > SGEntry -> ByteCount) {
+            m_LastFillStatus = static_cast<ULONG>(STATUS_INSUFFICIENT_RESOURCES);
+            m_LastFillBufferRemaining = BufferRemaining;
             if (m_ScatterGatherLookasideInitialized) {
                 ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
             } else {
@@ -1004,6 +1122,7 @@ Return Value:
         }
 
         m_NumMappingsCompleted += SGEntry -> AdvanceCount;
+        m_LastCompletedDelta = SGEntry -> AdvanceCount;
 
         //
         // Release the scatter / gather entry back to our lookaside.
@@ -1016,8 +1135,15 @@ Return Value:
 
     }
 
-    if (BufferRemaining) return STATUS_INSUFFICIENT_RESOURCES;
-    else return STATUS_SUCCESS;
+    if (BufferRemaining) {
+        m_LastFillStatus = static_cast<ULONG>(STATUS_INSUFFICIENT_RESOURCES);
+        m_LastFillBufferRemaining = BufferRemaining;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    m_LastFillStatus = static_cast<ULONG>(STATUS_SUCCESS);
+    m_LastFillBufferRemaining = 0;
+    return STATUS_SUCCESS;
     
 }
 
@@ -1049,118 +1175,175 @@ Return Value:
 {
 
     m_InterruptTime++;
+    InterlockedIncrement(&m_DpcActive);
 
-	if (m_HardwareState == HardwareRunning)
-	{
-        BOOLEAN clientConnected = FALSE;
-        LARGE_INTEGER lastFrameTime = {};
-        PUCHAR sourceFrame = NULL;
+    HARDWARE_STATE hardwareState = HardwareStopped;
+    BOOLEAN clientConnected = FALSE;
+    ULONG acceptedFrameCount = 0;
+    LARGE_INTEGER lastFrameTime = {};
+    PUCHAR sourceFrame = NULL;
+    PUCHAR synthesisBuffer = NULL;
+    ULONG imageSize = 0;
 
-        KeAcquireSpinLockAtDpcLevel(&m_FrameLock);
-        clientConnected = m_ClientConnected;
-        lastFrameTime = m_LastFrameTime;
-        sourceFrame = (clientConnected && m_TemporaryBuffer)
+    KeAcquireSpinLockAtDpcLevel(&m_FrameLock);
+    hardwareState = m_HardwareState;
+    clientConnected = m_ClientConnected;
+    acceptedFrameCount = m_SetDataAcceptedCount;
+    lastFrameTime = m_LastFrameTime;
+    synthesisBuffer = m_SynthesisBuffer;
+    imageSize = m_ImageSize;
+    if (hardwareState == HardwareRunning) {
+        sourceFrame = ((acceptedFrameCount > 0) && m_TemporaryBuffer)
             ? m_TemporaryBuffer
             : (m_DefaultFrameBuffer ? m_DefaultFrameBuffer : m_TemporaryBuffer);
-        if (sourceFrame) {
-            RtlCopyMemory(m_SynthesisBuffer, sourceFrame, m_ImageSize);
-        } else {
-            RtlZeroMemory(m_SynthesisBuffer, m_ImageSize);
-        }
-        KeReleaseSpinLockFromDpcLevel(&m_FrameLock);
+    }
+    KeReleaseSpinLockFromDpcLevel(&m_FrameLock);
 
-        if (clientConnected && lastFrameTime.QuadPart > 0) {
-            LARGE_INTEGER now;
-            KeQuerySystemTimePrecise(&now);
-            if ((now.QuadPart - lastFrameTime.QuadPart) > kClientHeartbeatTimeout100ns) {
-                KeAcquireSpinLockAtDpcLevel(&m_FrameLock);
-                m_ClientConnected = FALSE;
-                clientConnected = FALSE;
-                KeReleaseSpinLockFromDpcLevel(&m_FrameLock);
-            }
+    if (hardwareState == HardwareRunning) {
+        if (sourceFrame && synthesisBuffer && imageSize > 0) {
+            RtlCopyMemory(synthesisBuffer, sourceFrame, imageSize);
+        } else if (synthesisBuffer && imageSize > 0) {
+            RtlZeroMemory(synthesisBuffer, imageSize);
         }
+    }
 
-		if (!NT_SUCCESS(FillScatterGatherBuffers())) {
-			InterlockedIncrement(PLONG(&m_NumFramesSkipped));
-		}
+    if (hardwareState == HardwareRunning &&
+        clientConnected &&
+        lastFrameTime.QuadPart > 0 &&
+        m_SetDataAcceptedCount > 0) {
+        LARGE_INTEGER now;
+        KeQuerySystemTimePrecise(&now);
+        if ((now.QuadPart - lastFrameTime.QuadPart) > kClientHeartbeatTimeout100ns) {
+            KeAcquireSpinLockAtDpcLevel(&m_FrameLock);
+            m_ClientConnected = FALSE;
+            clientConnected = FALSE;
+            KeReleaseSpinLockFromDpcLevel(&m_FrameLock);
+        }
+    }
+
+	if (hardwareState == HardwareRunning &&
+        !NT_SUCCESS(FillScatterGatherBuffers())) {
+		InterlockedIncrement(PLONG(&m_NumFramesSkipped));
 	}
 
     //
     // Issue an interrupt to our hardware sink.  This is a "fake" interrupt.
     // It will occur at DISPATCH_LEVEL.
     //
-    m_HardwareSink -> Interrupt ();
+    if (hardwareState == HardwareRunning && m_HardwareSink) {
+        m_HardwareSink -> Interrupt ();
+    }
 
     //
     // Reschedule the timer if the hardware isn't being stopped.
     //
-    if (!m_StopHardware) {
+    KeAcquireSpinLockAtDpcLevel(&m_FrameLock);
+    hardwareState = m_HardwareState;
+    KeReleaseSpinLockFromDpcLevel(&m_FrameLock);
 
-        //
-        // Reschedule the timer for the next interrupt time.
-        //
+    if (hardwareState == HardwareRunning) {
         LARGE_INTEGER NextTime;
-        NextTime.QuadPart = m_StartTime.QuadPart + 
+        NextTime.QuadPart = m_StartTime.QuadPart +
             (m_TimePerFrame * (m_InterruptTime + 1));
-
         KeSetTimer (&m_IsrTimer, NextTime, &m_IsrFakeDpc);
-        
-    } else {
-        //
-        // If someone is waiting on the hardware to stop, raise the stop
-        // event and clear the flag.
-        //
-        m_StopHardware = FALSE;
-        KeSetEvent (&m_HardwareEvent, IO_NO_INCREMENT, FALSE);
     }
+
+    InterlockedDecrement(&m_DpcActive);
 
 }
 
 
 void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 {
-	if (m_HardwareState != HardwareRunning)
-	{
-		return;
-	}
-
-	if (m_TemporaryBuffer == NULL)
-	{
-		return;
-	}
-
     KIRQL irql;
-    BOOLEAN clientConnected = FALSE;
+    BOOLEAN shouldWrite = FALSE;
+    PUCHAR temporaryBuffer = NULL;
+    ULONG width = 0;
+    ULONG height = 0;
+    ULONG imageSize = 0;
+    ULONG outputBytesPerPixel = 0;
+    LARGE_INTEGER now = {};
+    ULONG rejectReason = kSetDataRejectNone;
+
     KeAcquireSpinLock(&m_FrameLock, &irql);
-    clientConnected = m_ClientConnected;
+    if (m_HardwareState != HardwareRunning) {
+        rejectReason = kSetDataRejectNotRunning;
+    } else if (!m_TemporaryBuffer) {
+        rejectReason = kSetDataRejectNoBuffer;
+    } else if (!m_ImageSynth) {
+        rejectReason = kSetDataRejectNoSynth;
+    } else {
+        shouldWrite = TRUE;
+        temporaryBuffer = m_TemporaryBuffer;
+        width = m_Width;
+        height = m_Height;
+        imageSize = m_ImageSize;
+        outputBytesPerPixel = static_cast<ULONG>(m_ImageSynth->GetBytesPerPixel());
+        InterlockedIncrement(&m_FrameWriteActive);
+    }
+    m_LastSetDataLength = dataLength;
     KeReleaseSpinLock(&m_FrameLock, irql);
-    if (!clientConnected) {
+
+    if (!shouldWrite || !temporaryBuffer || outputBytesPerPixel == 0) {
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        m_LastSetDataReason = rejectReason;
         return;
     }
 
-	if (dataLength < m_Width * m_Height * 3)
+    const ULONGLONG requiredSourceLength64 = static_cast<ULONGLONG>(width) * static_cast<ULONGLONG>(height) * 3ull;
+    if (requiredSourceLength64 > MAXULONG) {
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        m_LastSetDataReason = kSetDataRejectBadGeometry;
+        InterlockedDecrement(&m_FrameWriteActive);
+        return;
+    }
+
+    const ULONG requiredSourceLength = static_cast<ULONG>(requiredSourceLength64);
+
+	if (dataLength < requiredSourceLength)
 	{
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        m_LastSetDataReason = kSetDataRejectShortSource;
+        InterlockedDecrement(&m_FrameWriteActive);
 		return;
 	}
 
-    LARGE_INTEGER now;
     KeQuerySystemTimePrecise(&now);
-    KeAcquireSpinLock(&m_FrameLock, &irql);
 
     static volatile LONG s_hwFrameSequence = 0;
     LONG seq = _InterlockedIncrement(&s_hwFrameSequence);
 
-	for (ULONG y = 0; y < m_Height; y++)
-	{
-		PUCHAR buffer = m_TemporaryBuffer + ((m_Width * 3) * (m_Height - 1 - y));
-		PUCHAR dataLine = (PUCHAR)(data) + ((m_Width * 3) * y);
+    if (outputBytesPerPixel == 2) {
+        ConvertRgb24ToYuy2Frame(
+            temporaryBuffer,
+            imageSize,
+            reinterpret_cast<const UCHAR*>(data),
+            dataLength,
+            width,
+            height);
+    } else {
+	    for (ULONG y = 0; y < height; y++)
+	    {
+		    PUCHAR buffer = temporaryBuffer + ((width * 3) * (height - 1 - y));
+		    PUCHAR dataLine = (PUCHAR)(data) + ((width * 3) * y);
 
-		RtlCopyMemory(buffer, dataLine, m_Width * 3);
-	}
-    m_LastFrameTime = now;
+		    RtlCopyMemory(buffer, dataLine, width * 3);
+	    }
+    }
+
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    if (m_HardwareState == HardwareRunning &&
+        m_ClientConnected &&
+        m_TemporaryBuffer == temporaryBuffer) {
+        m_LastFrameTime = now;
+    }
     KeReleaseSpinLock(&m_FrameLock, irql);
+    InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataAcceptedCount));
+    m_LastSetDataReason = kSetDataRejectNone;
+    InterlockedDecrement(&m_FrameWriteActive);
+
     if (seq <= 3 || seq % 30 == 0) {
-        DbgPrint("[avshws] HwSim::SetData frame=%ld len=%lu client=%lu irql=%lu\n", seq, dataLength, (ULONG)clientConnected, (ULONG)KeGetCurrentIrql());
+        DbgPrint("[avshws] HwSim::SetData frame=%ld bytes=%lu active=%ld irql=%lu\n", seq, dataLength, InterlockedCompareExchange(&m_FrameWriteActive, 0, 0), (ULONG)KeGetCurrentIrql());
     }
 }
 
@@ -1190,16 +1373,59 @@ BOOLEAN CHardwareSimulation::IsClientConnected()
 
 void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
 {
+    PKEVENT clientRequestEventObject = NULL;
+    BOOLEAN clientConnected = FALSE;
+    KIRQL irql;
+
     DbgPrint("[avshws] HwSim::NotifyCameraState running=%lu connected=%lu irql=%lu\n", (ULONG)isRunning, (ULONG)IsClientConnected(), (ULONG)KeGetCurrentIrql());
-    if (!m_ClientRequestEventObject) {
+
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    clientRequestEventObject = m_ClientRequestEventObject;
+    clientConnected = m_ClientConnected;
+    KeReleaseSpinLock(&m_FrameLock, irql);
+
+    if (isRunning) {
+        if (clientRequestEventObject && !clientConnected) {
+            KeSetEvent(clientRequestEventObject, IO_NO_INCREMENT, FALSE);
+        }
+    } else if (clientRequestEventObject) {
+        KeClearEvent(clientRequestEventObject);
+    }
+}
+
+void CHardwareSimulation::QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status)
+{
+    if (!status) {
         return;
     }
 
-    if (isRunning) {
-        if (!IsClientConnected()) {
-            KeSetEvent(m_ClientRequestEventObject, IO_NO_INCREMENT, FALSE);
-        }
-    } else {
-        KeClearEvent(m_ClientRequestEventObject);
-    }
+    KIRQL irql;
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    status->HardwareState = static_cast<ULONG>(m_HardwareState);
+    status->ClientConnected = static_cast<ULONG>(m_ClientConnected);
+    status->Width = m_Width;
+    status->Height = m_Height;
+    status->ImageSize = m_ImageSize;
+    status->InterruptTime = m_InterruptTime;
+    status->LastFrameTime100ns = static_cast<ULONGLONG>(m_LastFrameTime.QuadPart);
+    KeReleaseSpinLock(&m_FrameLock, irql);
+
+    KeAcquireSpinLock(&m_ListLock, &irql);
+    status->ScatterGatherMappingsQueued = m_ScatterGatherMappingsQueued;
+    status->ScatterGatherBytesQueued = m_ScatterGatherBytesQueued;
+    status->NumMappingsCompleted = m_NumMappingsCompleted;
+    status->NumFramesSkipped = m_NumFramesSkipped;
+    status->LastCompletedDelta = m_LastCompletedDelta;
+    KeReleaseSpinLock(&m_ListLock, irql);
+
+    status->LastFillStatus = m_LastFillStatus;
+    status->LastFillStride = m_LastFillStride;
+    status->LastFillWidthBytes = m_LastFillWidthBytes;
+    status->LastFillRequiredBytes = m_LastFillRequiredBytes;
+    status->LastFillByteCount = m_LastFillByteCount;
+    status->LastFillBufferRemaining = m_LastFillBufferRemaining;
+    status->LastSetDataLength = m_LastSetDataLength;
+    status->SetDataAcceptedCount = m_SetDataAcceptedCount;
+    status->SetDataRejectedCount = m_SetDataRejectedCount;
+    status->LastSetDataReason = m_LastSetDataReason;
 }

@@ -235,27 +235,34 @@
                 /virtuacam|virtual camera|avshws/i.test(device.label || '')
             );
 
+            const exactDriverFormat = {
+                width: { exact: 1280 },
+                height: { exact: 720 },
+                frameRate: { ideal: 30, max: 30 }
+            };
+
             if (preferred) {
                 logInfo('preferred virtual camera found: ' + preferred.label);
                 return {
                     video: {
-                        deviceId: { exact: preferred.deviceId }
+                        deviceId: { exact: preferred.deviceId },
+                        ...exactDriverFormat
                     },
                     audio: false
                 };
             }
 
             if (videoInputs.length === 1) {
-                logInfo('single camera detected; using default video selection');
+                logInfo('single camera detected; requesting exact 1280x720 driver format');
                 return {
-                    video: true,
+                    video: exactDriverFormat,
                     audio: false
                 };
             }
 
-            logInfo('virtual camera label not detected; falling back to default video device');
+            logInfo('virtual camera label not detected; requesting exact 1280x720 on default video device');
             return {
-                video: true,
+                video: exactDriverFormat,
                 audio: false
             };
         }
@@ -300,9 +307,13 @@
                     stream = await navigator.mediaDevices.getUserMedia(requestedConstraints);
                 } catch (initialError) {
                     if (initialError && (initialError.name === 'OverconstrainedError' || initialError.name === 'NotFoundError')) {
-                        logInfo('preferred constraints failed; retrying with default video device');
+                        logInfo('preferred constraints failed; retrying with default exact 1280x720 request');
                         stream = await navigator.mediaDevices.getUserMedia({
-                            video: true,
+                            video: {
+                                width: { exact: 1280 },
+                                height: { exact: 720 },
+                                frameRate: { ideal: 30, max: 30 }
+                            },
                             audio: false
                         });
                     } else {

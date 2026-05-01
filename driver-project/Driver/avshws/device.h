@@ -319,4 +319,5 @@ public:
     void ConnectClient();
     void DisconnectClient();
     void NotifyCameraState(BOOLEAN isRunning);
+    void QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status);
 };
