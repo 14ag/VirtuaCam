@@ -35,6 +35,7 @@ static const ULONG kSetDataRejectNotConnected = 3;
 static const ULONG kSetDataRejectNoSynth = 4;
 static const ULONG kSetDataRejectBadGeometry = 5;
 static const ULONG kSetDataRejectShortSource = 6;
+static const ULONG kUserFrameStartupGraceInterrupts = 90;
 
 namespace
 {
@@ -1193,7 +1194,10 @@ Return Value:
     synthesisBuffer = m_SynthesisBuffer;
     imageSize = m_ImageSize;
     if (hardwareState == HardwareRunning) {
-        sourceFrame = ((acceptedFrameCount > 0) && m_TemporaryBuffer)
+        const BOOLEAN useUploadedFrame =
+            (acceptedFrameCount > 0) &&
+            (m_InterruptTime >= kUserFrameStartupGraceInterrupts);
+        sourceFrame = (useUploadedFrame && m_TemporaryBuffer)
             ? m_TemporaryBuffer
             : (m_DefaultFrameBuffer ? m_DefaultFrameBuffer : m_TemporaryBuffer);
     }
