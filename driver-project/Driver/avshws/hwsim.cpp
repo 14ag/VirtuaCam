@@ -35,7 +35,7 @@ static const ULONG kSetDataRejectNotConnected = 3;
 static const ULONG kSetDataRejectNoSynth = 4;
 static const ULONG kSetDataRejectBadGeometry = 5;
 static const ULONG kSetDataRejectShortSource = 6;
-static const ULONG kUserFrameStartupGraceInterrupts = 90;
+static const ULONG kUserFrameStartupGraceInterrupts = 1200;
 
 namespace
 {
@@ -245,6 +245,47 @@ namespace
                 dstRow[dst + 3] = static_cast<UCHAR>(((ULONG)v0 + (ULONG)v1) / 2);
             }
         }
+    }
+
+    void FillPlaceholderFrameYuy2(
+        _Out_writes_bytes_(bufferLength) PUCHAR buffer,
+        ULONG width,
+        ULONG height,
+        ULONG bufferLength)
+    {
+        if (!buffer || width == 0 || height == 0 || bufferLength == 0) {
+            return;
+        }
+
+        const ULONGLONG rgbLength64 =
+            static_cast<ULONGLONG>(width) *
+            static_cast<ULONGLONG>(height) *
+            3ull;
+        if (rgbLength64 > MAXULONG) {
+            RtlZeroMemory(buffer, bufferLength);
+            return;
+        }
+
+        const ULONG rgbLength = static_cast<ULONG>(rgbLength64);
+        PUCHAR rgbBuffer = reinterpret_cast<PUCHAR>(
+            ExAllocatePool2(
+                POOL_FLAG_NON_PAGED,
+                rgbLength,
+                AVSHWS_POOLTAG));
+        if (!rgbBuffer) {
+            RtlZeroMemory(buffer, bufferLength);
+            return;
+        }
+
+        FillPlaceholderFrameRgb24(rgbBuffer, width, height, rgbLength);
+        ConvertRgb24ToYuy2Frame(
+            buffer,
+            bufferLength,
+            rgbBuffer,
+            rgbLength,
+            width,
+            height);
+        ExFreePoolWithTag(rgbBuffer, AVSHWS_POOLTAG);
     }
 }
 
@@ -576,6 +617,8 @@ Return Value:
     } else {
         if (m_ImageSynth && m_ImageSynth->GetBytesPerPixel() == 3) {
             FillPlaceholderFrameRgb24(m_DefaultFrameBuffer, m_Width, m_Height, m_ImageSize);
+        } else if (m_ImageSynth && m_ImageSynth->GetBytesPerPixel() == 2) {
+            FillPlaceholderFrameYuy2(m_DefaultFrameBuffer, m_Width, m_Height, m_ImageSize);
         }
     }
 
