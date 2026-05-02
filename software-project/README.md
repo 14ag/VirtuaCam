@@ -26,16 +26,15 @@ This design avoids the overhead of the Media Foundation virtual camera pipeline 
 *   **Kernel-Mode Output:** Appears as a real hardware device, bypassing virtual camera detection in many apps.
 *   **Tray Controller:** Manage sources, layouts (Grid/PIP), and preview from a professional tray interface.
 
-## How to Use
+## Build and Run
 
-### 1. Build and Install
-1. Build the solution using the root `build-all.ps1`.
-2. Install the kernel driver using `install-all.ps1` (requires Administrator/TestSigning).
+Use the repository root scripts. This subproject does not have a separate public build or install path.
 
-### 3. Run
-1. Launch `VirtuaCam.exe`.
-2. Select a source (Window or Camera) from the tray icon menu.
-3. Open your target app (e.g., Teams) and select "VirtuaCam" as your camera.
+1. From the repo root, run `.\build-all.ps1`.
+2. From an elevated PowerShell window in the repo root, run `.\install-all.ps1`.
+3. Launch `.\output\VirtuaCam.exe`.
+4. Select a source from the tray icon menu.
+5. Open the target app and select `VirtuaCam` or `Virtual Camera Driver` as the camera.
 
 ## License
 
