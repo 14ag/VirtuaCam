@@ -35,7 +35,7 @@ static const ULONG kSetDataRejectNotConnected = 3;
 static const ULONG kSetDataRejectNoSynth = 4;
 static const ULONG kSetDataRejectBadGeometry = 5;
 static const ULONG kSetDataRejectShortSource = 6;
-static const ULONG kUserFrameStartupGraceInterrupts = 1200;
+static const ULONG kUserFrameStartupGraceInterrupts = 0;
 
 namespace
 {
@@ -402,6 +402,7 @@ CHardwareSimulation::
     if (m_HardwareState != HardwareStopped ||
         m_SynthesisBuffer ||
         m_TemporaryBuffer ||
+        m_StagingBuffer ||
         m_DefaultFrameBuffer ||
         m_ClientRequestEvent ||
         m_ScatterGatherMappingsQueued) {
@@ -478,6 +479,11 @@ ReleaseFrameBuffers (
     if (m_TemporaryBuffer) {
         ExFreePoolWithTag(m_TemporaryBuffer, AVSHWS_POOLTAG);
         m_TemporaryBuffer = NULL;
+    }
+
+    if (m_StagingBuffer) {
+        ExFreePoolWithTag(m_StagingBuffer, AVSHWS_POOLTAG);
+        m_StagingBuffer = NULL;
     }
 
     if (m_DefaultFrameBuffer) {
@@ -606,6 +612,18 @@ Return Value:
 	if (!m_TemporaryBuffer) {
 		Status = STATUS_INSUFFICIENT_RESOURCES;
 	}
+
+    m_StagingBuffer = reinterpret_cast<PUCHAR>(
+        ExAllocatePool2(
+            POOL_FLAG_NON_PAGED,
+            m_ImageSize,
+            AVSHWS_POOLTAG
+            )
+        );
+
+    if (!m_StagingBuffer) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     m_DefaultFrameBuffer = reinterpret_cast<PUCHAR>(
         ExAllocatePool2(
@@ -785,6 +803,7 @@ Return Value:
     KIRQL Irql;
     PUCHAR synthesisBuffer = NULL;
     PUCHAR temporaryBuffer = NULL;
+    PUCHAR stagingBuffer = NULL;
     PUCHAR defaultFrameBuffer = NULL;
     DbgPrint("[avshws] HwSim::Stop begin sim=%p state=%lu queued=%lu irql=%lu\n", this, (ULONG)m_HardwareState, m_ScatterGatherMappingsQueued, (ULONG)KeGetCurrentIrql());
 
@@ -797,9 +816,11 @@ Return Value:
     m_LastFrameTime.QuadPart = 0;
     synthesisBuffer = m_SynthesisBuffer;
     temporaryBuffer = m_TemporaryBuffer;
+    stagingBuffer = m_StagingBuffer;
     defaultFrameBuffer = m_DefaultFrameBuffer;
     m_SynthesisBuffer = NULL;
     m_TemporaryBuffer = NULL;
+    m_StagingBuffer = NULL;
     m_DefaultFrameBuffer = NULL;
     KeReleaseSpinLock(&m_FrameLock, Irql);
 
@@ -818,6 +839,10 @@ Return Value:
 
     if (temporaryBuffer) {
         ExFreePoolWithTag(temporaryBuffer, AVSHWS_POOLTAG);
+    }
+
+    if (stagingBuffer) {
+        ExFreePoolWithTag(stagingBuffer, AVSHWS_POOLTAG);
     }
 
     if (defaultFrameBuffer) {
@@ -1304,24 +1329,25 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 {
     KIRQL irql;
     BOOLEAN shouldWrite = FALSE;
-    PUCHAR temporaryBuffer = NULL;
+    PUCHAR stagingBuffer = NULL;
     ULONG width = 0;
     ULONG height = 0;
     ULONG imageSize = 0;
     ULONG outputBytesPerPixel = 0;
     LARGE_INTEGER now = {};
     ULONG rejectReason = kSetDataRejectNone;
+    BOOLEAN acceptedFrame = FALSE;
 
     KeAcquireSpinLock(&m_FrameLock, &irql);
     if (m_HardwareState != HardwareRunning) {
         rejectReason = kSetDataRejectNotRunning;
-    } else if (!m_TemporaryBuffer) {
+    } else if (!m_TemporaryBuffer || !m_StagingBuffer) {
         rejectReason = kSetDataRejectNoBuffer;
     } else if (!m_ImageSynth) {
         rejectReason = kSetDataRejectNoSynth;
     } else {
         shouldWrite = TRUE;
-        temporaryBuffer = m_TemporaryBuffer;
+        stagingBuffer = m_StagingBuffer;
         width = m_Width;
         height = m_Height;
         imageSize = m_ImageSize;
@@ -1331,7 +1357,7 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     m_LastSetDataLength = dataLength;
     KeReleaseSpinLock(&m_FrameLock, irql);
 
-    if (!shouldWrite || !temporaryBuffer || outputBytesPerPixel == 0) {
+    if (!shouldWrite || !stagingBuffer || outputBytesPerPixel == 0) {
         InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
         m_LastSetDataReason = rejectReason;
         return;
@@ -1362,7 +1388,7 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 
     if (outputBytesPerPixel == 2) {
         ConvertRgb24ToYuy2Frame(
-            temporaryBuffer,
+            stagingBuffer,
             imageSize,
             reinterpret_cast<const UCHAR*>(data),
             dataLength,
@@ -1371,7 +1397,7 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     } else {
 	    for (ULONG y = 0; y < height; y++)
 	    {
-		    PUCHAR buffer = temporaryBuffer + ((width * 3) * (height - 1 - y));
+		    PUCHAR buffer = stagingBuffer + ((width * 3) * (height - 1 - y));
 		    PUCHAR dataLine = (PUCHAR)(data) + ((width * 3) * y);
 
 		    RtlCopyMemory(buffer, dataLine, width * 3);
@@ -1380,13 +1406,27 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 
     KeAcquireSpinLock(&m_FrameLock, &irql);
     if (m_HardwareState == HardwareRunning &&
-        m_ClientConnected &&
-        m_TemporaryBuffer == temporaryBuffer) {
-        m_LastFrameTime = now;
+        m_TemporaryBuffer &&
+        m_StagingBuffer == stagingBuffer) {
+        m_StagingBuffer = m_TemporaryBuffer;
+        m_TemporaryBuffer = stagingBuffer;
+        if (m_ClientConnected) {
+            m_LastFrameTime = now;
+        }
+        acceptedFrame = TRUE;
+    } else {
+        rejectReason = kSetDataRejectNotRunning;
     }
     KeReleaseSpinLock(&m_FrameLock, irql);
-    InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataAcceptedCount));
-    m_LastSetDataReason = kSetDataRejectNone;
+
+    if (acceptedFrame) {
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataAcceptedCount));
+        m_LastSetDataReason = kSetDataRejectNone;
+    } else {
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        m_LastSetDataReason = rejectReason;
+    }
+
     InterlockedDecrement(&m_FrameWriteActive);
 
     if (seq <= 3 || seq % 30 == 0) {

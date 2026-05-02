@@ -360,6 +360,33 @@ Return Value:
 
 void
 CCaptureDevice::
+QuiesceHardware (
+    IN BOOLEAN ReleaseAdapter,
+    IN PCSTR Reason
+    )
+{
+    DbgPrint("[avshws] %s begin device=%p irql=%lu\n", Reason, this, (ULONG)KeGetCurrentIrql());
+
+    if (m_HardwareSimulation) {
+        (void)m_HardwareSimulation -> Stop ();
+    }
+
+    if (m_PinsWithResources) {
+        ReleaseHardwareResources ();
+    }
+
+    if (ReleaseAdapter && m_DmaAdapterObject) {
+        m_DmaAdapterObject -> DmaOperations ->
+            PutDmaAdapter (m_DmaAdapterObject);
+
+        m_DmaAdapterObject = NULL;
+    }
+
+    DbgPrint("[avshws] %s end device=%p irql=%lu\n", Reason, this, (ULONG)KeGetCurrentIrql());
+}
+
+void
+CCaptureDevice::
 PnpStop (
     )
 
@@ -381,29 +408,23 @@ Return Value:
 --*/
 
 {
+    QuiesceHardware(FALSE, "PnpStop");
+}
 
-    DbgPrint("[avshws] PnpStop begin device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
+void
+CCaptureDevice::
+PnpRemove (
+    )
+{
+    QuiesceHardware(TRUE, "PnpRemove");
+}
 
-    if (m_HardwareSimulation) {
-        (void)m_HardwareSimulation -> Stop ();
-    }
-
-    if (m_PinsWithResources) {
-        ReleaseHardwareResources ();
-    }
-
-    if (m_DmaAdapterObject) {
-        //
-        // Return the DMA adapter back to the system.
-        //
-        m_DmaAdapterObject -> DmaOperations -> 
-            PutDmaAdapter (m_DmaAdapterObject);
-
-        m_DmaAdapterObject = NULL;
-    }
-
-    DbgPrint("[avshws] PnpStop end device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
-
+void
+CCaptureDevice::
+PnpSurpriseRemoval (
+    )
+{
+    QuiesceHardware(TRUE, "PnpSurpriseRemoval");
 }
 
 #ifdef ALLOC_PRAGMA
@@ -466,13 +487,21 @@ Return Value:
         1,
         0) == 0) {
 
-        m_VideoInfoHeader = VideoInfoHeader;
+        if (!CaptureSink || !VideoInfoHeader) {
+            Status = STATUS_INVALID_PARAMETER;
+        } else {
+            RtlCopyMemory(
+                &m_VideoInfoHeaderStorage,
+                VideoInfoHeader,
+                sizeof(m_VideoInfoHeaderStorage));
+            m_VideoInfoHeader = &m_VideoInfoHeaderStorage;
+        }
 
         //
         // If there's an old hardware simulation sitting around for some
         // reason, blow it away.
         //
-        if (m_ImageSynth) {
+        if (NT_SUCCESS(Status) && m_ImageSynth) {
             delete m_ImageSynth;
             m_ImageSynth = NULL;
         }
@@ -480,7 +509,8 @@ Return Value:
         //
         // Create the necessary type of image synthesizer.
         //
-        if (m_VideoInfoHeader -> bmiHeader.biBitCount == 24 &&
+        if (NT_SUCCESS(Status) &&
+            m_VideoInfoHeader -> bmiHeader.biBitCount == 24 &&
             m_VideoInfoHeader -> bmiHeader.biCompression == KS_BI_RGB) {
     
             //
@@ -494,7 +524,8 @@ Return Value:
                     );
     
         } else
-        if (m_VideoInfoHeader -> bmiHeader.biBitCount == 16 &&
+        if (NT_SUCCESS(Status) &&
+            m_VideoInfoHeader -> bmiHeader.biBitCount == 16 &&
            (m_VideoInfoHeader -> bmiHeader.biCompression == FOURCC_YUY2)) {
     
             //
@@ -503,7 +534,7 @@ Return Value:
             m_ImageSynth = new(NonPagedPoolNx, 'YysI') CYUVSynthesizer;
     
         }
-        else
+        else if (NT_SUCCESS(Status))
             //
             // We don't synthesize anything but RGB 24 and UYVY.
             //
@@ -580,6 +611,7 @@ Return Value:
 
     }
 
+    RtlZeroMemory(&m_VideoInfoHeaderStorage, sizeof(m_VideoInfoHeaderStorage));
     m_VideoInfoHeader = NULL;
     m_CaptureSink = NULL;
 
@@ -624,7 +656,7 @@ Return Value:
 --*/
 
 {
-    if (!m_HardwareSimulation) {
+    if (!m_HardwareSimulation || !m_VideoInfoHeader || !m_ImageSynth) {
         return STATUS_DEVICE_NOT_READY;
     }
 
@@ -919,9 +951,9 @@ CaptureDeviceDispatch = {
     CCaptureDevice::DispatchPnpStop,        // Pnp Stop
     NULL,                                   // Pnp Query Remove
     NULL,                                   // Pnp Cancel Remove
-    CCaptureDevice::DispatchPnpStop,        // Pnp Remove
+    CCaptureDevice::DispatchPnpRemove,      // Pnp Remove
     NULL,                                   // Pnp Query Capabilities
-    CCaptureDevice::DispatchPnpStop,        // Pnp Surprise Removal
+    CCaptureDevice::DispatchPnpSurpriseRemoval, // Pnp Surprise Removal
     NULL,                                   // Power Query Power
     NULL,                                   // Power Set Power
     NULL                                    // Pnp Query Interface
