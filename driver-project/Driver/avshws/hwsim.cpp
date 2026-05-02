@@ -37,6 +37,27 @@ static const ULONG kSetDataRejectBadGeometry = 5;
 static const ULONG kSetDataRejectShortSource = 6;
 static const ULONG kUserFrameStartupGraceInterrupts = 0;
 
+static NTSTATUS
+MapSetDataRejectReasonToStatus(
+    _In_ ULONG rejectReason
+    )
+{
+    switch (rejectReason) {
+    case kSetDataRejectNoBuffer:
+    case kSetDataRejectNoSynth:
+    case kSetDataRejectNotRunning:
+        return STATUS_DEVICE_NOT_READY;
+    case kSetDataRejectNotConnected:
+        return STATUS_DEVICE_NOT_CONNECTED;
+    case kSetDataRejectBadGeometry:
+        return STATUS_INVALID_BUFFER_SIZE;
+    case kSetDataRejectShortSource:
+        return STATUS_BUFFER_TOO_SMALL;
+    default:
+        return STATUS_UNSUCCESSFUL;
+    }
+}
+
 namespace
 {
     const UCHAR kPlaceholderBlue = 217;
@@ -1493,7 +1514,7 @@ Return Value:
 }
 
 
-void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
+NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 {
     KIRQL irql;
     BOOLEAN shouldWrite = FALSE;
@@ -1505,6 +1526,7 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     LARGE_INTEGER now = {};
     ULONG rejectReason = kSetDataRejectNone;
     BOOLEAN acceptedFrame = FALSE;
+    NTSTATUS status = STATUS_SUCCESS;
 
     KeAcquireSpinLock(&m_FrameLock, &irql);
     if (m_HardwareState != HardwareRunning) {
@@ -1530,7 +1552,7 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     if (!shouldWrite || !stagingBuffer || outputBytesPerPixel == 0) {
         InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
         m_LastSetDataReason = rejectReason;
-        return;
+        return MapSetDataRejectReasonToStatus(rejectReason);
     }
 
     const ULONGLONG requiredSourceLength64 = static_cast<ULONGLONG>(width) * static_cast<ULONGLONG>(height) * 3ull;
@@ -1538,7 +1560,7 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
         m_LastSetDataReason = kSetDataRejectBadGeometry;
         InterlockedDecrement(&m_FrameWriteActive);
-        return;
+        return MapSetDataRejectReasonToStatus(kSetDataRejectBadGeometry);
     }
 
     const ULONG requiredSourceLength = static_cast<ULONG>(requiredSourceLength64);
@@ -1548,7 +1570,7 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
         m_LastSetDataReason = kSetDataRejectShortSource;
         InterlockedDecrement(&m_FrameWriteActive);
-		return;
+		return MapSetDataRejectReasonToStatus(kSetDataRejectShortSource);
 	}
 
     KeQuerySystemTimePrecise(&now);
@@ -1592,9 +1614,11 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     if (acceptedFrame) {
         InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataAcceptedCount));
         m_LastSetDataReason = kSetDataRejectNone;
+        status = STATUS_SUCCESS;
     } else {
         InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
         m_LastSetDataReason = rejectReason;
+        status = MapSetDataRejectReasonToStatus(rejectReason);
     }
 
     InterlockedDecrement(&m_FrameWriteActive);
@@ -1602,6 +1626,8 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     if (seq <= 3 || seq % 30 == 0) {
         DbgPrint("[avshws] HwSim::SetData frame=%ld bytes=%lu active=%ld irql=%lu\n", seq, dataLength, InterlockedCompareExchange(&m_FrameWriteActive, 0, 0), (ULONG)KeGetCurrentIrql());
     }
+
+    return status;
 }
 
 void CHardwareSimulation::SetClientConnected(BOOLEAN connected)
@@ -1633,6 +1659,7 @@ void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
     PKEVENT registeredClientRequestEventObject = NULL;
     PKEVENT namedClientRequestEventObject = NULL;
     BOOLEAN clientConnected = FALSE;
+    LONG acceptedFrameCount = 0;
     KIRQL irql;
 
     DbgPrint("[avshws] HwSim::NotifyCameraState running=%lu connected=%lu irql=%lu\n", (ULONG)isRunning, (ULONG)IsClientConnected(), (ULONG)KeGetCurrentIrql());
@@ -1647,10 +1674,11 @@ void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
         ObReferenceObject(namedClientRequestEventObject);
     }
     clientConnected = m_ClientConnected;
+    acceptedFrameCount = m_SetDataAcceptedCount;
     KeReleaseSpinLock(&m_FrameLock, irql);
 
     if (isRunning) {
-        if (!clientConnected) {
+        if (!clientConnected || acceptedFrameCount == 0) {
             if (registeredClientRequestEventObject) {
                 KeSetEvent(registeredClientRequestEventObject, IO_NO_INCREMENT, FALSE);
             } else if (namedClientRequestEventObject) {

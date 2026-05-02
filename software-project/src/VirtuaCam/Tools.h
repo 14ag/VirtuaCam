@@ -35,6 +35,7 @@ struct BroadcastManifest {
     LUID adapterLuid;
     WCHAR textureName[256];
     WCHAR fenceName[256];
+    UINT64 sharedFenceHandleValue;
     volatile VCamCommand command;
 };
 

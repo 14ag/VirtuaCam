@@ -1105,11 +1105,12 @@ Return Value:
             );
 }
 
-void CCaptureDevice::SetData(PVOID data, ULONG dataLength)
+NTSTATUS CCaptureDevice::SetData(PVOID data, ULONG dataLength)
 {
 	if (m_HardwareSimulation) {
-        m_HardwareSimulation->SetData(data, dataLength);
+        return m_HardwareSimulation->SetData(data, dataLength);
     }
+    return STATUS_DEVICE_NOT_READY;
 }
 
 void CCaptureDevice::ConnectClient()

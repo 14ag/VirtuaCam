@@ -73,12 +73,12 @@ namespace
         streamHeader->PresentationTime.Time = samplePresentationTime;
         streamHeader->OptionsFlags |=
             KSSTREAM_HEADER_OPTIONSF_TIMEVALID |
-            KSSTREAM_HEADER_OPTIONSF_DURATIONVALID |
-            KSSTREAM_HEADER_OPTIONSF_FRAMEINFO;
+            KSSTREAM_HEADER_OPTIONSF_DURATIONVALID;
 
         (*frameNumber)++;
 
         if (streamHeader->Size >= sizeof(KSSTREAM_HEADER) + sizeof(KS_FRAME_INFO)) {
+            streamHeader->OptionsFlags |= KSSTREAM_HEADER_OPTIONSF_FRAMEINFO;
             PKS_FRAME_INFO frameInfo = reinterpret_cast<PKS_FRAME_INFO>(streamHeader + 1);
             LONG surfacePitch = frameInfo->lSurfacePitch;
             RtlZeroMemory(frameInfo, sizeof(*frameInfo));

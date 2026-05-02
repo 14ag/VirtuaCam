@@ -138,6 +138,28 @@ namespace
         LocalFree(argv);
         return found;
     }
+
+    HRESULT DuplicateSharedHandleIntoProcess(HANDLE sourceHandle, DWORD targetProcessId, UINT64& duplicatedHandleValue)
+    {
+        duplicatedHandleValue = 0;
+        RETURN_HR_IF(E_INVALIDARG, !sourceHandle || targetProcessId == 0);
+
+        wil::unique_handle targetProcess(OpenProcess(PROCESS_DUP_HANDLE, FALSE, targetProcessId));
+        RETURN_LAST_ERROR_IF(!targetProcess);
+
+        HANDLE duplicatedHandle = nullptr;
+        RETURN_LAST_ERROR_IF(!DuplicateHandle(
+            GetCurrentProcess(),
+            sourceHandle,
+            targetProcess.get(),
+            &duplicatedHandle,
+            0,
+            FALSE,
+            DUPLICATE_SAME_ACCESS));
+
+        duplicatedHandleValue = static_cast<UINT64>(reinterpret_cast<UINT_PTR>(duplicatedHandle));
+        return S_OK;
+    }
 }
 
     bool ParseCommandLine(const WCHAR* cmdLine, std::wstring& type, std::wstring& args)
@@ -205,6 +227,8 @@ namespace BuiltInCaptureProducer
     static HANDLE g_hManifest = nullptr;
     static BroadcastManifest* g_pManifestView = nullptr;
     static std::atomic<UINT64> g_fenceValue = 0;
+    static DWORD g_brokerProcessId = 0;
+    static UINT64 g_brokerFenceHandleValue = 0;
 
     static ComPtr<ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice> g_winrtD3dDevice;
     static ComPtr<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem> g_captureItem;
@@ -363,11 +387,20 @@ namespace BuiltInCaptureProducer
 
         wcscpy_s(g_pManifestView->textureName, texName.c_str());
         wcscpy_s(g_pManifestView->fenceName, fenceName.c_str());
+        g_pManifestView->sharedFenceHandleValue = 0;
 
         ComPtr<IDXGIResource1> r1;
         g_sharedD3D11Texture.As(&r1);
         RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, texName.c_str(), &g_hSharedTextureHandle));
         RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_hSharedFenceHandle));
+        if (g_brokerProcessId != 0) {
+            RETURN_IF_FAILED(DuplicateSharedHandleIntoProcess(g_hSharedFenceHandle, g_brokerProcessId, g_brokerFenceHandleValue));
+            g_pManifestView->sharedFenceHandleValue = g_brokerFenceHandleValue;
+            VirtuaCamLog::LogLine(std::format(
+                L"Producer duplicated shared fence into broker pid={} handle=0x{:X}",
+                g_brokerProcessId,
+                static_cast<unsigned long long>(g_brokerFenceHandleValue)));
+        }
 
         return S_OK;
     }
@@ -464,6 +497,12 @@ namespace BuiltInCaptureProducer
     {
         UINT64 hwndVal = 0;
         std::wstring argsStr = args ? args : L"";
+        UINT64 brokerPidValue = 0;
+        g_brokerProcessId = 0;
+        g_brokerFenceHandleValue = 0;
+        if (TryGetArgU64(argsStr, L"--broker-pid", brokerPidValue) && brokerPidValue <= MAXDWORD) {
+            g_brokerProcessId = static_cast<DWORD>(brokerPidValue);
+        }
         RETURN_HR_IF(E_INVALIDARG, !TryGetArgU64(argsStr, L"--hwnd", hwndVal));
         HWND hwndToCapture = reinterpret_cast<HWND>(hwndVal);
         RETURN_HR_IF_NULL(E_INVALIDARG, hwndToCapture);
@@ -580,6 +619,8 @@ namespace BuiltInCaptureProducer
         if (g_hSharedFenceHandle) CloseHandle(g_hSharedFenceHandle);
         g_hSharedTextureHandle = nullptr;
         g_hSharedFenceHandle = nullptr;
+        g_brokerProcessId = 0;
+        g_brokerFenceHandleValue = 0;
 
         g_sharedD3D11Fence.Reset();
         g_sharedD3D11Texture.Reset();
@@ -776,6 +817,8 @@ namespace BuiltInCameraProducer
     static HANDLE g_hManifest = nullptr;
     static BroadcastManifest* g_pManifestView = nullptr;
     static std::atomic<UINT64> g_fenceValue = 0;
+    static DWORD g_brokerProcessId = 0;
+    static UINT64 g_brokerFenceHandleValue = 0;
 
     static ComPtr<IMFSourceReader> g_sourceReader;
     static long g_videoWidth = 0;
@@ -837,11 +880,20 @@ namespace BuiltInCameraProducer
 
         wcscpy_s(g_pManifestView->textureName, texName.c_str());
         wcscpy_s(g_pManifestView->fenceName, fenceName.c_str());
+        g_pManifestView->sharedFenceHandleValue = 0;
 
         ComPtr<IDXGIResource1> r1;
         g_sharedD3D11Texture.As(&r1);
         RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, texName.c_str(), &g_hSharedTextureHandle));
         RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_hSharedFenceHandle));
+        if (g_brokerProcessId != 0) {
+            RETURN_IF_FAILED(DuplicateSharedHandleIntoProcess(g_hSharedFenceHandle, g_brokerProcessId, g_brokerFenceHandleValue));
+            g_pManifestView->sharedFenceHandleValue = g_brokerFenceHandleValue;
+            VirtuaCamLog::LogLine(std::format(
+                L"Camera producer duplicated shared fence into broker pid={} handle=0x{:X}",
+                g_brokerProcessId,
+                static_cast<unsigned long long>(g_brokerFenceHandleValue)));
+        }
 
         return S_OK;
     }
@@ -903,6 +955,12 @@ namespace BuiltInCameraProducer
     HRESULT InitializeProducer(const wchar_t* args)
     {
         std::wstring argsStr = args ? args : L"";
+        UINT64 brokerPidValue = 0;
+        g_brokerProcessId = 0;
+        g_brokerFenceHandleValue = 0;
+        if (TryGetArgU64(argsStr, L"--broker-pid", brokerPidValue) && brokerPidValue <= MAXDWORD) {
+            g_brokerProcessId = static_cast<DWORD>(brokerPidValue);
+        }
 
         if (!g_mfStarted) {
             RETURN_IF_FAILED(MFStartup(MF_VERSION));
@@ -1005,6 +1063,8 @@ namespace BuiltInCameraProducer
         if (g_hSharedFenceHandle) CloseHandle(g_hSharedFenceHandle);
         g_hSharedTextureHandle = nullptr;
         g_hSharedFenceHandle = nullptr;
+        g_brokerProcessId = 0;
+        g_brokerFenceHandleValue = 0;
 
         g_sharedD3D11Fence.Reset();
         g_sharedD3D11Texture.Reset();
