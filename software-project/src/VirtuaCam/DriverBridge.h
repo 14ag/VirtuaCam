@@ -16,6 +16,7 @@ public:
     bool IsActive() const { return m_active; }
     const std::wstring& GetLastError() const { return m_lastError; }
 
+    HRESULT RegisterClientRequestEvent(HANDLE eventHandle);
     HRESULT Connect();
     HRESULT Disconnect();
     HRESULT SendFrame(ID3D11Texture2D* sourceTexture);
@@ -37,6 +38,9 @@ private:
 
     bool m_active = false;
     std::wstring m_lastError;
+    std::wstring m_selectedDevicePath;
+    std::wstring m_selectedFriendlyName;
+    wil::unique_hfile m_driverHandle;
 
     wil::com_ptr_nothrow<IBaseFilter> m_filter;
     wil::com_ptr_nothrow<IKsControl> m_ksControl;

@@ -15,7 +15,7 @@ set(VCAM_COMMON_VCPKG_LIBS WIL::WIL)
 set(VCAM_MF_LIBS mfplat mfuuid mfreadwrite mf)
 set(VCAM_MF_GUID_LIBS mfuuid)
 set(VCAM_D3D_LIBS d3d11 d2d1 dwrite windowscodecs d3d12 d3dcompiler dxgi)
-set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 comctl32 shlwapi synchronization dwmapi windowsapp avrt strmiids)
+set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 comctl32 shlwapi synchronization dwmapi windowsapp avrt strmiids ksproxy)
 
 add_library(VirtuaCamCommon STATIC
     VirtuaCam/Tools.cpp
@@ -87,11 +87,13 @@ target_precompile_headers(VirtuaCam PRIVATE VirtuaCam/pch.h)
 
 add_executable(VirtuaCamProcess WIN32
     VirtuaCam/Process.cpp
+    VirtuaCam/DriverBridge.cpp
     VirtuaCam/Process.rc
 )
 set_target_properties(VirtuaCamProcess PROPERTIES OUTPUT_NAME "VirtuaCamProcess")
 target_link_libraries(VirtuaCamProcess PRIVATE VirtuaCamCommon)
 target_link_libraries(VirtuaCamProcess PRIVATE ${VCAM_MF_LIBS})
+target_link_libraries(VirtuaCamProcess PRIVATE ${VCAM_MF_GUID_LIBS})
 target_compile_definitions(VirtuaCamProcess PRIVATE UNICODE _UNICODE)
 
 add_custom_target(register_vcam COMMAND regsvr32 /s "$<TARGET_FILE:DirectPortClient>"

@@ -234,6 +234,33 @@ SetDisconnect(
 
 NTSTATUS
 CCaptureFilter::
+SetRegisterEvent(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    UNREFERENCED_PARAMETER(Request);
+    PAGED_CODE();
+
+    PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.InputBufferLength;
+    if (!Data || bufferLength < sizeof(HANDLE)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    HANDLE eventHandle = *(PHANDLE)Data;
+    if (!eventHandle) {
+        return STATUS_INVALID_HANDLE;
+    }
+
+    CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
+    CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
+    return device->RegisterClientRequestEvent(eventHandle, Irp->RequestorMode);
+}
+
+NTSTATUS
+CCaptureFilter::
 GetStatus(
     _In_ PIRP Irp,
     _In_ PKSIDENTIFIER Request,
@@ -320,6 +347,18 @@ DEFINE_KSPROPERTY_TABLE(CustomPropertyTable)
         (PKSPROPERTY)NULL,                             //Relations
         (PFNKSHANDLER)NULL,                            //SupportHandler
         (ULONG)0                                       //SerializedSize
+    },
+    {
+        VIRTUACAM_PROP_REGISTER_EVENT,                    //PropertyId
+        (PFNKSHANDLER)NULL,                               //GetPropertyHandler
+        (ULONG)sizeof(KSPROPERTY),                        //MinProperty
+        (ULONG)sizeof(HANDLE),                            //MinData
+        (PFNKSHANDLER)&CCaptureFilter::SetRegisterEvent,  //SetPropertyHandler
+        (PKSPROPERTY_VALUES)NULL,                         //Values
+        0,                                                //RelationsCount
+        (PKSPROPERTY)NULL,                                //Relations
+        (PFNKSHANDLER)NULL,                               //SupportHandler
+        (ULONG)0                                          //SerializedSize
     }
 };
 

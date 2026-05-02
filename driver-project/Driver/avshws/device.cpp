@@ -1050,6 +1050,21 @@ void CCaptureDevice::DisconnectClient()
     }
 }
 
+NTSTATUS CCaptureDevice::RegisterClientRequestEvent(HANDLE eventHandle, KPROCESSOR_MODE accessMode)
+{
+    DbgPrint(
+        "[avshws] RegisterClientRequestEvent device=%p handle=%p accessMode=%lu irql=%lu\n",
+        this,
+        eventHandle,
+        (ULONG)accessMode,
+        (ULONG)KeGetCurrentIrql());
+    if (!m_HardwareSimulation) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    return m_HardwareSimulation->RegisterClientRequestEvent(eventHandle, accessMode);
+}
+
 void CCaptureDevice::NotifyCameraState(BOOLEAN isRunning)
 {
     DbgPrint("[avshws] NotifyCameraState device=%p running=%lu irql=%lu\n", this, (ULONG)isRunning, (ULONG)KeGetCurrentIrql());

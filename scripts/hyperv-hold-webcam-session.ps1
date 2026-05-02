@@ -37,6 +37,20 @@ function Write-StatusFile {
     $StatusObject | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $HostStatusPath -Encoding UTF8
 }
 
+function Join-TextOutput {
+    param([object[]]$InputObject)
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($InputObject)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $lines.Add([string]$item.ToString())
+    }
+
+    return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
+}
+
 if ([string]::IsNullOrWhiteSpace($HostStatusPath)) {
     $HostStatusPath = Resolve-HvPath -Path "output\playwright\vm-session-status.json"
 }
@@ -107,6 +121,20 @@ try {
             $TaskPassword
         )
 
+        function Join-GuestTextOutput {
+            param([object[]]$InputObject)
+
+            $lines = New-Object System.Collections.Generic.List[string]
+            foreach ($item in @($InputObject)) {
+                if ($null -eq $item) {
+                    continue
+                }
+                $lines.Add([string]$item.ToString())
+            }
+
+            return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
+        }
+
         $config = [ordered]@{
             PackageRoot = $PackageRoot
             HtmlPath = $HtmlPath
@@ -128,8 +156,8 @@ try {
         schtasks /delete /tn $TaskName /f 2>$null | Out-Null
         $startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
         $taskCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $LauncherPath + '"'
-        $createOutput = schtasks /create /tn $TaskName /sc once /st $startTime /tr $taskCommand /ru $TaskUser /rp $TaskPassword /rl HIGHEST /it /f 2>&1 | Out-String
-        $runOutput = schtasks /run /tn $TaskName 2>&1 | Out-String
+        $createOutput = Join-GuestTextOutput @(schtasks /create /tn $TaskName /sc once /st $startTime /tr $taskCommand /ru $TaskUser /rp $TaskPassword /rl HIGHEST /it /f 2>&1)
+        $runOutput = Join-GuestTextOutput @(schtasks /run /tn $TaskName 2>&1)
 
         [pscustomobject]@{
             TaskName = $TaskName
@@ -181,7 +209,22 @@ try {
     if (-not $guestState -or -not $guestState.Ready) {
         $taskQuery = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
             param($TaskName)
-            schtasks /query /tn $TaskName /v /fo list 2>&1 | Out-String
+
+            function Join-GuestTextOutput {
+                param([object[]]$InputObject)
+
+                $lines = New-Object System.Collections.Generic.List[string]
+                foreach ($item in @($InputObject)) {
+                    if ($null -eq $item) {
+                        continue
+                    }
+                    $lines.Add([string]$item.ToString())
+                }
+
+                return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
+            }
+
+            Join-GuestTextOutput @(schtasks /query /tn $TaskName /v /fo list 2>&1)
         } -ArgumentList $guestLaunch.TaskName
         throw ("Timed out waiting for held guest session status. Task={0}`nCreate={1}`nRun={2}`nQuery={3}" -f $launchResult.TaskName, $launchResult.CreateOutput.Trim(), $launchResult.RunOutput.Trim(), $taskQuery.Trim())
     }

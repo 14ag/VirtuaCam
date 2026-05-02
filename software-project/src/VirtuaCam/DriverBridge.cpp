@@ -3,10 +3,14 @@
 #include <dshow.h>
 #include <dvdmedia.h>
 #include <d3dcompiler.h>
+#include <algorithm>
 #include <cstdio>
+#include <cwctype>
+#include <winioctl.h>
 #include "RuntimeLog.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
+#pragma comment(lib, "ksproxy.lib")
 
 namespace
 {
@@ -20,6 +24,26 @@ namespace
     constexpr ULONG kDriverPropertyIdConnect = 1;
     constexpr ULONG kDriverPropertyIdDisconnect = 2;
     constexpr ULONG kDriverPropertyIdStatus = 3;
+    constexpr ULONG kDriverPropertyIdRegisterEvent = 4;
+    const GUID kVideoCameraCategory = { 0xe5323777, 0xf976, 0x4f5b, { 0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44 } };
+    const GUID kCaptureCategory = { 0x65e8773d, 0x8f56, 0x11d0, { 0xa3, 0xb9, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96 } };
+    constexpr const wchar_t* kVideoCameraCategoryGuid = L"{e5323777-f976-4f5b-9b55-b94699c46e44}";
+    constexpr const wchar_t* kCaptureCategoryGuid = L"{65e8773d-8f56-11d0-a3b9-00a0c9223196}";
+    constexpr ULONG kIoctlKsProperty = CTL_CODE(FILE_DEVICE_KS, 0x000, METHOD_NEITHER, FILE_ANY_ACCESS);
+
+    extern "C" HRESULT WINAPI KsOpenDefaultDevice(
+        _In_ REFGUID Category,
+        _In_ ACCESS_MASK Access,
+        _Out_ PHANDLE DeviceHandle);
+
+    extern "C" HRESULT WINAPI KsSynchronousDeviceControl(
+        _In_ HANDLE Handle,
+        _In_ ULONG IoControl,
+        _In_reads_bytes_opt_(InLength) PVOID InBuffer,
+        _In_ ULONG InLength,
+        _Out_writes_bytes_opt_(OutLength) PVOID OutBuffer,
+        _In_ ULONG OutLength,
+        _Inout_opt_ PULONG BytesReturned);
 
     struct DriverStatusSnapshot
     {
@@ -100,6 +124,75 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
 
         std::fclose(file);
     }
+
+    std::wstring GetMonikerStringProperty(IMoniker* moniker, const wchar_t* propertyName)
+    {
+        if (!moniker || !propertyName || !*propertyName) {
+            return {};
+        }
+
+        wil::com_ptr_nothrow<IPropertyBag> propertyBag;
+        if (FAILED(moniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(propertyBag.put()))) || !propertyBag) {
+            return {};
+        }
+
+        VARIANT value;
+        VariantInit(&value);
+        std::wstring result;
+        if (SUCCEEDED(propertyBag->Read(propertyName, &value, nullptr)) &&
+            value.vt == VT_BSTR &&
+            value.bstrVal) {
+            result = value.bstrVal;
+        }
+        VariantClear(&value);
+        return result;
+    }
+
+    bool ContainsInsensitive(std::wstring_view haystack, std::wstring_view needle)
+    {
+        if (needle.empty() || haystack.size() < needle.size()) {
+            return false;
+        }
+
+        auto it = std::search(
+            haystack.begin(),
+            haystack.end(),
+            needle.begin(),
+            needle.end(),
+            [](wchar_t left, wchar_t right) {
+                return std::towlower(left) == std::towlower(right);
+            });
+        return it != haystack.end();
+    }
+
+    int ScoreDriverDevicePath(std::wstring_view devicePath)
+    {
+        if (ContainsInsensitive(devicePath, kVideoCameraCategoryGuid)) {
+            return 200;
+        }
+        if (ContainsInsensitive(devicePath, kCaptureCategoryGuid)) {
+            return 100;
+        }
+        return 0;
+    }
+
+    HRESULT OpenDriverCategoryHandle(const GUID& category, const wchar_t* categoryName, wil::unique_hfile& handle)
+    {
+        HANDLE rawHandle = INVALID_HANDLE_VALUE;
+        const HRESULT hr = KsOpenDefaultDevice(category, GENERIC_READ | GENERIC_WRITE, &rawHandle);
+        if (FAILED(hr)) {
+            return hr;
+        }
+        if (!rawHandle || rawHandle == INVALID_HANDLE_VALUE) {
+            return HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE);
+        }
+
+        handle.reset(rawHandle);
+        VirtuaCamLog::LogLine(std::format(
+            L"[1.1] Opened KS handle for category {}",
+            categoryName ? categoryName : L"<unknown>"));
+        return S_OK;
+    }
 }
 
 DriverBridge::DriverBridge()
@@ -123,6 +216,9 @@ HRESULT DriverBridge::Initialize()
 void DriverBridge::Shutdown()
 {
     m_active = false;
+    m_selectedDevicePath.clear();
+    m_selectedFriendlyName.clear();
+    m_driverHandle.reset();
     m_sourceSrv.reset();
     m_sourceTexture.reset();
     m_samplerState.reset();
@@ -160,6 +256,14 @@ HRESULT DriverBridge::FindDriverFilter()
     }
     RETURN_IF_FAILED(hr);
 
+    wil::com_ptr_nothrow<IBaseFilter> bestFilter;
+    wil::com_ptr_nothrow<IKsPropertySet> bestPropertySet;
+    wil::com_ptr_nothrow<IKsControl> bestKsControl;
+    std::wstring bestDevicePath;
+    std::wstring bestFriendlyName;
+    DWORD bestSupportFlags = 0;
+    int bestScore = -1;
+
     while (true) {
         wil::com_ptr_nothrow<IMoniker> moniker;
         ULONG fetched = 0;
@@ -186,11 +290,53 @@ HRESULT DriverBridge::FindDriverFilter()
             continue;
         }
 
-        VirtuaCamLog::LogLine(std::format(L"[1.1] Found avshws filter supporting kDriverPropertySet, supportFlags=0x{:08X}", supportFlags));
+        const std::wstring devicePath = GetMonikerStringProperty(moniker.get(), L"DevicePath");
+        const std::wstring friendlyName = GetMonikerStringProperty(moniker.get(), L"FriendlyName");
+        const int score = ScoreDriverDevicePath(devicePath);
 
-        m_filter = filter;
-        (void)filter->QueryInterface(IID_PPV_ARGS(m_ksControl.put()));
-        m_propertySet = propertySet;
+        VirtuaCamLog::LogLine(std::format(
+            L"[1.1] Candidate avshws filter supportFlags=0x{:08X} score={} friendly='{}' devicePath='{}'",
+            supportFlags,
+            score,
+            friendlyName.empty() ? L"<unknown>" : friendlyName,
+            devicePath.empty() ? L"<unknown>" : devicePath));
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestSupportFlags = supportFlags;
+            bestFriendlyName = friendlyName;
+            bestDevicePath = devicePath;
+            bestFilter = filter;
+            bestPropertySet = propertySet;
+            bestKsControl.reset();
+            (void)filter->QueryInterface(IID_PPV_ARGS(bestKsControl.put()));
+        }
+    }
+
+    if (bestFilter && bestPropertySet) {
+        m_filter = bestFilter;
+        m_propertySet = bestPropertySet;
+        m_ksControl = bestKsControl;
+        m_selectedDevicePath = bestDevicePath;
+        m_selectedFriendlyName = bestFriendlyName;
+        VirtuaCamLog::LogLine(std::format(
+            L"[1.1] Selected avshws filter supportFlags=0x{:08X} friendly='{}' devicePath='{}'",
+            bestSupportFlags,
+            m_selectedFriendlyName.empty() ? L"<unknown>" : m_selectedFriendlyName,
+            m_selectedDevicePath.empty() ? L"<unknown>" : m_selectedDevicePath));
+
+        HRESULT handleHr = OpenDriverCategoryHandle(kVideoCameraCategory, L"KSCATEGORY_VIDEO_CAMERA", m_driverHandle);
+        if (FAILED(handleHr)) {
+            VirtuaCamLog::LogLine(std::format(
+                L"[1.1] Failed to open KS handle for KSCATEGORY_VIDEO_CAMERA hr=0x{:08X}; trying KSCATEGORY_CAPTURE",
+                static_cast<unsigned>(handleHr)));
+            handleHr = OpenDriverCategoryHandle(kCaptureCategory, L"KSCATEGORY_CAPTURE", m_driverHandle);
+            if (FAILED(handleHr)) {
+                VirtuaCamLog::LogLine(std::format(
+                    L"[1.1] Failed to open KS handle for KSCATEGORY_CAPTURE hr=0x{:08X}; falling back to moniker property-set path",
+                    static_cast<unsigned>(handleHr)));
+            }
+        }
         return S_OK;
     }
 
@@ -330,15 +476,12 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
 
 void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequence)
 {
-    if (!m_propertySet) {
+    if (!m_driverHandle && !m_ksControl && !m_propertySet) {
         return;
     }
 
     DWORD supportFlags = 0;
-    if (FAILED(m_propertySet->QuerySupported(kDriverPropertySet, kDriverPropertyIdStatus, &supportFlags)) ||
-        (supportFlags & KSPROPERTY_SUPPORT_GET) != KSPROPERTY_SUPPORT_GET) {
-        return;
-    }
+    const bool supportKnown = IsPropertySetSupported(kDriverPropertyIdStatus, &supportFlags);
 
     DriverStatusSnapshot status = {};
     DWORD returned = 0;
@@ -350,10 +493,12 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
 
     if (FAILED(hr)) {
         VirtuaCamLog::LogLine(std::format(
-            L"{} frame={} query failed hr=0x{:08X}",
+            L"{} frame={} query failed hr=0x{:08X} supportKnown={} supportFlags=0x{:08X}",
             prefix ? prefix : L"Driver status",
             frameSequence,
-            static_cast<unsigned>(hr)));
+            static_cast<unsigned>(hr),
+            supportKnown ? 1 : 0,
+            supportFlags));
         return;
     }
 
@@ -383,7 +528,7 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
 
 HRESULT DriverBridge::EnsurePropertySetReady()
 {
-    if (m_propertySet) {
+    if (m_driverHandle || m_propertySet) {
         return S_OK;
     }
     return FindDriverFilter();
@@ -393,26 +538,92 @@ HRESULT DriverBridge::SetDriverProperty(ULONG propertyId, void* data, ULONG data
 {
     RETURN_IF_FAILED(EnsurePropertySetReady());
 
+    HRESULT lastHr = E_NOINTERFACE;
+    bool attempted = false;
+
+    if (m_driverHandle) {
+        KSPROPERTY property = {};
+        property.Set = kDriverPropertySet;
+        property.Id = propertyId;
+        property.Flags = KSPROPERTY_TYPE_SET;
+        ULONG localBytesReturned = 0;
+        const HRESULT hr = KsSynchronousDeviceControl(
+            m_driverHandle.get(),
+            kIoctlKsProperty,
+            &property,
+            static_cast<ULONG>(sizeof(property)),
+            data,
+            dataLength,
+            bytesReturned ? bytesReturned : &localBytesReturned);
+        if (SUCCEEDED(hr)) {
+            return hr;
+        }
+        lastHr = hr;
+        attempted = true;
+    }
+
     if (m_ksControl) {
         KSPROPERTY property = {};
         property.Set = kDriverPropertySet;
         property.Id = propertyId;
         property.Flags = KSPROPERTY_TYPE_SET;
         ULONG localBytesReturned = 0;
-        return m_ksControl->KsProperty(
+        const HRESULT hr = m_ksControl->KsProperty(
             &property,
             static_cast<ULONG>(sizeof(property)),
             data,
             dataLength,
             bytesReturned ? bytesReturned : &localBytesReturned);
+        if (SUCCEEDED(hr)) {
+            return hr;
+        }
+        if (!attempted) {
+            lastHr = hr;
+            attempted = true;
+        }
     }
 
-    return m_propertySet->Set(kDriverPropertySet, propertyId, nullptr, 0, data, dataLength);
+    if (m_propertySet) {
+        const HRESULT hr = m_propertySet->Set(kDriverPropertySet, propertyId, nullptr, 0, data, dataLength);
+        if (SUCCEEDED(hr)) {
+            return hr;
+        }
+        if (!attempted) {
+            lastHr = hr;
+            attempted = true;
+        }
+    }
+
+    return attempted ? lastHr : E_NOINTERFACE;
 }
 
 HRESULT DriverBridge::GetDriverProperty(ULONG propertyId, void* data, ULONG dataLength, ULONG* bytesReturned)
 {
     RETURN_IF_FAILED(EnsurePropertySetReady());
+
+    HRESULT lastHr = E_NOINTERFACE;
+    bool attempted = false;
+
+    if (m_driverHandle) {
+        KSPROPERTY property = {};
+        property.Set = kDriverPropertySet;
+        property.Id = propertyId;
+        property.Flags = KSPROPERTY_TYPE_GET;
+        ULONG localBytesReturned = 0;
+        const HRESULT hr = KsSynchronousDeviceControl(
+            m_driverHandle.get(),
+            kIoctlKsProperty,
+            &property,
+            static_cast<ULONG>(sizeof(property)),
+            data,
+            dataLength,
+            bytesReturned ? bytesReturned : &localBytesReturned);
+        if (SUCCEEDED(hr)) {
+            return hr;
+        }
+        lastHr = hr;
+        attempted = true;
+    }
 
     if (m_ksControl) {
         KSPROPERTY property = {};
@@ -420,15 +631,33 @@ HRESULT DriverBridge::GetDriverProperty(ULONG propertyId, void* data, ULONG data
         property.Id = propertyId;
         property.Flags = KSPROPERTY_TYPE_GET;
         ULONG localBytesReturned = 0;
-        return m_ksControl->KsProperty(
+        const HRESULT hr = m_ksControl->KsProperty(
             &property,
             static_cast<ULONG>(sizeof(property)),
             data,
             dataLength,
             bytesReturned ? bytesReturned : &localBytesReturned);
+        if (SUCCEEDED(hr)) {
+            return hr;
+        }
+        if (!attempted) {
+            lastHr = hr;
+            attempted = true;
+        }
     }
 
-    return m_propertySet->Get(kDriverPropertySet, propertyId, nullptr, 0, data, dataLength, bytesReturned);
+    if (m_propertySet) {
+        const HRESULT hr = m_propertySet->Get(kDriverPropertySet, propertyId, nullptr, 0, data, dataLength, bytesReturned);
+        if (SUCCEEDED(hr)) {
+            return hr;
+        }
+        if (!attempted) {
+            lastHr = hr;
+            attempted = true;
+        }
+    }
+
+    return attempted ? lastHr : E_NOINTERFACE;
 }
 
 bool DriverBridge::IsPropertySetSupported(ULONG propertyId, DWORD* supportFlags)
@@ -437,51 +666,120 @@ bool DriverBridge::IsPropertySetSupported(ULONG propertyId, DWORD* supportFlags)
         *supportFlags = 0;
     }
 
-    if (!m_propertySet) {
-        return false;
+    bool supportKnown = false;
+    DWORD combinedFlags = 0;
+
+    if (m_driverHandle) {
+        KSPROPERTY property = {};
+        property.Set = kDriverPropertySet;
+        property.Id = propertyId;
+        property.Flags = KSPROPERTY_TYPE_SETSUPPORT;
+
+        DWORD flags = 0;
+        ULONG returned = 0;
+        if (SUCCEEDED(KsSynchronousDeviceControl(
+                m_driverHandle.get(),
+                kIoctlKsProperty,
+                &property,
+                static_cast<ULONG>(sizeof(property)),
+                &flags,
+                static_cast<ULONG>(sizeof(flags)),
+                &returned)) &&
+            returned >= sizeof(flags)) {
+            combinedFlags |= flags;
+            supportKnown = true;
+        }
     }
 
-    DWORD flags = 0;
-    if (FAILED(m_propertySet->QuerySupported(kDriverPropertySet, propertyId, &flags))) {
-        return false;
+    if (m_ksControl) {
+        KSPROPERTY property = {};
+        property.Set = kDriverPropertySet;
+        property.Id = propertyId;
+        property.Flags = KSPROPERTY_TYPE_SETSUPPORT;
+
+        DWORD flags = 0;
+        ULONG returned = 0;
+        if (SUCCEEDED(m_ksControl->KsProperty(
+                &property,
+                static_cast<ULONG>(sizeof(property)),
+                &flags,
+                static_cast<ULONG>(sizeof(flags)),
+                &returned)) &&
+            returned >= sizeof(flags)) {
+            combinedFlags |= flags;
+            supportKnown = true;
+        }
     }
+
+    if (m_propertySet) {
+        DWORD flags = 0;
+        if (SUCCEEDED(m_propertySet->QuerySupported(kDriverPropertySet, propertyId, &flags))) {
+            combinedFlags |= flags;
+            supportKnown = true;
+        }
+    }
+
     if (supportFlags) {
-        *supportFlags = flags;
+        *supportFlags = combinedFlags;
     }
-    return (flags & KSPROPERTY_SUPPORT_SET) == KSPROPERTY_SUPPORT_SET;
+    return supportKnown;
 }
 
 HRESULT DriverBridge::Connect()
 {
-    DWORD supportFlags = 0;
-    if (!IsPropertySetSupported(kDriverPropertyIdConnect, &supportFlags)) {
-        VirtuaCamLog::LogLine(std::format(
-            L"DriverBridge::Connect unsupported by driver (property {} support=0x{:08X}); continuing",
-            kDriverPropertyIdConnect,
-            supportFlags));
-        return S_FALSE;
-    }
-
+    RETURN_IF_FAILED(EnsurePropertySetReady());
     HRESULT hr = SetDriverProperty(kDriverPropertyIdConnect, nullptr, 0);
     if (FAILED(hr)) {
+        DWORD supportFlags = 0;
+        const bool supportKnown = IsPropertySetSupported(kDriverPropertyIdConnect, &supportFlags);
+        VirtuaCamLog::LogLine(std::format(
+            L"DriverBridge::Connect property {} failed hr=0x{:08X} supportKnown={} supportFlags=0x{:08X}",
+            kDriverPropertyIdConnect,
+            static_cast<unsigned>(hr),
+            supportKnown ? 1 : 0,
+            supportFlags));
         SetLastError(std::format(L"Driver connect failed: 0x{:08X}", static_cast<unsigned>(hr)));
     }
     return hr;
 }
 
-HRESULT DriverBridge::Disconnect()
+HRESULT DriverBridge::RegisterClientRequestEvent(HANDLE eventHandle)
 {
+    RETURN_IF_FAILED(EnsurePropertySetReady());
+
     DWORD supportFlags = 0;
-    if (!IsPropertySetSupported(kDriverPropertyIdDisconnect, &supportFlags)) {
+    const bool supportKnown = IsPropertySetSupported(kDriverPropertyIdRegisterEvent, &supportFlags);
+    HRESULT hr = SetDriverProperty(kDriverPropertyIdRegisterEvent, &eventHandle, sizeof(eventHandle), nullptr);
+    if (FAILED(hr)) {
         VirtuaCamLog::LogLine(std::format(
-            L"DriverBridge::Disconnect unsupported by driver (property {} support=0x{:08X}); continuing",
-            kDriverPropertyIdDisconnect,
-            supportFlags));
-        return S_FALSE;
+            L"DriverBridge::RegisterClientRequestEvent property {} failed hr=0x{:08X} supportKnown={} supportFlags=0x{:08X} handle=0x{:X}",
+            kDriverPropertyIdRegisterEvent,
+            static_cast<unsigned>(hr),
+            supportKnown ? 1 : 0,
+            supportFlags,
+            static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(eventHandle))));
+        return hr;
     }
 
+    VirtuaCamLog::LogLine(std::format(
+        L"DriverBridge::RegisterClientRequestEvent succeeded handle=0x{:X}",
+        static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(eventHandle))));
+    return hr;
+}
+
+HRESULT DriverBridge::Disconnect()
+{
+    RETURN_IF_FAILED(EnsurePropertySetReady());
     HRESULT hr = SetDriverProperty(kDriverPropertyIdDisconnect, nullptr, 0);
     if (FAILED(hr)) {
+        DWORD supportFlags = 0;
+        const bool supportKnown = IsPropertySetSupported(kDriverPropertyIdDisconnect, &supportFlags);
+        VirtuaCamLog::LogLine(std::format(
+            L"DriverBridge::Disconnect property {} failed hr=0x{:08X} supportKnown={} supportFlags=0x{:08X}",
+            kDriverPropertyIdDisconnect,
+            static_cast<unsigned>(hr),
+            supportKnown ? 1 : 0,
+            supportFlags));
         SetLastError(std::format(L"Driver disconnect failed: 0x{:08X}", static_cast<unsigned>(hr)));
     }
     return hr;
