@@ -59,6 +59,8 @@ ipch/
 *.env
 ~$*
 *~
+*.bat
+
 
 output/
 wiki/
