@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$VmName = "driver-test",
+    [string]$CheckpointName = "clean",
     [string]$GuestUser = "Administrator",
     [string]$GuestPasswordPlaintext = "",
     [string]$DriverPackageRoot = "output",
@@ -8,6 +9,7 @@ param(
     [ValidateSet("Chrome", "Edge")][string]$Browser = "Chrome",
     [string[]]$BrowserExtraArgs = @(),
     [switch]$EnableVerifier,
+    [bool]$RevertAfterRun = $true,
     [string]$LogPath = ""
 )
 
@@ -242,6 +244,169 @@ function Invoke-CollectArtifacts {
         -LogPath (Join-Path $ArtifactDirectory "hyperv-collect.log") | Out-Null
 }
 
+function Restore-ProofCheckpoint {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][string]$CheckpointName,
+        [Parameter(Mandatory = $true)][string]$LogFile
+    )
+
+    Write-HvLog -Message ("Restoring checkpoint '{0}'." -f $CheckpointName) -LogPath $LogFile -Level STEP
+    $checkpoint = Get-VMSnapshot -VMName $VmName -Name $CheckpointName -ErrorAction SilentlyContinue
+    if (-not $checkpoint) {
+        Fail-Hv -Message ("Checkpoint '{0}' was not found. Create or refresh the clean bench first." -f $CheckpointName) -LogPath $LogFile
+    }
+
+    try {
+        $vmState = (Get-VM -Name $VmName -ErrorAction Stop).State
+        if ($vmState -ne "Off") {
+            Stop-VM -Name $VmName -TurnOff -Force -Confirm:$false | Out-Null
+        }
+    }
+    catch {
+        Write-HvLog -Message ("Pre-restore VM stop skipped: {0}" -f $_.Exception.Message) -LogPath $LogFile -Level WARN
+    }
+
+    Restore-VMSnapshot -VMName $VmName -Name $CheckpointName -Confirm:$false | Out-Null
+}
+
+function Get-GuestDriverResidue {
+    param(
+        [Parameter(Mandatory = $true)][System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)][string]$LogFile
+    )
+
+    return Invoke-HvGuestCommand -Session $Session -LogPath $LogFile -ScriptBlock {
+        $driverEnum = pnputil /enum-drivers 2>&1 | Out-String
+        $deviceEnum = pnputil /enum-devices /instanceid ROOT\AVSHWS\0000 2>&1 | Out-String
+
+        [pscustomobject]@{
+            DriverStoreHit = [bool](
+                $driverEnum -match '(?im)^\s*Original Name:\s*avshws\.inf\s*$' -or
+                $driverEnum -match '(?im)^\s*Provider Name:\s*VirtualCameraDriver\s*$'
+            )
+            DeviceHit = [bool]($deviceEnum -notmatch '(?i)no devices were found')
+            DriverEnum = $driverEnum
+            DeviceEnum = $deviceEnum
+            CheckedAtUtc = [DateTime]::UtcNow.ToString("o")
+        }
+    }
+}
+
+function Test-InstallNeedsReboot {
+    param([string]$Output)
+
+    return [bool]($Output -match '(?i)reboot is needed|reboot is required|pending system reboot|pending system reboot to complete a previous operation|a reboot is required to finalize installation')
+}
+
+function Test-InstallCreatedFreshDevice {
+    param([string]$Output)
+
+    return [bool]($Output -match '(?i)No ROOT\\\\AVSHWS device present\.\s+Creating it now')
+}
+
+function Get-GuestConsoleState {
+    param(
+        [Parameter(Mandatory = $true)][System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)][string]$LogFile
+    )
+
+    return Invoke-HvGuestCommand -Session $Session -LogPath $LogFile -ScriptBlock {
+        $quserText = (cmd.exe /c quser 2>&1 | Out-String)
+        $consoleLine = ($quserText -split "`r?`n" | Where-Object { $_ -match '\bconsole\b' } | Select-Object -First 1)
+        $consoleUser = ""
+        if ($consoleLine) {
+            $parts = ($consoleLine -replace '^>', '').Trim() -split '\s+'
+            if ($parts.Count -gt 0) {
+                $consoleUser = $parts[0]
+            }
+        }
+
+        [pscustomobject]@{
+            HasConsoleSession = [bool]$consoleLine
+            ConsoleUser = $consoleUser
+            Quser = $quserText
+            ExplorerCount = @(Get-Process explorer -ErrorAction SilentlyContinue).Count
+            CheckedAtUtc = [DateTime]::UtcNow.ToString("o")
+        }
+    }
+}
+
+function Test-GuestConsoleReady {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [string]$ExpectedUser = ""
+    )
+
+    if ($null -eq $State) {
+        return $false
+    }
+    if (-not $State.HasConsoleSession) {
+        return $false
+    }
+    if ([int]$State.ExplorerCount -lt 1) {
+        return $false
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedUser) -and
+        -not [string]::IsNullOrWhiteSpace([string]$State.ConsoleUser) -and
+        ([string]$State.ConsoleUser) -ine $ExpectedUser) {
+        return $false
+    }
+
+    return $true
+}
+
+function Wait-ForGuestInteractiveDesktop {
+    param(
+        [Parameter(Mandatory = $true)][System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)][string]$LogFile,
+        [string]$ExpectedUser = "",
+        [int]$TimeoutSeconds = 60,
+        [int]$PollSeconds = 5
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastState = $null
+    do {
+        $lastState = Get-GuestConsoleState -Session $Session -LogFile $LogFile
+        if (Test-GuestConsoleReady -State $lastState -ExpectedUser $ExpectedUser) {
+            return $lastState
+        }
+
+        Write-HvLog -Message ("Waiting for guest interactive desktop. console={0}; user={1}; explorer={2}" -f $lastState.HasConsoleSession, $lastState.ConsoleUser, $lastState.ExplorerCount) -LogPath $LogFile
+        Start-Sleep -Seconds $PollSeconds
+    } while ((Get-Date) -lt $deadline)
+
+    return $lastState
+}
+
+function Enable-GuestAutoLogon {
+    param(
+        [Parameter(Mandatory = $true)][System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)][string]$LogFile,
+        [Parameter(Mandatory = $true)][string]$GuestUser,
+        [Parameter(Mandatory = $true)][string]$GuestPasswordPlaintext
+    )
+
+    return Invoke-HvGuestCommand -Session $Session -LogPath $LogFile -ScriptBlock {
+        param($UserName, $PasswordText)
+
+        $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+        Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value "1"
+        Set-ItemProperty -Path $winlogon -Name ForceAutoLogon -Value "1"
+        Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value $UserName
+        Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $PasswordText
+        Set-ItemProperty -Path $winlogon -Name DefaultDomainName -Value $env:COMPUTERNAME
+
+        [pscustomobject]@{
+            AutoAdminLogon = (Get-ItemProperty -Path $winlogon).AutoAdminLogon
+            DefaultUserName = (Get-ItemProperty -Path $winlogon).DefaultUserName
+            DefaultDomainName = (Get-ItemProperty -Path $winlogon).DefaultDomainName
+            CheckedAtUtc = [DateTime]::UtcNow.ToString("o")
+        }
+    } -ArgumentList $GuestUser, $GuestPasswordPlaintext
+}
+
 function Get-FailureInfo {
     param(
         [string]$ProofResultPath,
@@ -310,6 +475,8 @@ $holdLogPath = Join-Path $artifactDir "vm-session-host.log"
 $playwrightLogPath = Join-Path $artifactDir "playwright-vm-webcam-proof.log"
 $attemptStatePath = Join-Path $artifactDir "attempt-state.json"
 $proofResultPath = Join-Path $artifactDir "vm-webcam-proof.json"
+$preinstallCleanPath = Join-Path $artifactDir "guest-preinstall-clean.json"
+$consoleStatePath = Join-Path $artifactDir "guest-console-state.json"
 $priorAttemptState = Read-JsonFile -Path $attemptStatePath
 $nextAttemptId = if ($priorAttemptState) { [int]$priorAttemptState.attempt + 1 } else { 1 }
 
@@ -325,12 +492,15 @@ $guestInstallDriver = Join-Path $guestScriptsRoot "install-driver.ps1"
 $guestWebcamHtml = Join-Path $guestRoot "webcam.html"
 $session = $null
 $holdProc = $null
-$attemptChange = "browser=$Browser; verifier=$([bool]$EnableVerifier); args=hold-defaults --force-directshow $($BrowserExtraArgs -join ' ')"
+$runSucceeded = $false
+$attemptChange = "browser=$Browser; verifier=$([bool]$EnableVerifier); source=Notepad; checkpoint=$CheckpointName; args=hold-defaults --force-directshow $($BrowserExtraArgs -join ' ')"
 $guestCred = Get-HvGuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
 
 Write-HvLog -Message ("Hyper-V proof harness start for '{0}'" -f $VmName) -LogPath $LogPath -Level STEP
 Write-HvLog -Message ("ArtifactDir: {0}" -f $artifactDir) -LogPath $LogPath
 Write-HvLog -Message ("DriverPackageRoot: {0}" -f $driverPackageRootPath) -LogPath $LogPath
+Write-HvLog -Message ("CheckpointName: {0}" -f $CheckpointName) -LogPath $LogPath
+Write-HvLog -Message ("RevertAfterRun: {0}" -f $RevertAfterRun) -LogPath $LogPath
 Remove-Item -LiteralPath $sessionStatusPath, $stopSignalPath, $proofResultPath -Force -ErrorAction SilentlyContinue
 
 if (-not (Test-Path -LiteralPath $driverPackageRootPath)) {
@@ -344,13 +514,43 @@ if (-not (Test-Path -LiteralPath $webcamHtml)) {
 }
 
 try {
-    $vm = Get-VM -Name $VmName -ErrorAction Stop
-    if ($vm.State -ne "Running") {
-        throw "VM '$VmName' is not Running. Current state: $($vm.State)"
-    }
+    Restore-ProofCheckpoint -VmName $VmName -CheckpointName $CheckpointName -LogFile $LogPath
 
     Write-HvLog -Message "Guest preflight checks." -LogPath $LogPath -Level STEP
     $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -LogPath $LogPath
+    $cleanState = Get-GuestDriverResidue -Session $session -LogFile $LogPath
+    Write-JsonFile -Path $preinstallCleanPath -Data $cleanState
+    if ($cleanState.DriverStoreHit -or $cleanState.DeviceHit) {
+        throw "driver.CleanCheckpointDirty"
+    }
+
+    $consoleStateRecord = [ordered]@{
+        Initial = $null
+        AutoLogonConfigured = $false
+        AutoLogon = $null
+        Final = $null
+    }
+    $consoleStateRecord.Initial = Wait-ForGuestInteractiveDesktop -Session $session -LogFile $LogPath -ExpectedUser $GuestUser -TimeoutSeconds 30 -PollSeconds 5
+    $consoleStateRecord.Final = $consoleStateRecord.Initial
+
+    if (-not (Test-GuestConsoleReady -State $consoleStateRecord.Initial -ExpectedUser $GuestUser)) {
+        if ([string]::IsNullOrWhiteSpace($GuestPasswordPlaintext)) {
+            throw "guest.NoInteractiveDesktop"
+        }
+
+        Write-HvLog -Message ("Guest has no ready desktop after clean restore. Enabling autologon for {0}." -f $GuestUser) -LogPath $LogPath -Level STEP
+        $consoleStateRecord.AutoLogonConfigured = $true
+        $consoleStateRecord.AutoLogon = Enable-GuestAutoLogon -Session $session -LogFile $LogPath -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
+        Restart-HvGuest -Session $session -LogPath $LogPath
+        $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -LogPath $LogPath
+        $consoleStateRecord.Final = Wait-ForGuestInteractiveDesktop -Session $session -LogFile $LogPath -ExpectedUser $GuestUser -TimeoutSeconds 120 -PollSeconds 5
+    }
+
+    Write-JsonFile -Path $consoleStatePath -Data ([pscustomobject]$consoleStateRecord)
+    if (-not (Test-GuestConsoleReady -State $consoleStateRecord.Final -ExpectedUser $GuestUser)) {
+        throw "guest.NoInteractiveDesktop"
+    }
+
     $baseline = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
         param($BrowserName)
 
@@ -442,6 +642,31 @@ try {
     if ($installResult.ExitCode -ne 0) {
         throw "driver.InstallFailed"
     }
+    if ($installResult.Output -match '(?i)already exists in the system|ROOT\\\\AVSHWS already exists') {
+        throw "driver.InstallDirtyState"
+    }
+
+    $installNeedsReboot = Test-InstallNeedsReboot -Output $installResult.Output
+    $installCreatedFreshDevice = Test-InstallCreatedFreshDevice -Output $installResult.Output
+    if ($installNeedsReboot -or $installCreatedFreshDevice) {
+        $rebootReason = if ($installNeedsReboot -and $installCreatedFreshDevice) {
+            "Driver install requested reboot and created fresh ROOT\\AVSHWS device"
+        }
+        elseif ($installNeedsReboot) {
+            "Driver install requested reboot"
+        }
+        else {
+            "Driver install created fresh ROOT\\AVSHWS device"
+        }
+
+        Write-HvLog -Message ("{0}; restarting guest before proof." -f $rebootReason) -LogPath $LogPath -Level STEP
+        Restart-HvGuest -Session $session -LogPath $LogPath
+        $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -LogPath $LogPath
+        $postInstallConsoleState = Wait-ForGuestInteractiveDesktop -Session $session -LogFile $LogPath -ExpectedUser $GuestUser -TimeoutSeconds 120 -PollSeconds 5
+        if (-not (Test-GuestConsoleReady -State $postInstallConsoleState -ExpectedUser $GuestUser)) {
+            throw "guest.NoInteractiveDesktop"
+        }
+    }
 
     if ($EnableVerifier) {
         Write-HvLog -Message "Enabling Driver Verifier for avshws.sys." -LogPath $LogPath -Level STEP
@@ -451,7 +676,6 @@ try {
         }
         Set-Content -LiteralPath (Join-Path $artifactDir "verifier-enable.txt") -Value $verifierOutput
         Restart-HvGuest -Session $session -LogPath $LogPath
-        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -LogPath $LogPath
     }
 
@@ -467,6 +691,7 @@ try {
         "-GuestPackageRoot", $guestPackageRoot,
         "-GuestWebcamHtml", $guestWebcamHtml,
         "-Browser", $Browser,
+        "-SourceWindowMode", "Notepad",
         "-AttemptId", "$nextAttemptId",
         "-ServeHttp",
         "-HttpPort", "8000",
@@ -507,19 +732,32 @@ try {
         Set-Content -LiteralPath (Join-Path $artifactDir "browser-commandline.txt") -Value $status.BrowserCommandLine
         Write-HvLog -Message ("Guest browser command line: {0}" -f $status.BrowserCommandLine) -LogPath $LogPath
     }
+    if ($status.SourceWindowTitle) {
+        Write-HvLog -Message ("Proof source window: mode={0} title={1}" -f $status.SourceWindowMode, $status.SourceWindowTitle) -LogPath $LogPath
+    }
 
     Write-HvLog -Message "Running Playwright proof capture." -LogPath $LogPath -Level STEP
     $proof = & $proofScript -StatusPath $sessionStatusPath -ArtifactRoot $artifactDir -LogPath $playwrightLogPath
 
     $attemptState = Update-AttemptState -StatePath $attemptStatePath -Success:$true -LastChange $attemptChange
+    $runSucceeded = $true
     Write-HvLog -Message ("Proof success. Screenshot: {0}" -f (Join-Path $artifactDir "vm-webcam-proof.png")) -LogPath $LogPath -Level STEP
     $proof
 }
 catch {
     $fallbackMessage = $_.Exception.Message
     $failureInfo = switch ($fallbackMessage) {
+        "driver.CleanCheckpointDirty" {
+            [pscustomobject]@{ ErrorClass = "driver.CleanCheckpointDirty"; ErrorSignature = "driver.CleanCheckpointDirty"; Message = "Restored checkpoint is not clean. avshws is still present before install." }
+        }
         "driver.InstallFailed" {
             [pscustomobject]@{ ErrorClass = "driver.InstallFailed"; ErrorSignature = "driver.InstallFailed"; Message = "Guest driver install failed." }
+        }
+        "driver.InstallDirtyState" {
+            [pscustomobject]@{ ErrorClass = "driver.InstallDirtyState"; ErrorSignature = "driver.InstallDirtyState"; Message = "Guest driver install reused existing avshws state after clean restore." }
+        }
+        "guest.NoInteractiveDesktop" {
+            [pscustomobject]@{ ErrorClass = "guest.NoInteractiveDesktop"; ErrorSignature = "guest.NoInteractiveDesktop"; Message = "Guest never reached interactive desktop for real-window proof." }
         }
         default {
             Get-FailureInfo -ProofResultPath $proofResultPath -StatusPath $sessionStatusPath -VmName $VmName -FallbackMessage $fallbackMessage
@@ -559,5 +797,18 @@ finally {
 
     if ($session) {
         Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+    }
+
+    if ($RevertAfterRun) {
+        try {
+            Restore-ProofCheckpoint -VmName $VmName -CheckpointName $CheckpointName -LogFile $LogPath
+        }
+        catch {
+            if ($runSucceeded) {
+                throw
+            }
+
+            Write-HvLog -Message ("Post-run checkpoint restore failed: {0}" -f $_.Exception.Message) -LogPath $LogPath -Level WARN
+        }
     }
 }
