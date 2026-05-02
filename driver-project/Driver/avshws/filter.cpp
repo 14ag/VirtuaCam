@@ -21,63 +21,6 @@
 
 #include "avshws.h"
 
-namespace
-{
-    NTSTATUS ProbePropertyReadBuffer(
-        _In_ PIRP Irp,
-        _In_reads_bytes_(Length) const void* Buffer,
-        _In_ SIZE_T Length)
-    {
-        if (Length == 0) {
-            return STATUS_SUCCESS;
-        }
-
-        if (!Buffer) {
-            return STATUS_INVALID_PARAMETER;
-        }
-
-        if (Irp->RequestorMode == KernelMode) {
-            return STATUS_SUCCESS;
-        }
-
-        __try {
-            ProbeForRead(const_cast<PVOID>(Buffer), Length, sizeof(UCHAR));
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-            return GetExceptionCode();
-        }
-
-        return STATUS_SUCCESS;
-    }
-
-    NTSTATUS ProbePropertyWriteBuffer(
-        _In_ PIRP Irp,
-        _Out_writes_bytes_(Length) void* Buffer,
-        _In_ SIZE_T Length)
-    {
-        if (Length == 0) {
-            return STATUS_SUCCESS;
-        }
-
-        if (!Buffer) {
-            return STATUS_INVALID_PARAMETER;
-        }
-
-        if (Irp->RequestorMode == KernelMode) {
-            return STATUS_SUCCESS;
-        }
-
-        __try {
-            ProbeForWrite(Buffer, Length, sizeof(UCHAR));
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-            return GetExceptionCode();
-        }
-
-        return STATUS_SUCCESS;
-    }
-}
-
 /**************************************************************************
 
     PAGEABLE CODE
@@ -173,11 +116,6 @@ GetData(
 		return STATUS_BUFFER_TOO_SMALL;
 	}
 
-    NTSTATUS probeStatus = ProbePropertyWriteBuffer(Irp, Data, sizeof(DWORD));
-    if (!NT_SUCCESS(probeStatus)) {
-        return probeStatus;
-    }
-
     DWORD value = 0xAA77AA77;
     __try {
         RtlCopyMemory(Data, &value, sizeof(value));
@@ -214,11 +152,6 @@ SetData(
 	ULONG dataLength = VIRTUACAM_FRAME_BUFFER_SIZE;
     if (bufferLength < dataLength) {
         return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    NTSTATUS probeStatus = ProbePropertyReadBuffer(Irp, Data, dataLength);
-    if (!NT_SUCCESS(probeStatus)) {
-        return probeStatus;
     }
 
 	CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
@@ -314,11 +247,6 @@ GetStatus(
     ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
     if (!Data || bufferLength < sizeof(VIRTUACAM_DRIVER_STATUS)) {
         return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    NTSTATUS probeStatus = ProbePropertyWriteBuffer(Irp, Data, sizeof(VIRTUACAM_DRIVER_STATUS));
-    if (!NT_SUCCESS(probeStatus)) {
-        return probeStatus;
     }
 
     CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);

@@ -44,6 +44,7 @@ private:
     //
     CHardwareSimulation *m_HardwareSimulation;
     CImageSynthesizer *m_ImageSynth;
+    KS_VIDEOINFOHEADER m_VideoInfoHeaderStorage;
 
     //
     // The number of ISR's that have occurred since capture started.
@@ -116,6 +117,20 @@ private:
     //
     void
     PnpStop (
+        );
+
+    void
+    PnpRemove (
+        );
+
+    void
+    PnpSurpriseRemoval (
+        );
+
+    void
+    QuiesceHardware (
+        IN BOOLEAN ReleaseAdapter,
+        IN PCSTR Reason
         );
 
 public:
@@ -194,6 +209,34 @@ public:
         return
             (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
             PnpStop (
+                );
+    }
+
+    static
+    void
+    DispatchPnpRemove (
+        IN PKSDEVICE Device,
+        IN PIRP Irp
+        )
+    {
+        UNREFERENCED_PARAMETER(Irp);
+        return
+            (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
+            PnpRemove (
+                );
+    }
+
+    static
+    void
+    DispatchPnpSurpriseRemoval (
+        IN PKSDEVICE Device,
+        IN PIRP Irp
+        )
+    {
+        UNREFERENCED_PARAMETER(Irp);
+        return
+            (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
+            PnpSurpriseRemoval (
                 );
     }
 

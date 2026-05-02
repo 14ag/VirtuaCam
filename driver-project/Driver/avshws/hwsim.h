@@ -78,6 +78,7 @@ private:
 	// A temporary frame buffer;
 	//
 	PUCHAR m_TemporaryBuffer;
+    PUCHAR m_StagingBuffer;
 	PUCHAR m_DefaultFrameBuffer;
 
     //
