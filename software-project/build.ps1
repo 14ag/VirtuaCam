@@ -99,6 +99,7 @@ Write-Host " DirectPort Build Script (v10 - Incremental)"
 Write-Host "============================================================"
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
+. (Join-Path $scriptDir "..\tools\artifact-manifest.ps1")
 $BuildDir = Join-Path $scriptDir "build"
 $SourceDir = Join-Path $scriptDir "src"
 
@@ -222,18 +223,8 @@ if (Test-Path -LiteralPath $legacySoftwareDir) {
     Write-Info "Removed legacy output dir: $legacySoftwareDir"
 }
 
-$allowed = @(
-    "VirtuaCam.exe",
-    "VirtuaCamProcess.exe",
-    "DirectPortBroker.dll",
-    "DirectPortClient.dll",
-    "DirectPortConsumer.dll"
-)
-$vcRuntimeArtifacts = @(
-    "msvcp140.dll",
-    "vcruntime140.dll",
-    "vcruntime140_1.dll"
-)
+$allowed = Get-VirtuaCamSoftwareArtifacts
+$vcRuntimeArtifacts = Get-VirtuaCamRuntimeArtifacts
 
 # Clean out legacy producer DLLs if they were staged by older builds.
 foreach ($legacy in @("DirectPortMFCamera.dll", "DirectPortMFGraphicsCapture.dll")) {

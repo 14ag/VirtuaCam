@@ -26,42 +26,62 @@ Requirements:
 4. CMake 3.20 or newer
 5. Git
 
-Build:
+Canonical root workflow:
+
+1. Build both components into one staged package:
 
 ```powershell
 .\build-all.ps1
 ```
 
-Install from elevated PowerShell:
+2. Install from elevated PowerShell:
 
 ```powershell
 .\install-all.ps1
 ```
 
-If installer reports `TESTSIGNING is OFF`, enable it and reboot:
+3. If installer reports `TESTSIGNING is OFF`, enable it and reboot:
 
 ```powershell
 bcdedit /set testsigning on
 ```
 
-Run:
-
-1. Start `output\VirtuaCam.exe`
-2. Pick a source from tray menu
-3. Select the virtual camera in your target app
-
-## Hyper-V driver test loop
-
-Use Hyper-V guest `driver-test` for crash repro, verifier, dump collection, and kernel debugger attach:
+4. Launch and use:
 
 ```powershell
-.\scripts\hyperv-driver-loop.ps1 -GuestUser Administrator
+.\output\VirtuaCam.exe
+```
+
+Then pick a source from tray menu and select the virtual camera in target app.
+
+Component-only builds also stage into `output/` by default:
+
+```powershell
+.\software-project\build.ps1
+.\driver-project\build-driver.ps1
+```
+
+`install-all.ps1` expects the full staged bundle in one output root. If you use component-only builds, build both components into the same `output/` before installing, or pass a shared `-OutputRoot`.
+
+Staged artifact names are centralized in `tools/artifact-manifest.ps1`, which is shared by root build, component build, and install scripts.
+
+## Validation
+
+Use Hyper-V guest `driver-test` for crash repro, verifier, dump collection, and browser proof:
+
+```powershell
+.\scripts\hyperv-proof-chrome.ps1 -GuestPasswordPlaintext <password>
 ```
 
 Helper entry points:
 
+- `.\scripts\hyperv-driver-loop.ps1`
 - `.\scripts\hyperv-kd.ps1`
 - `.\scripts\hyperv-collect.ps1`
+
+HLK client helper:
+
+- `.\scripts\hyperv-hlk-client.ps1`
 
 ## Runtime shape
 
@@ -107,8 +127,18 @@ If published on GitHub, wiki URL is:
 - [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Security Policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
-- [Repository Metadata Draft](REPOSITORY_METADATA.md)
-- [Repository Writing Checklist](REPOSITORY_WRITING_CHECKLIST.md)
+
+## Cleanup
+
+Generated build and proof artifacts collect under `output/`.
+
+For a full reset:
+
+```powershell
+.\clean-output.ps1
+```
+
+Root build and install scripts recreate the required package layout on the next run.
 
 ## License
 

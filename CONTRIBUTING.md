@@ -66,6 +66,10 @@ Installer command:
 .\install-all.ps1
 ```
 
+Use the root scripts for normal end-to-end work. Component-only build scripts are useful during focused development, but `install-all.ps1` expects one complete staged package in `output/` or another shared `-OutputRoot`.
+
+If you add, remove, or rename staged binaries, update `tools/artifact-manifest.ps1` so build and install stay aligned.
+
 ## Development expectations
 
 - keep changes grounded in current repo architecture
@@ -85,6 +89,12 @@ No automated test suite is checked in today. For changes that affect behavior, m
 5. verify target app can open camera
 
 Good issue or PR notes include what you tested and what you did not test.
+
+For build, install, or driver/runtime integration changes, include whether you ran:
+
+```powershell
+.\scripts\hyperv-proof-chrome.ps1 -GuestPasswordPlaintext <password>
+```
 
 ## Pull requests
 
