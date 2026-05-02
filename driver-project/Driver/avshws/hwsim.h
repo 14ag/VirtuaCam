@@ -299,6 +299,12 @@ public:
         IN ULONG MappingStride
         );
 
+    NTSTATUS
+    CopyImageToStreamHeader (
+        IN PKSSTREAM_HEADER StreamHeader,
+        OUT PULONG BytesWritten
+        );
+
     //
     // Initialize():
     //

@@ -423,7 +423,8 @@ CaptureFilterPinDescriptors [CAPTURE_FILTER_PIN_COUNT] = {
             &g_PINNAME_VIDEO_CAPTURE,       // Name
             0                               // Reserved
         },
-        KSPIN_FLAG_PROCESS_IN_RUN_STATE_ONLY,// Pin Flags
+        KSPIN_FLAG_PROCESS_IN_RUN_STATE_ONLY |
+            KSPIN_FLAG_DO_NOT_INITIATE_PROCESSING,// Pin Flags
         1,                                  // Instances Possible
         1,                                  // Instances Necessary
         &CapturePinAllocatorFraming,        // Allocator Framing

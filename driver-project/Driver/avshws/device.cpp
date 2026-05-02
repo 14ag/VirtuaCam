@@ -103,7 +103,7 @@ operator delete[](
 {
     if (pVoid)
     {
-        ExFreePoolWithTag(pVoid, 0);
+        ExFreePool(pVoid);
     }
 }
 
@@ -134,7 +134,7 @@ void __cdecl operator delete
 {
     if (pVoid)
     {
-        ExFreePoolWithTag(pVoid, 0);
+        ExFreePool(pVoid);
     }
 }
 
@@ -165,7 +165,7 @@ void __cdecl operator delete[]
 {
     if (pVoid)
     {
-        ExFreePoolWithTag(pVoid, 0);
+        ExFreePool(pVoid);
     }
 }
 
@@ -175,7 +175,7 @@ void __cdecl operator delete
     )
 {
     if (pVoid) {
-        ExFreePoolWithTag(pVoid, 0);
+        ExFreePool(pVoid);
     }
 }
 
@@ -411,6 +411,40 @@ Return Value:
     QuiesceHardware(FALSE, "PnpStop");
 }
 
+NTSTATUS
+CCaptureDevice::
+PnpQueryStop (
+    )
+{
+    DbgPrint("[avshws] PnpQueryStop device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
+    return STATUS_SUCCESS;
+}
+
+void
+CCaptureDevice::
+PnpCancelStop (
+    )
+{
+    DbgPrint("[avshws] PnpCancelStop device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
+}
+
+NTSTATUS
+CCaptureDevice::
+PnpQueryRemove (
+    )
+{
+    DbgPrint("[avshws] PnpQueryRemove device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
+    return STATUS_SUCCESS;
+}
+
+void
+CCaptureDevice::
+PnpCancelRemove (
+    )
+{
+    DbgPrint("[avshws] PnpCancelRemove device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
+}
+
 void
 CCaptureDevice::
 PnpRemove (
@@ -425,6 +459,47 @@ PnpSurpriseRemoval (
     )
 {
     QuiesceHardware(TRUE, "PnpSurpriseRemoval");
+}
+
+NTSTATUS
+CCaptureDevice::
+QueryPower (
+    IN DEVICE_POWER_STATE DeviceTo,
+    IN DEVICE_POWER_STATE DeviceFrom,
+    IN SYSTEM_POWER_STATE SystemTo,
+    IN SYSTEM_POWER_STATE SystemFrom,
+    IN POWER_ACTION Action
+    )
+{
+    DbgPrint(
+        "[avshws] QueryPower device=%p from=%lu to=%lu systemFrom=%lu systemTo=%lu action=%lu irql=%lu\n",
+        this,
+        (ULONG)DeviceFrom,
+        (ULONG)DeviceTo,
+        (ULONG)SystemFrom,
+        (ULONG)SystemTo,
+        (ULONG)Action,
+        (ULONG)KeGetCurrentIrql());
+    return STATUS_SUCCESS;
+}
+
+void
+CCaptureDevice::
+SetPower (
+    IN DEVICE_POWER_STATE To,
+    IN DEVICE_POWER_STATE From
+    )
+{
+    DbgPrint(
+        "[avshws] SetPower device=%p from=%lu to=%lu irql=%lu\n",
+        this,
+        (ULONG)From,
+        (ULONG)To,
+        (ULONG)KeGetCurrentIrql());
+
+    if (From == PowerDeviceD0 && To != PowerDeviceD0) {
+        QuiesceHardware(FALSE, "SetPowerDown");
+    }
 }
 
 #ifdef ALLOC_PRAGMA
@@ -822,6 +897,20 @@ Return Value:
 
 }
 
+NTSTATUS
+CCaptureDevice::
+CopyImageToStreamHeader (
+    IN PKSSTREAM_HEADER StreamHeader,
+    OUT PULONG BytesWritten
+    )
+{
+    if (!m_HardwareSimulation) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    return m_HardwareSimulation->CopyImageToStreamHeader(StreamHeader, BytesWritten);
+}
+
 /*************************************************************************
 
     LOCKED CODE
@@ -904,18 +993,7 @@ Return Value:
     // of hardware registers (ReadNumberOfMappingsCompleted) which would likely
     // be done in the ISR.
     //
-    ULONG NumMappingsCompleted = 
-        m_HardwareSimulation -> ReadNumberOfMappingsCompleted ();
-
-    //
-    // Inform the capture sink that a given number of scatter / gather
-    // mappings have completed.
-    //
-    m_CaptureSink -> CompleteMappings (
-        NumMappingsCompleted - m_LastMappingsCompleted
-        );
-
-    m_LastMappingsCompleted = NumMappingsCompleted;
+    m_CaptureSink -> CompleteMappings (1);
 
 }
 
@@ -946,16 +1024,16 @@ CaptureDeviceDispatch = {
     CCaptureDevice::DispatchCreate,         // Pnp Add Device
     CCaptureDevice::DispatchPnpStart,       // Pnp Start
     NULL,                                   // Post-Start
-    NULL,                                   // Pnp Query Stop
-    NULL,                                   // Pnp Cancel Stop
+    CCaptureDevice::DispatchPnpQueryStop,   // Pnp Query Stop
+    CCaptureDevice::DispatchPnpCancelStop,  // Pnp Cancel Stop
     CCaptureDevice::DispatchPnpStop,        // Pnp Stop
-    NULL,                                   // Pnp Query Remove
-    NULL,                                   // Pnp Cancel Remove
+    CCaptureDevice::DispatchPnpQueryRemove, // Pnp Query Remove
+    CCaptureDevice::DispatchPnpCancelRemove,// Pnp Cancel Remove
     CCaptureDevice::DispatchPnpRemove,      // Pnp Remove
     NULL,                                   // Pnp Query Capabilities
     CCaptureDevice::DispatchPnpSurpriseRemoval, // Pnp Surprise Removal
-    NULL,                                   // Power Query Power
-    NULL,                                   // Power Set Power
+    CCaptureDevice::DispatchQueryPower,     // Power Query Power
+    CCaptureDevice::DispatchSetPower,       // Power Set Power
     NULL                                    // Pnp Query Interface
 };
 

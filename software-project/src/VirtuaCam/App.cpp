@@ -81,7 +81,7 @@ HRESULT LoadBroker();
 void ShutdownSystem();
 void RequestDriverDisconnect();
 void OnIdle();
-void TrySendBrokerFrameToDriver(bool brokerFrameRendered);
+void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerState);
 void InformBroker();
 void LoadSettings();
 void SaveSettings();
@@ -362,15 +362,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 L"Make sure driver-project is installed.";
             VirtuaCamLog::ShowAndLogError(g_hMainWnd, message.c_str(), L"Error", hrDriver);
         }
-    } else {
-        HRESULT hrConnect = g_driverBridge->Connect();
-        if (FAILED(hrConnect)) {
-            VirtuaCamLog::LogHr(L"DriverBridge::Connect failed", hrConnect);
-        } else if (hrConnect == S_FALSE) {
-            VirtuaCamLog::LogLine(L"DriverBridge::Connect skipped (unsupported by current driver)");
-        } else {
-            VirtuaCamLog::LogLine(L"DriverBridge::Connect succeeded");
-        }
     }
 
     VirtuaCamLog::LogLine(L"Entering message loop.");
@@ -382,22 +373,45 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 }
 
 void OnIdle() {
+    BrokerState brokerState = BrokerState::Searching;
     const bool brokerFrameRendered = (g_pfnRenderBrokerFrame != nullptr);
     if (brokerFrameRendered) {
         g_pfnRenderBrokerFrame();
     }
 
-    if (g_pfnGetBrokerState) UpdateTelemetry(g_pfnGetBrokerState(), GetDriverBridgeStatus());
-    TrySendBrokerFrameToDriver(brokerFrameRendered);
+    if (g_pfnGetBrokerState) {
+        brokerState = g_pfnGetBrokerState();
+        UpdateTelemetry(brokerState, GetDriverBridgeStatus());
+    }
+    TrySendBrokerFrameToDriver(brokerFrameRendered, brokerState);
 }
 
-void TrySendBrokerFrameToDriver(bool brokerFrameRendered) {
+void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerState) {
     static bool s_loggedNullTexture = false;
     static bool s_loggedFirstTexture = false;
+    static bool s_loggedWaitingForBroker = false;
+    static bool s_uploadedWhileConnected = false;
 
     if (!brokerFrameRendered || !g_driverBridge || !g_driverBridge->IsActive() || !g_pfnGetSharedTexture) {
         return;
     }
+
+    if (brokerState != BrokerState::Connected) {
+        if (s_uploadedWhileConnected) {
+            const HRESULT hrDisconnect = g_driverBridge->Disconnect();
+            if (FAILED(hrDisconnect) && hrDisconnect != S_FALSE) {
+                VirtuaCamLog::LogHr(L"DriverBridge::Disconnect while broker not connected failed", hrDisconnect);
+            }
+            s_uploadedWhileConnected = false;
+        }
+        if (!s_loggedWaitingForBroker) {
+            VirtuaCamLog::LogLine(L"Delaying DriverBridge upload until broker reports Connected");
+            s_loggedWaitingForBroker = true;
+        }
+        return;
+    }
+
+    s_loggedWaitingForBroker = false;
 
     wil::com_ptr_nothrow<ID3D11Texture2D> sharedTexture;
     sharedTexture.attach(g_pfnGetSharedTexture());
@@ -419,9 +433,12 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered) {
     if (FAILED(hr)) {
         if (hr == HRESULT_FROM_WIN32(ERROR_RETRY)) {
             VirtuaCamLog::LogLine(L"DriverBridge::SendFrame requested retry after reinitialize");
+            s_uploadedWhileConnected = false;
         } else {
             VirtuaCamLog::LogHr(L"DriverBridge::SendFrame failed", hr);
         }
+    } else {
+        s_uploadedWhileConnected = true;
     }
 }
 

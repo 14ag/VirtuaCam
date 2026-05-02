@@ -37,6 +37,7 @@ private:
     void SetLastError(const std::wstring& message) { m_lastError = message; }
 
     bool m_active = false;
+    bool m_connected = false;
     std::wstring m_lastError;
     std::wstring m_selectedDevicePath;
     std::wstring m_selectedFriendlyName;

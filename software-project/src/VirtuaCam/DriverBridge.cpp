@@ -207,6 +207,7 @@ DriverBridge::~DriverBridge()
 HRESULT DriverBridge::Initialize()
 {
     m_lastError.clear();
+    m_connected = false;
     RETURN_IF_FAILED(EnsurePropertySetReady());
     m_active = true;
     VirtuaCamLog::LogLine(L"DriverBridge initialized");
@@ -215,7 +216,15 @@ HRESULT DriverBridge::Initialize()
 
 void DriverBridge::Shutdown()
 {
+    if (m_connected && (m_driverHandle || m_ksControl || m_propertySet)) {
+        const HRESULT hrDisconnect = Disconnect();
+        if (FAILED(hrDisconnect) && hrDisconnect != S_FALSE) {
+            VirtuaCamLog::LogHr(L"DriverBridge::Disconnect during shutdown failed", hrDisconnect);
+        }
+    }
+
     m_active = false;
+    m_connected = false;
     m_selectedDevicePath.clear();
     m_selectedFriendlyName.clear();
     m_driverHandle.reset();
@@ -727,6 +736,10 @@ bool DriverBridge::IsPropertySetSupported(ULONG propertyId, DWORD* supportFlags)
 
 HRESULT DriverBridge::Connect()
 {
+    if (m_connected) {
+        return S_OK;
+    }
+
     RETURN_IF_FAILED(EnsurePropertySetReady());
     HRESULT hr = SetDriverProperty(kDriverPropertyIdConnect, nullptr, 0);
     if (FAILED(hr)) {
@@ -739,6 +752,8 @@ HRESULT DriverBridge::Connect()
             supportKnown ? 1 : 0,
             supportFlags));
         SetLastError(std::format(L"Driver connect failed: 0x{:08X}", static_cast<unsigned>(hr)));
+    } else {
+        m_connected = true;
     }
     return hr;
 }
@@ -769,6 +784,10 @@ HRESULT DriverBridge::RegisterClientRequestEvent(HANDLE eventHandle)
 
 HRESULT DriverBridge::Disconnect()
 {
+    if (!m_connected) {
+        return S_FALSE;
+    }
+
     RETURN_IF_FAILED(EnsurePropertySetReady());
     HRESULT hr = SetDriverProperty(kDriverPropertyIdDisconnect, nullptr, 0);
     if (FAILED(hr)) {
@@ -781,6 +800,8 @@ HRESULT DriverBridge::Disconnect()
             supportKnown ? 1 : 0,
             supportFlags));
         SetLastError(std::format(L"Driver disconnect failed: 0x{:08X}", static_cast<unsigned>(hr)));
+    } else {
+        m_connected = false;
     }
     return hr;
 }
@@ -790,6 +811,13 @@ HRESULT DriverBridge::ReinitializeAfterFailure(HRESULT failureHr)
     VirtuaCamLog::LogLine(std::format(
         L"DriverBridge recoverable send failure HRESULT=0x{:08X}; reinitializing",
         static_cast<unsigned>(failureHr)));
+
+    if (m_connected && (m_driverHandle || m_ksControl || m_propertySet)) {
+        const HRESULT hrDisconnect = Disconnect();
+        if (FAILED(hrDisconnect) && hrDisconnect != S_FALSE) {
+            VirtuaCamLog::LogHr(L"DriverBridge::Disconnect before reinitialize failed", hrDisconnect);
+        }
+    }
 
     Shutdown();
     HRESULT hr = Initialize();
@@ -802,6 +830,7 @@ HRESULT DriverBridge::ReinitializeAfterFailure(HRESULT failureHr)
 HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
 {
     RETURN_HR_IF(E_UNEXPECTED, !m_active);
+    RETURN_IF_FAILED(Connect());
     RETURN_IF_FAILED(EnsureGpuResources(sourceTexture));
     RETURN_IF_FAILED(EnsureSourceTextureView(sourceTexture));
 

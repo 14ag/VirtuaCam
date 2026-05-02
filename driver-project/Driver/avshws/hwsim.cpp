@@ -497,19 +497,30 @@ CHardwareSimulation::
 ReleaseClientEventObject (
     )
 {
-    if (m_NamedClientRequestEvent) {
-        ZwClose(m_NamedClientRequestEvent);
-        m_NamedClientRequestEvent = NULL;
+    HANDLE namedClientRequestEvent = NULL;
+    PKEVENT registeredClientRequestEventObject = NULL;
+    PKEVENT namedClientRequestEventObject = NULL;
+    KIRQL irql;
+
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    namedClientRequestEvent = m_NamedClientRequestEvent;
+    m_NamedClientRequestEvent = NULL;
+    registeredClientRequestEventObject = m_RegisteredClientRequestEventObject;
+    m_RegisteredClientRequestEventObject = NULL;
+    namedClientRequestEventObject = m_NamedClientRequestEventObject;
+    m_NamedClientRequestEventObject = NULL;
+    KeReleaseSpinLock(&m_FrameLock, irql);
+
+    if (namedClientRequestEvent) {
+        ZwClose(namedClientRequestEvent);
     }
 
-    if (m_RegisteredClientRequestEventObject) {
-        ObDereferenceObject(m_RegisteredClientRequestEventObject);
-        m_RegisteredClientRequestEventObject = NULL;
+    if (registeredClientRequestEventObject) {
+        ObDereferenceObject(registeredClientRequestEventObject);
     }
 
-    if (m_NamedClientRequestEventObject) {
-        ObDereferenceObject(m_NamedClientRequestEventObject);
-        m_NamedClientRequestEventObject = NULL;
+    if (namedClientRequestEventObject) {
+        ObDereferenceObject(namedClientRequestEventObject);
     }
 }
 
@@ -1089,6 +1100,110 @@ Return Value:
 
 }
 
+NTSTATUS
+CHardwareSimulation::
+CopyImageToStreamHeader (
+    IN PKSSTREAM_HEADER StreamHeader,
+    OUT PULONG BytesWritten
+    )
+{
+    if (!StreamHeader || !BytesWritten) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *BytesWritten = 0;
+
+    PUCHAR buffer = reinterpret_cast<PUCHAR>(StreamHeader->Data);
+    if (!buffer || StreamHeader->FrameExtent == 0 || !m_ImageSynth || !m_SynthesisBuffer) {
+        m_LastFillStatus = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    HARDWARE_STATE hardwareState = HardwareStopped;
+    ULONG width = 0;
+    ULONG height = 0;
+    ULONG imageSize = 0;
+    ULONG bytesPerPixel = 0;
+    KIRQL irql;
+
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    hardwareState = m_HardwareState;
+    width = m_Width;
+    height = m_Height;
+    imageSize = m_ImageSize;
+    bytesPerPixel = m_ImageSynth ? static_cast<ULONG>(m_ImageSynth->GetBytesPerPixel()) : 0;
+    KeReleaseSpinLock(&m_FrameLock, irql);
+
+    if (hardwareState != HardwareRunning || width == 0 || height == 0 || imageSize == 0 || bytesPerPixel == 0) {
+        m_LastFillStatus = static_cast<ULONG>(STATUS_DEVICE_NOT_READY);
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    LONG widthBytes = static_cast<LONG>(width * bytesPerPixel);
+    LONG stride = widthBytes;
+    BOOLEAN bottomUp = FALSE;
+    if (StreamHeader->Size >= sizeof(KSSTREAM_HEADER) + sizeof(KS_FRAME_INFO)) {
+        PKS_FRAME_INFO frameInfo = reinterpret_cast<PKS_FRAME_INFO>(StreamHeader + 1);
+
+        if (frameInfo->lSurfacePitch != 0) {
+            if (frameInfo->lSurfacePitch == LONG_MIN) {
+                m_LastFillStatus = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            bottomUp = (frameInfo->lSurfacePitch < 0);
+            stride = bottomUp ? -frameInfo->lSurfacePitch : frameInfo->lSurfacePitch;
+        }
+    }
+
+    m_LastFillStride = static_cast<ULONG>(stride);
+    m_LastFillWidthBytes = (widthBytes > 0) ? static_cast<ULONG>(widthBytes) : 0;
+    m_LastFillByteCount = imageSize;
+
+    if (widthBytes <= 0 || stride < widthBytes) {
+        m_LastFillRequiredBytes = 0;
+        m_LastFillBufferRemaining = StreamHeader->FrameExtent;
+        m_LastFillStatus = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ULONGLONG rowPitch = static_cast<ULONGLONG>(stride);
+    ULONGLONG requiredBytes = static_cast<ULONGLONG>(widthBytes);
+    if (height > 0) {
+        requiredBytes += rowPitch * (height - 1);
+    }
+
+    m_LastFillRequiredBytes = static_cast<ULONG>(requiredBytes <= MAXULONG ? requiredBytes : MAXULONG);
+    if (requiredBytes > StreamHeader->FrameExtent) {
+        m_LastFillBufferRemaining = StreamHeader->FrameExtent;
+        m_LastFillStatus = static_cast<ULONG>(STATUS_INSUFFICIENT_RESOURCES);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    PUCHAR destinationBase = buffer;
+    if (bottomUp && height > 1) {
+        destinationBase += rowPitch * (height - 1);
+    }
+
+    PUCHAR source = m_SynthesisBuffer;
+    for (ULONG y = 0; y < height; ++y) {
+        PUCHAR destination =
+            bottomUp ?
+                (destinationBase - (stride * y)) :
+                (destinationBase + (stride * y));
+
+        RtlCopyMemory(destination, source, widthBytes);
+        source += widthBytes;
+    }
+
+    InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_NumMappingsCompleted));
+    m_LastCompletedDelta = 1;
+    m_LastFillBufferRemaining = 0;
+    m_LastFillStatus = static_cast<ULONG>(STATUS_SUCCESS);
+    *BytesWritten = imageSize;
+    return STATUS_SUCCESS;
+}
+
 /*************************************************/
 
 
@@ -1351,11 +1466,6 @@ Return Value:
         }
     }
 
-	if (hardwareState == HardwareRunning &&
-        !NT_SUCCESS(FillScatterGatherBuffers())) {
-		InterlockedIncrement(PLONG(&m_NumFramesSkipped));
-	}
-
     //
     // Issue an interrupt to our hardware sink.  This is a "fake" interrupt.
     // It will occur at DISPATCH_LEVEL.
@@ -1401,6 +1511,8 @@ void CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         rejectReason = kSetDataRejectNotRunning;
     } else if (!m_TemporaryBuffer || !m_StagingBuffer) {
         rejectReason = kSetDataRejectNoBuffer;
+    } else if (!m_ClientConnected) {
+        rejectReason = kSetDataRejectNotConnected;
     } else if (!m_ImageSynth) {
         rejectReason = kSetDataRejectNoSynth;
     } else {
@@ -1526,8 +1638,14 @@ void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
     DbgPrint("[avshws] HwSim::NotifyCameraState running=%lu connected=%lu irql=%lu\n", (ULONG)isRunning, (ULONG)IsClientConnected(), (ULONG)KeGetCurrentIrql());
 
     KeAcquireSpinLock(&m_FrameLock, &irql);
-    registeredClientRequestEventObject = m_RegisteredClientRequestEventObject;
-    namedClientRequestEventObject = m_NamedClientRequestEventObject;
+    if (m_RegisteredClientRequestEventObject) {
+        registeredClientRequestEventObject = m_RegisteredClientRequestEventObject;
+        ObReferenceObject(registeredClientRequestEventObject);
+    }
+    if (m_NamedClientRequestEventObject) {
+        namedClientRequestEventObject = m_NamedClientRequestEventObject;
+        ObReferenceObject(namedClientRequestEventObject);
+    }
     clientConnected = m_ClientConnected;
     KeReleaseSpinLock(&m_FrameLock, irql);
 
@@ -1546,6 +1664,13 @@ void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
         if (namedClientRequestEventObject) {
             KeClearEvent(namedClientRequestEventObject);
         }
+    }
+
+    if (registeredClientRequestEventObject) {
+        ObDereferenceObject(registeredClientRequestEventObject);
+    }
+    if (namedClientRequestEventObject) {
+        ObDereferenceObject(namedClientRequestEventObject);
     }
 }
 
