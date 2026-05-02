@@ -80,6 +80,8 @@ private:
     // stability until resources are released.
     //
     PKS_VIDEOINFOHEADER m_VideoInfoHeader;
+    HARDWARE_STATE m_PowerSavedHardwareState;
+    BOOLEAN m_PowerRestartPending;
 
     //
     // Cleanup():

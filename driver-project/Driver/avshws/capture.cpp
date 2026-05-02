@@ -760,7 +760,6 @@ Return Value:
             //
             if (FromState == KSSTATE_RUN) {
 
-                m_PresentationTime = 0;
                 Status = m_Device -> Pause (TRUE);
 
                 if (NT_SUCCESS (Status)) {
@@ -768,7 +767,6 @@ Return Value:
                 }
 
             }
-            m_FrameNumber   = 0;
             m_PreviousStreamPointer = NULL;
             m_PendIo = FALSE;
             break;

@@ -150,6 +150,7 @@ private:
     KSPIN_LOCK m_FrameLock;
     volatile LONG m_DpcActive;
     volatile LONG m_FrameWriteActive;
+    volatile LONG m_FrameReadActive;
     BOOLEAN m_ClientConnected;
     LARGE_INTEGER m_LastFrameTime;
     HANDLE m_NamedClientRequestEvent;
@@ -335,6 +336,7 @@ public:
 	NTSTATUS SetData(PVOID data, ULONG dataLength);
     void SetClientConnected(BOOLEAN connected);
     BOOLEAN IsClientConnected();
+    HARDWARE_STATE GetHardwareState();
     NTSTATUS RegisterClientRequestEvent(HANDLE eventHandle, KPROCESSOR_MODE accessMode);
     void NotifyCameraState(BOOLEAN isRunning);
     void QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status);

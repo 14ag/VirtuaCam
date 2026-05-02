@@ -41,6 +41,56 @@ AvshwsPoolTypeToFlags(
     return POOL_FLAG_NON_PAGED;
 }
 
+typedef struct _AVSHWS_CPP_ALLOCATION_HEADER {
+    ULONG Tag;
+    ULONG Reserved;
+    ULONGLONG AlignmentPad;
+} AVSHWS_CPP_ALLOCATION_HEADER, *PAVSHWS_CPP_ALLOCATION_HEADER;
+
+static_assert(
+    (sizeof(AVSHWS_CPP_ALLOCATION_HEADER) % MEMORY_ALLOCATION_ALIGNMENT) == 0,
+    "C++ allocation header must preserve kernel allocation alignment");
+
+static
+PVOID
+AvshwsAllocateCppPool(
+    _In_ size_t Size,
+    _In_ POOL_TYPE PoolType,
+    _In_ ULONG Tag
+    )
+{
+    const SIZE_T totalSize = sizeof(AVSHWS_CPP_ALLOCATION_HEADER) + Size;
+    if (totalSize < Size) {
+        return NULL;
+    }
+
+    PAVSHWS_CPP_ALLOCATION_HEADER header =
+        reinterpret_cast<PAVSHWS_CPP_ALLOCATION_HEADER>(
+            ExAllocatePool2(AvshwsPoolTypeToFlags(PoolType), totalSize, Tag));
+    if (!header) {
+        return NULL;
+    }
+
+    header->Tag = Tag;
+    header->Reserved = 0;
+    return reinterpret_cast<PVOID>(header + 1);
+}
+
+static
+void
+AvshwsFreeCppPool(
+    _In_opt_ PVOID Pointer
+    )
+{
+    if (!Pointer) {
+        return;
+    }
+
+    PAVSHWS_CPP_ALLOCATION_HEADER header =
+        reinterpret_cast<PAVSHWS_CPP_ALLOCATION_HEADER>(Pointer) - 1;
+    ExFreePoolWithTag(header, header->Tag);
+}
+
 PVOID operator new
 (
     size_t          iSize,
@@ -50,7 +100,7 @@ PVOID operator new
     POOL_TYPE       poolType
 )
 {
-    return ExAllocatePool2(AvshwsPoolTypeToFlags(poolType), iSize, 'wNCK');
+    return AvshwsAllocateCppPool(iSize, poolType, 'wNCK');
 }
 
 PVOID operator new
@@ -63,7 +113,7 @@ PVOID operator new
     ULONG           tag
 )
 {
-    return ExAllocatePool2(AvshwsPoolTypeToFlags(poolType), iSize, tag);
+    return AvshwsAllocateCppPool(iSize, poolType, tag);
 }
 
 PVOID 
@@ -76,7 +126,7 @@ operator new[](
     ULONG           tag
 )
 {
-    return ExAllocatePool2(AvshwsPoolTypeToFlags(poolType), iSize, tag);
+    return AvshwsAllocateCppPool(iSize, poolType, tag);
 }
 
 /*++
@@ -101,10 +151,7 @@ operator delete[](
     PVOID pVoid
 )
 {
-    if (pVoid)
-    {
-        ExFreePool(pVoid);
-    }
+    AvshwsFreeCppPool(pVoid);
 }
 
 /*++
@@ -132,10 +179,7 @@ void __cdecl operator delete
     size_t /*size*/
 )
 {
-    if (pVoid)
-    {
-        ExFreePool(pVoid);
-    }
+    AvshwsFreeCppPool(pVoid);
 }
 
 /*++
@@ -163,10 +207,7 @@ void __cdecl operator delete[]
     size_t /*size*/
 )
 {
-    if (pVoid)
-    {
-        ExFreePool(pVoid);
-    }
+    AvshwsFreeCppPool(pVoid);
 }
 
 void __cdecl operator delete
@@ -174,9 +215,7 @@ void __cdecl operator delete
     PVOID pVoid
     )
 {
-    if (pVoid) {
-        ExFreePool(pVoid);
-    }
+    AvshwsFreeCppPool(pVoid);
 }
 
 /**************************************************************************
@@ -366,6 +405,8 @@ QuiesceHardware (
     )
 {
     DbgPrint("[avshws] %s begin device=%p irql=%lu\n", Reason, this, (ULONG)KeGetCurrentIrql());
+    m_PowerRestartPending = FALSE;
+    m_PowerSavedHardwareState = HardwareStopped;
 
     if (m_HardwareSimulation) {
         (void)m_HardwareSimulation -> Stop ();
@@ -490,6 +531,8 @@ SetPower (
     IN DEVICE_POWER_STATE From
     )
 {
+    NTSTATUS status = STATUS_SUCCESS;
+
     DbgPrint(
         "[avshws] SetPower device=%p from=%lu to=%lu irql=%lu\n",
         this,
@@ -498,7 +541,39 @@ SetPower (
         (ULONG)KeGetCurrentIrql());
 
     if (From == PowerDeviceD0 && To != PowerDeviceD0) {
-        QuiesceHardware(FALSE, "SetPowerDown");
+        m_PowerSavedHardwareState = HardwareStopped;
+        m_PowerRestartPending = FALSE;
+
+        if (m_HardwareSimulation && m_PinsWithResources) {
+            m_PowerSavedHardwareState = m_HardwareSimulation->GetHardwareState();
+            if (m_PowerSavedHardwareState != HardwareStopped) {
+                NotifyCameraState(FALSE);
+                (void)m_HardwareSimulation->Stop();
+                m_PowerRestartPending = TRUE;
+            }
+        }
+    } else if (From != PowerDeviceD0 && To == PowerDeviceD0) {
+        if (m_PowerRestartPending &&
+            m_HardwareSimulation &&
+            m_PinsWithResources &&
+            m_PowerSavedHardwareState != HardwareStopped) {
+            status = Start();
+            if (NT_SUCCESS(status) && m_PowerSavedHardwareState == HardwarePaused) {
+                status = Pause(TRUE);
+            }
+            if (NT_SUCCESS(status) && m_PowerSavedHardwareState == HardwareRunning) {
+                NotifyCameraState(TRUE);
+            }
+
+            DbgPrint(
+                "[avshws] SetPower resume device=%p savedState=%lu status=0x%08X\n",
+                this,
+                (ULONG)m_PowerSavedHardwareState,
+                status);
+        }
+
+        m_PowerRestartPending = FALSE;
+        m_PowerSavedHardwareState = HardwareStopped;
     }
 }
 
