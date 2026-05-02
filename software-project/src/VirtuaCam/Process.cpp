@@ -736,9 +736,6 @@ namespace BuiltInCaptureProducer
         while (true) {
             HANDLE requestEvent = CreateRegisteredClientRequestEventHandle();
             if (!requestEvent) {
-                requestEvent = OpenClientRequestEventHandle();
-            }
-            if (!requestEvent) {
                 Sleep(kWatcherOpenRetryMs);
                 continue;
             }

@@ -119,6 +119,22 @@ private:
     PnpStop (
         );
 
+    NTSTATUS
+    PnpQueryStop (
+        );
+
+    void
+    PnpCancelStop (
+        );
+
+    NTSTATUS
+    PnpQueryRemove (
+        );
+
+    void
+    PnpCancelRemove (
+        );
+
     void
     PnpRemove (
         );
@@ -131,6 +147,21 @@ private:
     QuiesceHardware (
         IN BOOLEAN ReleaseAdapter,
         IN PCSTR Reason
+        );
+
+    NTSTATUS
+    QueryPower (
+        IN DEVICE_POWER_STATE DeviceTo,
+        IN DEVICE_POWER_STATE DeviceFrom,
+        IN SYSTEM_POWER_STATE SystemTo,
+        IN SYSTEM_POWER_STATE SystemFrom,
+        IN POWER_ACTION Action
+        );
+
+    void
+    SetPower (
+        IN DEVICE_POWER_STATE To,
+        IN DEVICE_POWER_STATE From
         );
 
 public:
@@ -213,6 +244,62 @@ public:
     }
 
     static
+    NTSTATUS
+    DispatchPnpQueryStop (
+        IN PKSDEVICE Device,
+        IN PIRP Irp
+        )
+    {
+        UNREFERENCED_PARAMETER(Irp);
+        return
+            (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
+            PnpQueryStop (
+                );
+    }
+
+    static
+    void
+    DispatchPnpCancelStop (
+        IN PKSDEVICE Device,
+        IN PIRP Irp
+        )
+    {
+        UNREFERENCED_PARAMETER(Irp);
+        return
+            (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
+            PnpCancelStop (
+                );
+    }
+
+    static
+    NTSTATUS
+    DispatchPnpQueryRemove (
+        IN PKSDEVICE Device,
+        IN PIRP Irp
+        )
+    {
+        UNREFERENCED_PARAMETER(Irp);
+        return
+            (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
+            PnpQueryRemove (
+                );
+    }
+
+    static
+    void
+    DispatchPnpCancelRemove (
+        IN PKSDEVICE Device,
+        IN PIRP Irp
+        )
+    {
+        UNREFERENCED_PARAMETER(Irp);
+        return
+            (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
+            PnpCancelRemove (
+                );
+    }
+
+    static
     void
     DispatchPnpRemove (
         IN PKSDEVICE Device,
@@ -237,6 +324,48 @@ public:
         return
             (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
             PnpSurpriseRemoval (
+                );
+    }
+
+    static
+    NTSTATUS
+    DispatchQueryPower (
+        IN PKSDEVICE Device,
+        IN PIRP Irp,
+        IN DEVICE_POWER_STATE DeviceTo,
+        IN DEVICE_POWER_STATE DeviceFrom,
+        IN SYSTEM_POWER_STATE SystemTo,
+        IN SYSTEM_POWER_STATE SystemFrom,
+        IN POWER_ACTION Action
+        )
+    {
+        UNREFERENCED_PARAMETER(Irp);
+        return
+            (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
+            QueryPower (
+                DeviceTo,
+                DeviceFrom,
+                SystemTo,
+                SystemFrom,
+                Action
+                );
+    }
+
+    static
+    void
+    DispatchSetPower (
+        IN PKSDEVICE Device,
+        IN PIRP Irp,
+        IN DEVICE_POWER_STATE To,
+        IN DEVICE_POWER_STATE From
+        )
+    {
+        UNREFERENCED_PARAMETER(Irp);
+        return
+            (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
+            SetPower (
+                To,
+                From
                 );
     }
 
@@ -309,6 +438,12 @@ public:
         IN PUCHAR *Buffer,
         IN PKSMAPPING Mappings,
         IN ULONG MappingsCount
+        );
+
+    NTSTATUS
+    CopyImageToStreamHeader (
+        IN PKSSTREAM_HEADER StreamHeader,
+        OUT PULONG BytesWritten
         );
 
     //

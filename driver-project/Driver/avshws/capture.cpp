@@ -48,6 +48,48 @@ namespace
             return "UNKNOWN";
         }
     }
+
+    void FinalizeCapturedFrame(
+        _In_ PKSSTREAM_HEADER streamHeader,
+        _In_ PKS_VIDEOINFOHEADER videoInfoHeader,
+        _In_opt_ PIKSREFERENCECLOCK clock,
+        _Inout_ LONGLONG* presentationTime,
+        _Inout_ LONGLONG* frameNumber,
+        _In_ LONGLONG droppedFrames)
+    {
+        LONGLONG samplePresentationTime = 0;
+
+        streamHeader->Duration = videoInfoHeader->AvgTimePerFrame;
+        streamHeader->PresentationTime.Numerator = 1;
+        streamHeader->PresentationTime.Denominator = 1;
+
+        if (clock) {
+            samplePresentationTime = clock->GetTime();
+        } else {
+            samplePresentationTime = *presentationTime;
+            *presentationTime += videoInfoHeader->AvgTimePerFrame;
+        }
+
+        streamHeader->PresentationTime.Time = samplePresentationTime;
+        streamHeader->OptionsFlags |=
+            KSSTREAM_HEADER_OPTIONSF_TIMEVALID |
+            KSSTREAM_HEADER_OPTIONSF_DURATIONVALID |
+            KSSTREAM_HEADER_OPTIONSF_FRAMEINFO;
+
+        (*frameNumber)++;
+
+        if (streamHeader->Size >= sizeof(KSSTREAM_HEADER) + sizeof(KS_FRAME_INFO)) {
+            PKS_FRAME_INFO frameInfo = reinterpret_cast<PKS_FRAME_INFO>(streamHeader + 1);
+            LONG surfacePitch = frameInfo->lSurfacePitch;
+            RtlZeroMemory(frameInfo, sizeof(*frameInfo));
+            frameInfo->ExtendedHeaderSize = sizeof(KS_FRAME_INFO);
+            frameInfo->dwFrameFlags = KS_VIDEO_FLAG_FRAME;
+            frameInfo->PictureNumber = *frameNumber;
+            frameInfo->DropCount = droppedFrames;
+            frameInfo->lSurfacePitch = surfacePitch;
+            frameInfo->FrameCompletionNumber = static_cast<ULONGLONG>(*frameNumber);
+        }
+    }
 }
 
 /**************************************************************************
@@ -380,7 +422,7 @@ Return Value:
 }
 
 #ifdef ALLOC_PRAGMA
-#pragma code_seg("PAGE")
+#pragma code_seg()
 #endif // ALLOC_PRAGMA
 
 
@@ -407,208 +449,72 @@ Return Value:
 --*/
 
 {
+    PKSSTREAM_POINTER leading =
+        KsPinGetLeadingEdgeStreamPointer(
+            m_Pin,
+            KSSTREAM_POINTER_STATE_LOCKED);
 
-    PAGED_CODE();
-
-    NTSTATUS Status = STATUS_SUCCESS;
-    PKSSTREAM_POINTER Leading;
-
-    _DbgPrintF(DEBUGLVL_VERBOSE, ("Process"));
-
-    Leading = KsPinGetLeadingEdgeStreamPointer (
-        m_Pin,
-        KSSTREAM_POINTER_STATE_LOCKED
-        );
-
-    while (NT_SUCCESS (Status) && Leading) {
-
-        PKSSTREAM_POINTER ClonePointer;
-        PSTREAM_POINTER_CONTEXT SPContext = NULL;
-
-        // For optimization sake in this particular sample, I will only keep
-        // one clone stream pointer per frame.  This complicates the logic
-        // here but simplifies the completions.
-        //
-        // I'm also choosing to do this since I need to keep track of the
-        // virtual addresses corresponding to each mapping since I'm faking
-        // DMA.  It simplifies that too.
-        //
-        if (!m_PreviousStreamPointer) {
-            //
-            // First thing we need to do is clone the leading edge.  This allows
-            // us to keep reference on the frames while they're in DMA.
-            //
-            Status = KsStreamPointerClone (
-                Leading,
-                NULL,
-                sizeof (STREAM_POINTER_CONTEXT),
-                &ClonePointer
-                );
-
-            //
-            // I use this for easy chunking of the buffer.  We're not really
-            // dealing with physical addresses.  This keeps track of what 
-            // virtual address in the buffer the current scatter / gather 
-            // mapping corresponds to for the fake hardware.
-            //
-            if (NT_SUCCESS (Status)) {
-                PUCHAR BufferVirtual =
-                    reinterpret_cast<PUCHAR>(
-                        ClonePointer->StreamHeader->Data);
-
-                if (!BufferVirtual) {
-                    PMDL streamMdl = KsStreamPointerGetMdl(ClonePointer);
-                    if (streamMdl) {
-                        BufferVirtual = reinterpret_cast<PUCHAR>(
-                            MmGetSystemAddressForMdlSafe(
-                                streamMdl,
-                                NormalPagePriority));
-                    }
-                }
-
-                if (!BufferVirtual) {
-                    DbgPrint(
-                        "[avshws] Process missing writable sample VA pin=%p clone=%p irql=%lu\n",
-                        m_Pin,
-                        ClonePointer,
-                        (ULONG)KeGetCurrentIrql());
-                    KsStreamPointerDelete(ClonePointer);
-                    Status = STATUS_INSUFFICIENT_RESOURCES;
-                    break;
-                }
-
-                //
-                // Set the stream header data used to 0.  We update this 
-                // in the DMA completions.  For queues with DMA, we must
-                // update this field ourselves.
-                //
-                ClonePointer -> StreamHeader -> DataUsed = 0;
-
-                SPContext = reinterpret_cast <PSTREAM_POINTER_CONTEXT> 
-                    (ClonePointer -> Context);
-
-                SPContext -> BufferVirtual = BufferVirtual;
-            }
-
-        } else {
-
-            ClonePointer = m_PreviousStreamPointer;
-            SPContext = reinterpret_cast <PSTREAM_POINTER_CONTEXT> 
-                (ClonePointer -> Context);
-            Status = STATUS_SUCCESS;
-        }
-
-        //
-        // If the clone failed, likely we're out of resources.  Break out
-        // of the loop for now.  We may end up starving DMA.
-        //
-        if (!NT_SUCCESS (Status)) {
-            KsStreamPointerUnlock (Leading, FALSE);
-            break;
-        }
-
-        //
-        // Program the fake hardware.  I would use Clone -> OffsetOut.*, but
-        // because of the optimization of one stream pointer per frame, it
-        // doesn't make complete sense.
-        //
-        if (Leading -> OffsetOut.Remaining == 0 ||
-            Leading -> OffsetOut.Remaining > Leading -> OffsetOut.Count) {
-            Status = STATUS_INVALID_PARAMETER;
-            break;
-        }
-
-        ULONG BytesUsed =
-            m_Device -> ProgramScatterGatherMappings (
-                ClonePointer,
-                &(SPContext -> BufferVirtual),
-                Leading -> OffsetOut.Mappings,
-                Leading -> OffsetOut.Remaining
-                );
-
-        //
-        // In order to keep one clone per frame and simplify the fake DMA
-        // logic, make a check to see if we completely used the mappings in
-        // the leading edge.  Set a flag.
-        //
-        if (BytesUsed == Leading -> OffsetOut.Remaining) {
-            m_PreviousStreamPointer = NULL;
-        } else {
-            m_PreviousStreamPointer = ClonePointer;
-        }
-
-        if (BytesUsed) {
-            //
-            // If any mappings were added to scatter / gather queues, 
-            // advance the leading edge by that number of mappings.  If 
-            // we run off the end of the queue, Status will be 
-            // STATUS_DEVICE_NOT_READY.  Otherwise, the leading edge will
-            // point to a new frame.  The previous one will not have been
-            // dismissed (unless "DMA" completed) since there's a clone
-            // pointer referencing the frames.
-            //
-            Status =
-                KsStreamPointerAdvanceOffsets (
-                    Leading,
-                    0,
-                    BytesUsed,
-                    FALSE
-                    );
-        } else {
-
-            //
-            // The hardware was incapable of adding more entries.  The S/G
-            // table is full.
-            //
-            Status = STATUS_PENDING;
-            break;
-
-        }
-
-    }
-
-    //
-    // If the leading edge failed to lock (this is always possible, remember
-    // that locking CAN occassionally fail), don't blow up passing NULL
-    // into KsStreamPointerUnlock.  Also, set m_PendIo to kick us later...
-    //
-    if (!Leading) {
-
+    if (!leading) {
         m_PendIo = TRUE;
-
-        //
-        // If the lock failed, there's no point in getting called back 
-        // immediately.  The lock could fail due to insufficient memory,
-        // etc...  In this case, we don't want to get called back immediately.
-        // Return pending.  The m_PendIo flag will cause us to get kicked
-        // later.
-        //
-        Status = STATUS_PENDING;
+        return STATUS_PENDING;
     }
 
-    //
-    // If we didn't run the leading edge off the end of the queue, unlock it.
-    //
-    if (NT_SUCCESS (Status) && Leading) {
-        KsStreamPointerUnlock (Leading, FALSE);
-    } else {
-        //
-        // DEVICE_NOT_READY indicates that the advancement ran off the end
-        // of the queue.  We couldn't lock the leading edge.
-        //
-        if (Status == STATUS_DEVICE_NOT_READY) Status = STATUS_SUCCESS;
-    }
-
-    //
-    // If we failed with something that requires pending, set the pending I/O
-    // flag so we know we need to start it again in a completion DPC.
-    //
-    if (!NT_SUCCESS (Status) || Status == STATUS_PENDING) {
+    if (!leading->StreamHeader) {
+        KsStreamPointerUnlock(leading, FALSE);
         m_PendIo = TRUE;
+        return STATUS_PENDING;
     }
 
-    _DbgPrintF(DEBUGLVL_VERBOSE, ("Leaving Process..."));
-    return Status;
+    leading->StreamHeader->DataUsed = 0;
+    leading->StreamHeader->OptionsFlags = 0;
+
+    if (!leading->StreamHeader->Data) {
+        PMDL streamMdl = KsStreamPointerGetMdl(leading);
+        if (streamMdl) {
+            leading->StreamHeader->Data =
+                MmGetSystemAddressForMdlSafe(streamMdl, NormalPagePriority);
+        }
+    }
+
+    if (!leading->StreamHeader->Data) {
+        DbgPrint(
+            "[avshws] Process missing writable sample VA pin=%p leading=%p irql=%lu\n",
+            m_Pin,
+            leading,
+            (ULONG)KeGetCurrentIrql());
+        KsStreamPointerUnlock(leading, FALSE);
+        m_PendIo = TRUE;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    ULONG bytesWritten = 0;
+    NTSTATUS status =
+        m_Device->CopyImageToStreamHeader(
+            leading->StreamHeader,
+            &bytesWritten);
+
+    if (!NT_SUCCESS(status)) {
+        KsStreamPointerUnlock(leading, FALSE);
+        if (status == STATUS_DEVICE_NOT_READY) {
+            m_PendIo = TRUE;
+            return STATUS_PENDING;
+        }
+        return status;
+    }
+
+    leading->StreamHeader->DataUsed = bytesWritten;
+    FinalizeCapturedFrame(
+        leading->StreamHeader,
+        m_VideoInfoHeader,
+        m_Clock,
+        &m_PresentationTime,
+        &m_FrameNumber,
+        m_DroppedFrames);
+
+    m_PreviousStreamPointer = NULL;
+    m_PendIo = FALSE;
+    KsStreamPointerUnlock(leading, TRUE);
+    return STATUS_PENDING;
 
 }
 
@@ -640,6 +546,9 @@ Return Value:
 {
 
     PAGED_CODE();
+
+    m_PreviousStreamPointer = NULL;
+    m_PendIo = FALSE;
 
     PKSSTREAM_POINTER Clone = KsPinGetFirstCloneStreamPointer (m_Pin);
     PKSSTREAM_POINTER NextClone = NULL;
@@ -762,6 +671,8 @@ Return Value:
                 m_AcquiredResources = FALSE;
             }
 
+            m_PreviousStreamPointer = NULL;
+            m_PendIo = FALSE;
             m_Device->NotifyCameraState(FALSE);
 
             break;
@@ -839,6 +750,8 @@ Return Value:
 
             m_FrameNumber   = 0;
             m_DroppedFrames = 0;
+            m_PreviousStreamPointer = NULL;
+            m_PendIo = FALSE;
             break;
 
         case KSSTATE_PAUSE:
@@ -856,6 +769,8 @@ Return Value:
 
             }
             m_FrameNumber   = 0;
+            m_PreviousStreamPointer = NULL;
+            m_PendIo = FALSE;
             break;
 
         case KSSTATE_RUN:
@@ -1445,130 +1360,10 @@ Return Value:
 --*/
 
 {
+    UNREFERENCED_PARAMETER(NumMappings);
 
-    ULONG BytesRemaining = NumMappings;
-
-    //
-    // Walk through the clones list and delete clones whose time has come.
-    // The list is guaranteed to be kept in the order they were cloned.
-    //
-    PKSSTREAM_POINTER Clone = KsPinGetFirstCloneStreamPointer (m_Pin);
-
-    while (BytesRemaining && Clone) {
-
-        PKSSTREAM_POINTER NextClone = KsStreamPointerGetNextClone (Clone);
-        ULONG BytesToCount =
-            (BytesRemaining > Clone -> OffsetOut.Remaining) ?
-                Clone -> OffsetOut.Remaining :
-                BytesRemaining;
-
-        //
-        // Update DataUsed according to the completed bytes.
-        //
-        Clone -> StreamHeader -> DataUsed += BytesToCount;
-
-        // 
-        // If we have completed all remaining mappings in this clone, it
-        // is an indication that the clone is ready to be deleted and the
-        // buffer released.  Set anything required in the stream header which
-        // has not yet been set.  If we have a clock, we can timestamp the
-        // sample.
-        //
-        if (BytesToCount == Clone -> OffsetOut.Remaining) {
-            LONGLONG presentationTime = 0;
-
-            Clone -> StreamHeader -> Duration =
-                m_VideoInfoHeader -> AvgTimePerFrame;
-
-            Clone -> StreamHeader -> PresentationTime.Numerator =
-                Clone -> StreamHeader -> PresentationTime.Denominator = 1;
-
-            //
-            // If a clock has been assigned, timestamp the packets with the
-            // time shown on the clock. 
-            //
-            if (m_Clock) {
-
-                presentationTime = m_Clock -> GetTime ();
-
-            } else {
-                presentationTime = m_PresentationTime;
-                m_PresentationTime += m_VideoInfoHeader -> AvgTimePerFrame;
-            }
-
-            Clone -> StreamHeader -> PresentationTime.Time = presentationTime;
-            Clone -> StreamHeader -> OptionsFlags |=
-                KSSTREAM_HEADER_OPTIONSF_TIMEVALID |
-                KSSTREAM_HEADER_OPTIONSF_DURATIONVALID;
-
-            //
-            // Increment the frame number.  This is the total count of frames which
-            // have attempted capture.
-            //
-            m_FrameNumber++;
-
-            //
-            // Double check the Stream Header size.  AVStream makes no guarantee
-            // that because StreamHeaderSize is set to a specific size that you
-            // will get that size.  If the proper data type handlers are not 
-            // installed, the stream header will be of default size.
-            //
-            if ( Clone -> StreamHeader -> Size >= sizeof (KSSTREAM_HEADER) +
-                sizeof (KS_FRAME_INFO)) {
-
-                PKS_FRAME_INFO FrameInfo = reinterpret_cast <PKS_FRAME_INFO> (
-                    Clone -> StreamHeader + 1
-                    );
-    
-                FrameInfo -> ExtendedHeaderSize = sizeof (KS_FRAME_INFO);
-                FrameInfo -> dwFrameFlags       = KS_VIDEO_FLAG_FRAME;
-                FrameInfo -> PictureNumber      = (LONGLONG)m_FrameNumber;
-
-                // I don't really have a way to tell if the device has dropped a frame 
-                // or was not able to send a frame on time.
-                FrameInfo -> DropCount = (LONGLONG)m_DroppedFrames;
-            }
-
-
-            //
-            // If all of the mappings in this clone have been completed,
-            // delete the clone.  We've already updated DataUsed above.
-            //
-
-            BytesRemaining -= BytesToCount;
-            KsStreamPointerDelete (Clone);
-
-        } else {
-            //
-            // If only part of the mappings in this clone have been completed,
-            // update the pointers.  Since we're guaranteed this won't advance
-            // to a new frame by the check above, it won't fail.
-            //
-            (void)KsStreamPointerAdvanceOffsets (
-                Clone,
-                0,
-                BytesToCount,
-                FALSE
-                );
-
-            BytesRemaining = 0;
-
-        }
-
-        //
-        // Go to the next clone.
-        //
-        Clone = NextClone;
-
-    }
-
-    //
-    // If we've used all the mappings in hardware and pended, we can kick
-    // processing to happen again if we've completed mappings.
-    //
-    if (m_PendIo) {
-        m_PendIo = FALSE;
-        KsPinAttemptProcessing (m_Pin, TRUE);
+    if (m_HardwareState == HardwareRunning) {
+        KsPinAttemptProcessing(m_Pin, TRUE);
     }
 
 }

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Multiplexer.h"
+#include "RuntimeLog.h"
 #include <d3dcompiler.h>
 #include <cmath>
 #include <algorithm>
@@ -136,11 +137,39 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
     Microsoft::WRL::ComPtr<ID3D11Device5> device5;
     m_device.As(&device5);
 
-    wil::unique_handle hTexture(GetHandleFromName(streamInfo.textureName.c_str()));
     wil::unique_handle hFence(GetHandleFromName(streamInfo.fenceName.c_str()));
 
-    if (!hTexture || FAILED(device1->OpenSharedResource1(hTexture.get(), IID_PPV_ARGS(&newRes.sharedTexture)))) return E_FAIL;
-    if (!hFence || FAILED(device5->OpenSharedFence(hFence.get(), IID_PPV_ARGS(&newRes.sharedFence)))) return E_FAIL;
+    const HRESULT hrTexture = device1->OpenSharedResourceByName(
+        streamInfo.textureName.c_str(),
+        DXGI_SHARED_RESOURCE_READ,
+        __uuidof(ID3D11Texture2D),
+        reinterpret_cast<void**>(newRes.sharedTexture.GetAddressOf()));
+    if (FAILED(hrTexture) || !newRes.sharedTexture) {
+        VirtuaCamLog::LogLine(std::format(
+            L"UpdateProducerConnection failed to open shared texture: pid={} name='{}' hr=0x{:08X}",
+            streamInfo.processId,
+            streamInfo.textureName,
+            static_cast<unsigned>(hrTexture)));
+        return FAILED(hrTexture) ? hrTexture : E_FAIL;
+    }
+
+    if (!hFence) {
+        VirtuaCamLog::LogLine(std::format(
+            L"UpdateProducerConnection failed to open shared fence handle by name: pid={} name='{}'",
+            streamInfo.processId,
+            streamInfo.fenceName));
+        return E_FAIL;
+    }
+
+    const HRESULT hrFence = device5->OpenSharedFence(hFence.get(), IID_PPV_ARGS(&newRes.sharedFence));
+    if (FAILED(hrFence) || !newRes.sharedFence) {
+        VirtuaCamLog::LogLine(std::format(
+            L"UpdateProducerConnection failed to open shared fence: pid={} name='{}' hr=0x{:08X}",
+            streamInfo.processId,
+            streamInfo.fenceName,
+            static_cast<unsigned>(hrFence)));
+        return FAILED(hrFence) ? hrFence : E_FAIL;
+    }
     
     D3D11_TEXTURE2D_DESC sharedDesc;
     newRes.sharedTexture->GetDesc(&sharedDesc);
@@ -153,6 +182,11 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
 
     newRes.connected = true;
     m_producerResources.push_back(std::move(newRes));
+    VirtuaCamLog::LogLine(std::format(
+        L"UpdateProducerConnection connected pid={} texture='{}' fence='{}'",
+        streamInfo.processId,
+        streamInfo.textureName,
+        streamInfo.fenceName));
 
     return S_OK;
 }
@@ -166,7 +200,13 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
 
     PruneConnections(activeProducers);
     for (const auto& p : activeProducers) {
-        UpdateProducerConnection(p);
+        const HRESULT hrConnection = UpdateProducerConnection(p);
+        if (FAILED(hrConnection)) {
+            VirtuaCamLog::LogLine(std::format(
+                L"CompositeFrames skipping producer pid={} because connection failed hr=0x{:08X}",
+                p.processId,
+                static_cast<unsigned>(hrConnection)));
+        }
     }
 
     for (auto& res : m_producerResources) {
