@@ -1,4 +1,4 @@
-﻿# Continuation Prompt
+# Continuation Prompt
 
 Use caveman mode in user-facing replies.
 
@@ -6,261 +6,383 @@ You are resuming work in repo:
 `C:\Users\philip\sauce\virtual-webcam\v2`
 
 ## Mission
-Get the virtual webcam driver stable enough to prove end-to-end success inside Hyper-V.
+Keep the project on the **kernel-driver-only AVStream** path, preserve the now-working proof harness, and move from proof to HLK/WHQL readiness without regressing the real guest-window camera proof.
 
-### Real success criterion
-Capture a screenshot of **Chrome inside the VM** running `webcam.html`, where the webcam feed is a **real guest window** such as `explorer.exe`, Notepad, or any other visible app window. A blue placeholder frame or synthetic filler image does **not** count.
+## Real success criteria
+There are now two separate success bars:
 
-## Mandatory workflow
-1. Keep a Hyper-V checkpoint named `clean` as the ready driver bench.
-2. `clean` must be driver-free: no `avshws` package in driver store and no `ROOT\AVSHWS` device present.
-3. For each driver test loop:
-   - restore `clean`
-   - stage fresh files from repo/output
-   - install driver
-   - repro
-   - collect logs/dumps/diagnostics
-   - decide next call to action
-   - patch project
-   - restore `clean`
-   - retest
-4. If the same error class happens twice, stop blind reruns. Research first, then change one variable.
-5. If a Windows-related error happens, use local PDFs first. Look at the TOC first, then pull only the relevant sections, then use official Microsoft docs if needed.
+1. Functional proof:
+   - Chrome inside `driver-test` opens the virtual camera.
+   - The webcam feed shows a **real guest app window**.
+   - Placeholder blue frames or synthetic filler do **not** count.
+2. Compliance path:
+   - HLK controller/client wiring works.
+   - `driver-test` can be exercised from clean state through HLK without breaking the working proof path.
+
+## What is already true now
+### Proof path is real and green
+- The trustworthy Hyper-V proof harness is already implemented.
+- Real-window source mode is enforced through guest Notepad, not the old synthetic proof panel default.
+- The AVStream path was repaired enough to deliver frames to Chrome.
+- Latest known good proof from this repo state was attempt `61`.
+- Key proof artifacts:
+  - `output\playwright\vm-webcam-proof.json`
+  - `output\playwright\vm-session-status.json`
+  - `output\playwright\vm-webcam-proof.png`
+
+### Build/install path is now unified
+Public repo entrypoints were collapsed to:
+
+- one build script: `build-all.ps1`
+- one install script: `install-all.ps1`
+- one staged package path: `output\`
+
+Deleted old split entrypoints:
+
+- `software-project\build.ps1`
+- `driver-project\build-driver.ps1`
+- `driver-project\Driver\avshws\install-driver.ps1`
+
+Current packaging/source-of-truth helper:
+
+- `tools\artifact-manifest.ps1`
+
+### Build script is confirmed working
+- Full root build was run successfully.
+- A real bug in VC runtime staging was fixed in `build-all.ps1`.
+- Problem was bad runtime-redist directory selection under Visual Studio Build Tools.
+- `build-all.ps1` now finds the correct `VC\Redist\MSVC\<version>\x64\Microsoft.VC143.CRT` directory.
+
+### Install script is confirmed working
+- `install-all.ps1` was exercised inside `driver-test` guest from a clean restore path.
+- It successfully:
+  - verified staged artifacts
+  - imported cert
+  - installed driver
+  - created `ROOT\AVSHWS` if missing
+  - restarted device node
+  - registered `DirectPortClient.dll`
+  - configured startup entries
+- Proof artifact for that install:
+  - `output\hyperv-runs\20260502-165126\guest-driver-install.txt`
+
+### HLK controller/client wiring now works
+- `vhlk` is installed and exposes working controller shares.
+- Verified controller share path:
+  - `\\192.168.100.115\HLKInstall\Client\Setup.cmd`
+- Verified shares on controller:
+  - `HLKInstall`
+  - `HLKLogs`
+  - `HLKTools`
+  - `Tests`
+  - `TestPackages`
+  - `TestRuntimes`
+  - `TaefBinaries`
+- `driver-test` HLK client install succeeded from clean state.
+- Artifact:
+  - `output\hyperv-hlk-client\20260502-170705\guest-hlk-client.json`
+  - `output\hyperv-hlk-client\20260502-170705\guest-hlk-client-output.txt`
+- Confirmed installed on `driver-test`:
+  - `Windows Hardware Lab Kit Client`
+  - `Windows Driver Testing Framework (WDTF) Runtime Libraries`
+  - `Application Verifier x64 External Package`
+- Confirmed running service on guest:
+  - `HLKSvc` / `HLK Communication Service`
+
+## Current architecture constraints from user
+- Must stay **kernel driver only**.
+- Do **not** pivot to Media Foundation virtual camera.
+- Keep AVStream as the shipping path.
+- If auditing is needed again, inspect AVStream/WDK compliance against local PDFs first.
+
+## Mandatory workflow rules
+1. Use caveman style in replies.
+2. If a Windows-specific issue appears, read local PDFs first.
+3. When reading PDFs, use TOC first for navigation.
+4. If the same error happens twice, stop blind reruns.
+5. Use SSH as a supplement where it works, but do not assume `clean` is ssh-ready.
+6. Do not claim success from placeholder-frame screenshots.
 
 ## Research order and sources
 ### Local PDFs first
 1. `C:\Users\philip\sauce\virtual-webcam\v2\pdfs\Windows_Internals_Including_Windows_Server_2008.pdf`
-   - TOC pointers already used:
-     - Chapter 4 `Services` around p281-317
-     - Chapter 6 `Security` around p451-535
-     - Chapter 7 `I/O System` around p537-644
-     - Chapter 12 `Networking` around p1020+
+   - useful areas already referenced:
+     - Chapter 4 `Services`
+     - Chapter 6 `Security`
+     - Chapter 7 `I/O System`
+     - Chapter 12 `Networking`
 2. `C:\Users\philip\sauce\virtual-webcam\v2\pdfs\Programming the Microsoft Windows Driver Model (2nd Edition).pdf`
-   - useful sections already used:
-     - p72 user-pointer handling basics
-     - p107-111 spinlocks / waits / IRQL rules
-     - p181-191 PnP state transitions
-     - p279-280 METHOD_NEITHER / safe IOCTL design
+   - useful areas already referenced:
+     - user-pointer handling
+     - spinlocks / waits / IRQL rules
+     - PnP state transitions
+     - METHOD_NEITHER / safe IOCTL design
 
 ### After PDFs
 - Official Microsoft Learn / WDK docs
 - `https://osronline.com/`
-- Public precedent only as support: GitHub, OSR, Stack Overflow, Reddit, Chromium issues
+- public support references only when needed
 
 ## VM inventory and credentials
 ### `driver-test`
 - OS: Windows 10 Pro 19045
 - Current hostname: `WIN-KQ09DIBH3C6`
-- Current IP during last check: `192.168.100.112`
+- IP seen after latest clean restore: `192.168.100.91`
 - Username: `Administrator`
 - Password: `x`
 
 ### `vhlk`
 - OS: Windows Server 2019 Standard 17763
 - Current hostname: `WIN-GPO7F54QE38`
-- Current IP during last check: `192.168.100.113`
+- Current verified IP: `192.168.100.115`
 - Username: `administrator`
 - Password: `xxxxxx.1`
 
-Note: IPs can change on Hyper-V default switch. Rediscover with PowerShell Direct if needed.
+Note: guest IPs do drift. Re-check before using SSH or SMB paths.
 
 ## SSH state
-### What is working now
-Both VMs now have permissive `sshd` configs and are listening on port 22.
-
-Config lines currently set on both VMs:
-- `SyslogFacility LOCAL0`
-- `LogLevel VERBOSE`
-- `StrictModes no`
-- `PubkeyAuthentication yes`
-- `AuthorizedKeysFile .ssh/authorized_keys`
-- `PasswordAuthentication yes`
-- `PermitEmptyPasswords no`
-
-### Important detail
-- `driver-test` OpenSSH Server was broken before: service was crash-looping with repeated SCM 7031 entries.
-- It was fixed by removing and reinstalling `OpenSSH.Server~~~~0.0.1.0`, then rewriting a permissive `sshd_config`.
-- `vhlk` already had working sshd after install and was reconfigured to the same permissive policy.
-
-### Host-side command path that works now
-Do **not** rely on Windows `ssh.exe` key auth right now. It behaved badly even when the server accepted the key.
-Use `Posh-SSH` with password auth from host PowerShell.
+### What is working
+- `vhlk` share access from host is working over SMB.
+- SSH was previously verified on both VMs when not using the old clean snapshot.
+- Host-side preferred SSH path is still `Posh-SSH` with password auth.
 
 Module path:
 - `C:\Users\philip\Documents\WindowsPowerShell\Modules\Posh-SSH\3.2.7\Posh-SSH.psd1`
 
-Example commands:
-```powershell
-$env:PSModulePath = "$HOME\Documents\WindowsPowerShell\Modules;$env:PSModulePath"
-Import-Module Posh-SSH -Force
-
-$cred = [pscredential]::new('Administrator',(ConvertTo-SecureString 'x' -AsPlainText -Force))
-$s = New-SSHSession -ComputerName 192.168.100.112 -Credential $cred -AcceptKey -ConnectionTimeout 30
-Invoke-SSHCommand -SSHSession $s -Command 'cmd /c "hostname & whoami"'
-Remove-SSHSession -SSHSession $s
-```
-
-```powershell
-$env:PSModulePath = "$HOME\Documents\WindowsPowerShell\Modules;$env:PSModulePath"
-Import-Module Posh-SSH -Force
-
-$cred = [pscredential]::new('administrator',(ConvertTo-SecureString 'xxxxxx.1' -AsPlainText -Force))
-$s = New-SSHSession -ComputerName 192.168.100.113 -Credential $cred -AcceptKey -ConnectionTimeout 30
-Invoke-SSHCommand -SSHSession $s -Command 'cmd /c "hostname & whoami"'
-Remove-SSHSession -SSHSession $s
-```
-
-These were verified.
+### Important nuance
+- The current `clean` checkpoint on `driver-test` is still **not ssh-ready**.
+- After restoring `clean`, `driver-test` answered on Hyper-V/PowerShell Direct eventually, but SSH on `192.168.100.91:22` timed out.
+- So do **not** assume SSH works immediately after restoring `clean`.
+- If future work needs SSH-first clean runs, refresh `clean` after re-enabling ssh inside that restored guest.
 
 ## Checkpoint state
 There is a Hyper-V checkpoint on `driver-test` named `clean`.
 
-Important nuance:
-- old `clean` snapshot exists and was created earlier as driver-free bench
-- current running `driver-test` VM is **not clean** right now
-- current running VM still shows `Virtual Camera Driver` / `ROOT\AVSHWS\0000`
-- therefore **do not** assume current runtime matches the `clean` workflow
-- also, the old `clean` snapshot predates the new SSH setup
+What is true about `clean` now:
+- it is still suitable for clean driver-free restore
+- it was good enough for:
+  - clean driver install test via `install-all.ps1`
+  - clean HLK client install
+- it is **not** yet ssh-ready
 
-### Recommended checkpoint action
-Next operator should do this early:
-1. restore old `clean`
-2. verify `avshws` package/device absent
-3. reapply the permissive SSH setup to `driver-test`
-4. create a refreshed checkpoint also named `clean`
+What `clean` should become next:
+1. restore `clean`
+2. verify no `avshws` in driver store
+3. verify no `ROOT\AVSHWS` device
+4. re-enable/fix guest OpenSSH if needed
+5. create refreshed `clean` again
 
-That gives a truly ready bench: driver-free and ssh-ready.
+That gives a bench that is:
+- driver-free
+- HLK-client-ready if desired
+- ssh-ready
 
-## Current code changes in worktree
-Modified files:
-- `driver-project/Driver/avshws/device.cpp`
-- `driver-project/Driver/avshws/device.h`
-- `driver-project/Driver/avshws/filter.cpp`
-- `driver-project/Driver/avshws/hwsim.cpp`
-- `driver-project/Driver/avshws/hwsim.h`
+## Key code and script changes already made
+### AVStream/driver side
+High-value driver fixes were already made in the AVStream stack, including:
+- repaired sample-delivery behavior so Chrome can open the device
+- event/object lifetime fixes
+- PnP/power cleanup hardening
+- stream pointer cleanup
+- frame timing/metadata fixes
+- stop/remove race fixes
+- pause/resume monotonicity fixes
 
-### High-value driver fixes already made
-1. Split PnP paths in `device.cpp`
-   - added more explicit stop/remove/surprise handling through `QuiesceHardware`, `PnpRemove`, `PnpSurpriseRemoval`
-2. Hardened filter/property access in `filter.cpp`
-   - size checks + guarded copies
-   - removed bad `ProbeForRead/Write` experiment after AVStream docs showed KS handler `Data` is already marshaled/system-addressed for this path
-3. Fixed frame upload teardown races in `hwsim.cpp`
-   - introduced staging buffer handoff
-   - stop path nulls/frees buffers safely
-4. Fixed event and buffer lifetime issues around stop/data interaction
-5. Reduced `kUserFrameStartupGraceInterrupts` from `1200` to `0`
-   - this was a major practical fix because the driver was spending too long on placeholder/startup behavior before switching to uploaded real window frames
+Do not assume those areas are perfect, but do assume the current repo state is the one that produced the real green proof.
 
-## Build state
-Driver was rebuilt successfully after the recent driver changes and restaged into `output`.
+### Hyper-V proof harness
+The proof harness was upgraded to:
+- restore `clean` before each proof run
+- verify clean preinstall state
+- use real Notepad window source by default
+- capture richer session metadata
+- reject synthetic proof mode in the real proof path
+- revert to `clean` after run
 
-Build command:
+Relevant scripts:
+- `scripts\hyperv-proof-chrome.ps1`
+- `scripts\hyperv-hold-webcam-session.ps1`
+- `scripts\guest-held-webcam-session.ps1`
+- `scripts\playwright-vm-webcam-proof.ps1`
+
+### Unified build/install scripts
+Relevant files:
+- `build-all.ps1`
+- `install-all.ps1`
+- `clean-output.ps1`
+- `tools\artifact-manifest.ps1`
+
+### Hyper-V HLK helper fix
+`scripts\hyperv-hlk-client.ps1` had a strict-mode/property-access bug on `DisplayName`.
+That was fixed by guarding property access before matching it.
+
+## Current file/worktree situation
+There are active repo changes related to:
+- unified build/install flow
+- HLK client helper
+- continuation docs
+- subproject docs
+
+Files known changed in the current worktree include:
+- `build-all.ps1`
+- `install-all.ps1`
+- `clean-output.ps1`
+- `scripts\hyperv-driver-loop.ps1`
+- `scripts\hyperv-proof-chrome.ps1`
+- `scripts\hyperv-hlk-client.ps1`
+- `tools\artifact-manifest.ps1`
+- `README.md`
+- `CONTRIBUTING.md`
+- `software-project\README.md`
+- `driver-project\README.md`
+- `implementation\continuation-prompt.md`
+- `implementation\driver-frame-path.md`
+
+Deleted old scripts:
+- `software-project\build.ps1`
+- `driver-project\build-driver.ps1`
+- `driver-project\Driver\avshws\install-driver.ps1`
+
+There are also untracked local items that were not part of this work and should not be touched blindly:
+- `build-all.bat`
+- `install.bat`
+- `output0\`
+
+## Verified artifacts and evidence
+### Functional proof artifacts
+- `output\playwright\vm-webcam-proof.json`
+- `output\playwright\vm-session-status.json`
+- `output\playwright\vm-webcam-proof.png`
+
+### Build/install confirmation artifacts
+- `output\hyperv-runs\20260502-165126\guest-driver-install.txt`
+- `output\hyperv-runs\20260502-165126\repro-result.json`
+
+### HLK client confirmation artifacts
+- `output\hyperv-hlk-client\20260502-170705\guest-hlk-client.json`
+- `output\hyperv-hlk-client\20260502-170705\guest-hlk-client-output.txt`
+
+### One non-blocking failure artifact
+After the successful guest install test, host-side artifact collection hit:
+- `output\hyperv-runs\20260502-165126\hyperv-collect.log`
+- error text: `Class not registered`
+
+That was a **post-install collection** problem, not an `install-all.ps1` failure.
+
+## Current diagnosis
+### What is no longer the main blocker
+- AVStream startup timeout is no longer the main story; proof already went green.
+- build/install fragmentation is no longer the main story; build/install is now unified and confirmed.
+- HLK controller/client discovery is no longer the main story; controller share and client install are confirmed.
+
+### What is the actual current blocker
+The biggest remaining bench-quality gap is:
+- `clean` is not yet ssh-ready
+
+The biggest remaining project-quality gap is:
+- move from proof-green to HLK execution and WHQL-style validation without regressing the proof path
+
+## Useful commands
+### Full build
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-all.ps1
+```
+
+### Driver-only iteration on the same build script
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build-all.ps1 -SkipSoftware
 ```
 
-## Current diagnosis of the webcam failure path
-### What already happened
-The proof harness previously reached guest Chrome and `webcam.html`.
-Browser enumerated the virtual camera, but one proof run failed with:
-- `chrome.AbortError`
-- page status: `AbortError - Timeout starting video source`
+### Install from staged output
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-all.ps1
+```
 
-Artifacts were written under `output\playwright`.
+### Real proof run
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\hyperv-proof-chrome.ps1 -GuestPasswordPlaintext x
+```
 
-### Very important nuance
-There are older screenshot artifacts showing the driver's placeholder frame. Those do **not** satisfy the user. The feed must be a real guest app window.
+### HLK client install to `driver-test`
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\hyperv-hlk-client.ps1 `
+  -VmName driver-test `
+  -GuestPasswordPlaintext x `
+  -ControllerSharePath "\\192.168.100.115\HLKInstall\Client\Setup.cmd" `
+  -ControllerUser administrator `
+  -ControllerPasswordPlaintext xxxxxx.1 `
+  -RestoreCleanFirst
+```
 
-### Strong current hypothesis
-The old startup grace of `1200` interrupts likely delayed the transition from placeholder frames to real uploaded window frames for roughly tens of seconds, long enough for Chrome to time out. That constant was reduced to `0`, but the proof run after that change was interrupted before results were confirmed.
+### Host-side share check for controller
+```powershell
+cmd.exe /c "net view \\192.168.100.115"
+cmd.exe /c "dir \\192.168.100.115\HLKInstall\Client"
+```
 
-## Useful existing scripts
-Already present in repo:
-- `scripts\hyperv-clean-checkpoint.ps1`
-- `scripts\hyperv-driver-loop.ps1`
-- `scripts\hyperv-proof-chrome.ps1`
-- `scripts\playwright-vm-webcam-proof.ps1`
-- `scripts\hyperv-hold-webcam-session.ps1`
-- `scripts\hyperv-hlk-client.ps1`
-- `scripts\hyperv-hlk-controller-vm.ps1`
+### Posh-SSH example
+```powershell
+$env:PSModulePath = "$HOME\Documents\WindowsPowerShell\Modules;$env:PSModulePath"
+Import-Module Posh-SSH -Force
+$cred = [pscredential]::new('Administrator',(ConvertTo-SecureString 'x' -AsPlainText -Force))
+$s = New-SSHSession -ComputerName 192.168.100.91 -Credential $cred -AcceptKey -ConnectionTimeout 30
+Invoke-SSHCommand -SSHSession $s -Command 'cmd /c "hostname & whoami"'
+Remove-SSHSession -SSHSession $s
+```
 
-### Key script intent
-- `hyperv-proof-chrome.ps1`: stages build, starts source window + VirtuaCam + Chrome, runs Playwright capture, writes attempt-state and research notes
-- `hyperv-driver-loop.ps1`: loop harness for install/repro/collect
-- `hyperv-clean-checkpoint.ps1`: helps enforce driver-free bench
+Only use that last command after re-validating that the restored guest is actually listening on port 22.
 
-## Latest audit pressure still worth acting on
-A later audit still flagged these classes of concern:
-1. property-buffer safety in `filter.cpp`
-2. too much work in DPC / `DISPATCH_LEVEL` paths in `hwsim.cpp`
-3. stop/pause spin-drain behavior
-4. upload buffer handoff correctness
-5. PnP stop/remove/surprise semantics
-6. capture sink / `KS_VIDEOINFOHEADER` lifetime
+## What to do next
+### Immediate next steps
+1. Refresh the `clean` checkpoint so it is both:
+   - driver-free
+   - ssh-ready
+2. Confirm `driver-test` can still run the real proof harness from that refreshed clean state.
+3. Open HLK Studio on `vhlk`.
+4. Confirm `driver-test` appears as enrolled client.
+5. Create or verify the machine pool and move `driver-test` into it.
+6. Start with the smallest safe HLK passes first:
+   - device fundamentals
+   - camera-related basics
+   - verifier-backed reliability tests only after confirming the exact pool/job selection
 
-Some of these have been partially addressed, but they should be re-reviewed skeptically, not assumed fixed.
+### Good sequencing
+Best order from here:
+1. refresh `clean`
+2. rerun proof once from refreshed `clean`
+3. confirm proof still green
+4. begin HLK jobs
+5. only then chase HLK failures one by one
 
-## HLK state and plan
-- Host-side HLK Studio bits were installed earlier from local media.
-- `vhlk` VM now exists as Windows Server 2019 controller candidate.
-- Do not jump into HLK as the first debugger while the basic functional proof is still failing.
-- Better order:
-  1. refresh `clean`
-  2. rerun functional proof on `driver-test`
-  3. if screenshot proof exists, move into verifier/stress
-  4. then wire HLK controller/client flow for reliability coverage
-
-## Immediate call to action
-1. Restore `driver-test` to old `clean`.
-2. Reapply current permissive SSH config on `driver-test`.
-3. Verify clean means:
-   - no `avshws` in driver store
-   - no `ROOT\AVSHWS` device
-4. Recreate checkpoint `clean` so it is both driver-free and ssh-ready.
-5. Rebuild driver if needed and confirm fresh `output` package.
-6. Run `scripts\hyperv-proof-chrome.ps1 -GuestPasswordPlaintext x` with current build.
-7. Use a simple real source window like `explorer.exe`.
-8. Check whether the `kUserFrameStartupGraceInterrupts = 0` change now allows Chrome to receive a real app window feed before timeout.
-9. If proof still fails, classify exact error and follow repeat-error rule.
-10. If same browser/capture error repeats twice, read PDFs/official docs before next rerun.
-
-## If proof still fails, inspect these artifacts first
+## If proof regresses
+Inspect first:
 - `output\playwright\vm-webcam-proof.json`
 - `output\playwright\vm-webcam-console.log`
 - `output\playwright\vm-session-status.json`
 - `output\playwright\hyperv-proof-chrome.log`
 - guest `virtuacam-runtime.log`
 - guest `virtuacam-process.log`
-- latest dump / event logs if VM crashes or PowerShell Direct dies
+- any dump / event log if VM crashes
 
-## If VM crashes again
-Treat PowerShell Direct loss or sudden reboot as BSOD.
-Then:
-1. collect dump + event logs immediately
-2. analyze exact bugcheck / faulting module
-3. map to verifier rule if present
-4. only then choose next code fix
+If the same failure repeats twice:
+1. stop rerunning
+2. read local PDFs first
+3. then use Microsoft docs / OSR
+4. change one thing only
 
-## Background-agent permission
-User granted permission to spawn background agents for bounded tasks.
-Good uses:
-- line-by-line audit against PDFs and OSR guidance
-- narrow research on repeated error classes
-- HLK matrix planning
-Do not use agents for the critical-path action that is needed immediately.
-
-## Constraints from user intent
-- Use caveman style in replies.
-- User wants action, not endless script-only work.
-- The end goal is the real Chrome screenshot proof in VM.
-- Do not claim success from placeholder frames.
-- If a Windows-specific error appears, PDFs first, TOC first, then official docs.
+## If HLK path fails
+Check in this order:
+1. can `driver-test` reach `\\192.168.100.115\HLKInstall\Client\Setup.cmd`
+2. is `HLKSvc` running on `driver-test`
+3. does HLK Studio on `vhlk` show the client
+4. did refreshing `clean` remove the client unexpectedly
+5. are PowerShell Direct failures just guest service timing, not actual install failures
 
 ## Short operator summary
 You are resuming from a state where:
-- SSH is now usable on both VMs via host `Posh-SSH` password sessions
-- `driver-test` current runtime is dirty and still has the driver installed
-- old `clean` checkpoint likely remains driver-free but predates SSH setup
-- most recent important code fix is the startup-grace change from `1200` to `0`
-- best next bet is to refresh `clean`, then rerun the proof harness and see whether real window frames finally reach Chrome in time
+- the AVStream virtual camera proof is already real and green
+- build/install flow is unified and confirmed
+- HLK controller share on `vhlk` is working
+- HLK client install on `driver-test` already succeeded from clean
+- the clean checkpoint still needs one important improvement: make it ssh-ready
+- best next move is **refresh clean, rerun proof once, then start HLK jobs**

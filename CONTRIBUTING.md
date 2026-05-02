@@ -98,7 +98,16 @@ Good issue or PR notes include what you tested and what you did not test.
 For build, install, or driver/runtime integration changes, include whether you ran:
 
 ```powershell
+.\scripts\hyperv-clean-validate.ps1 -GuestPasswordPlaintext <password>
 .\scripts\hyperv-proof-chrome.ps1 -GuestPasswordPlaintext <password>
+```
+
+For Hyper-V bench or HLK workflow changes, also include whether you ran:
+
+```powershell
+.\scripts\hyperv-clean-checkpoint.ps1 -GuestPasswordPlaintext <password> -ForceRefresh -EnableSsh
+.\scripts\hyperv-clean-validate.ps1 -GuestPasswordPlaintext <password> -RequireHlkClient
+.\scripts\hyperv-hlk-preflight.ps1 -GuestPasswordPlaintext <password> -ControllerName <controller>
 ```
 
 ## Pull requests

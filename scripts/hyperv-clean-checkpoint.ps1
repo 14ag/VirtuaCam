@@ -6,6 +6,9 @@ param(
     [System.Management.Automation.PSCredential]$GuestCredential,
     [string]$GuestPasswordPlaintext = "",
     [switch]$ForceRefresh,
+    [switch]$EnableSsh,
+    [ValidateSet("Password", "PasswordAndKey")][string]$SshAuthMode = "Password",
+    [string]$SshHostPublicKeyPath = "",
     [switch]$StartVmAfterCreate,
     [string]$ArtifactRoot = "",
     [string]$LogPath = ""
@@ -182,6 +185,26 @@ try {
 
         if ($pass2.DriverStillPresent -or $pass2.DeviceStillPresent) {
             Fail-Hv -Message "Guest cleanup did not remove avshws from the device/driver store. Refusing to create clean checkpoint." -LogPath $LogPath
+        }
+    }
+
+    if ($session) {
+        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+        $session = $null
+    }
+
+    if ($EnableSsh) {
+        Write-HvLog -Message ("Preparing SSH state in guest before checkpoint create (auth mode: {0})" -f $SshAuthMode) -LogPath $LogPath -Level STEP
+        $sshResult = & (Join-Path $PSScriptRoot "hyperv-enable-ssh.ps1") `
+            -VmName $VmName `
+            -GuestCredential $guestCred `
+            -AuthMode $SshAuthMode `
+            -HostPublicKeyPath $SshHostPublicKeyPath `
+            -LogPath (Join-Path $artifactDir "hyperv-enable-ssh.log") `
+            -ResultPath (Join-Path $artifactDir "guest-ssh-ready.json")
+
+        if (-not $sshResult -or -not $sshResult.GuestIp) {
+            Fail-Hv -Message "SSH preparation completed without guest IP result. Refusing to create checkpoint." -LogPath $LogPath
         }
     }
 

@@ -5,6 +5,9 @@ param(
     [string]$CheckpointName = "clean",
     [switch]$RestoreCleanFirst,
     [switch]$RefreshCleanCheckpoint,
+    [switch]$RefreshCleanEnableSsh,
+    [ValidateSet("Password", "PasswordAndKey")][string]$RefreshCleanSshAuthMode = "Password",
+    [string]$RefreshCleanSshHostPublicKeyPath = "",
     [string]$GuestUser = "Administrator",
     [System.Management.Automation.PSCredential]$GuestCredential,
     [string]$GuestPasswordPlaintext = "",
@@ -92,7 +95,10 @@ try {
 
             foreach ($root in $roots) {
                 Get-ItemProperty $root -ErrorAction SilentlyContinue |
-                    Where-Object { $_.DisplayName -match 'Hardware Lab Kit Client|HLK Client|Windows Driver Testing Framework|Windows Performance Toolkit|Application Verifier' } |
+                    Where-Object {
+                        $_.PSObject.Properties["DisplayName"] -and
+                        $_.DisplayName -match 'Hardware Lab Kit Client|HLK Client|Windows Driver Testing Framework|Windows Performance Toolkit|Application Verifier'
+                    } |
                     Select-Object DisplayName, DisplayVersion, Publisher
             }
         }
@@ -149,7 +155,8 @@ try {
             ExitCode        = $exitCode
             InstalledEntries = @(Get-HlkArpEntries)
             HlkServices     = @(Get-Service -ErrorAction SilentlyContinue | Where-Object {
-                $_.Name -match 'HLK|WTT' -or $_.DisplayName -match 'Hardware Lab Kit|Windows Driver Testing'
+                $_.Name -match 'HLK|WTT' -or
+                ($_.PSObject.Properties["DisplayName"] -and $_.DisplayName -match 'Hardware Lab Kit|Windows Driver Testing')
             } | Select-Object Name, DisplayName, Status, StartType)
             DriverResidueBefore = $beforeResidue
             DriverResidueAfter  = $afterResidue
@@ -172,13 +179,24 @@ finally {
 
 if ($RefreshCleanCheckpoint) {
     Write-HvLog -Message ("Refreshing checkpoint '{0}' after HLK client action." -f $CheckpointName) -LogPath $LogPath -Level STEP
-    & (Join-Path $PSScriptRoot "hyperv-clean-checkpoint.ps1") `
-        -VmName $VmName `
-        -CheckpointName $CheckpointName `
-        -GuestCredential $guestCred `
-        -ForceRefresh `
-        -ArtifactRoot (Join-Path $artifactDir "refresh-clean") `
-        -LogPath (Join-Path $artifactDir "refresh-clean.log") | Out-Null
+    $refreshArgs = @{
+        VmName = $VmName
+        CheckpointName = $CheckpointName
+        GuestCredential = $guestCred
+        ForceRefresh = $true
+        ArtifactRoot = (Join-Path $artifactDir "refresh-clean")
+        LogPath = (Join-Path $artifactDir "refresh-clean.log")
+    }
+
+    if ($RefreshCleanEnableSsh) {
+        $refreshArgs.EnableSsh = $true
+        $refreshArgs.SshAuthMode = $RefreshCleanSshAuthMode
+        if (-not [string]::IsNullOrWhiteSpace($RefreshCleanSshHostPublicKeyPath)) {
+            $refreshArgs.SshHostPublicKeyPath = $RefreshCleanSshHostPublicKeyPath
+        }
+    }
+
+    & (Join-Path $PSScriptRoot "hyperv-clean-checkpoint.ps1") @refreshArgs | Out-Null
 }
 
 [pscustomobject]@{

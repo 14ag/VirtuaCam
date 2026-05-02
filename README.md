@@ -83,6 +83,8 @@ Staged artifact names are centralized in `tools/artifact-manifest.ps1`, which is
 Use Hyper-V guest `driver-test` for crash repro, verifier, dump collection, and browser proof:
 
 ```powershell
+.\scripts\hyperv-clean-checkpoint.ps1 -GuestPasswordPlaintext <password> -ForceRefresh -EnableSsh
+.\scripts\hyperv-clean-validate.ps1 -GuestPasswordPlaintext <password>
 .\scripts\hyperv-proof-chrome.ps1 -GuestPasswordPlaintext <password>
 ```
 
@@ -91,10 +93,23 @@ Helper entry points:
 - `.\scripts\hyperv-driver-loop.ps1`
 - `.\scripts\hyperv-kd.ps1`
 - `.\scripts\hyperv-collect.ps1`
+- `.\scripts\hyperv-enable-ssh.ps1`
+- `.\scripts\hyperv-clean-validate.ps1`
 
 HLK client helper:
 
 - `.\scripts\hyperv-hlk-client.ps1`
+- `.\scripts\hyperv-hlk-preflight.ps1`
+
+Suggested bench order:
+
+1. refresh `clean` with `-EnableSsh`
+2. validate `clean` with `hyperv-clean-validate.ps1`
+3. rerun real proof with `hyperv-proof-chrome.ps1`
+4. install or confirm HLK client
+5. rerun `hyperv-clean-validate.ps1 -RequireHlkClient`
+6. run `hyperv-hlk-preflight.ps1`
+7. move `driver-test` into HLK Studio pool and start small batches first
 
 ## Runtime shape
 
