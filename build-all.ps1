@@ -77,19 +77,39 @@ function Get-X64CompilerPath {
 
 function Get-VcRedistX64Dir {
     $vswhere = Get-VsWherePath
-    if (-not $vswhere) { return $null }
+    $candidateRoots = New-Object System.Collections.Generic.List[string]
+    if ($vswhere) {
+        foreach ($args in @(
+            @("-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Redist.14.Latest", "-property", "installationPath"),
+            @("-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath")
+        )) {
+            $installationPath = & $vswhere @args
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($installationPath)) {
+                $candidateRoots.Add((Join-Path $installationPath "VC\Redist\MSVC"))
+            }
+        }
+    }
 
-    $installationPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Redist.14.Latest -property installationPath
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($installationPath)) { return $null }
+    foreach ($redistRoot in ($candidateRoots | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $redistRoot)) {
+            continue
+        }
 
-    $redistRoot = Join-Path $installationPath "VC\Redist\MSVC"
-    if (-not (Test-Path -LiteralPath $redistRoot)) { return $null }
+        $versionedDirs = Get-ChildItem -Path $redistRoot -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+(\.\d+)?$' } |
+            Sort-Object Name -Descending
 
-    $redistDir = Get-ChildItem -Path $redistRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
-    if (-not $redistDir) { return $null }
-
-    $crtDir = Join-Path $redistDir.FullName "x64\Microsoft.VC143.CRT"
-    if (Test-Path -LiteralPath $crtDir) { return $crtDir }
+        foreach ($redistDir in $versionedDirs) {
+            foreach ($crtDir in @(
+                (Join-Path $redistDir.FullName "x64\Microsoft.VC143.CRT"),
+                (Join-Path $redistDir.FullName "onecore\x64\Microsoft.VC143.CRT")
+            )) {
+                if (Test-Path -LiteralPath $crtDir) {
+                    return $crtDir
+                }
+            }
+        }
+    }
 
     return $null
 }
