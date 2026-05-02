@@ -173,6 +173,7 @@ function Invoke-NativeProcess {
 }
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
+. (Join-Path $scriptDir "..\tools\artifact-manifest.ps1")
 $solutionPath = Join-Path $scriptDir "Driver\\avshws\\avshws.sln"
 if (-not (Test-Path -LiteralPath $solutionPath)) { Fail "Driver solution not found: $solutionPath" }
 
@@ -254,25 +255,14 @@ Invoke-NativeProcess -FilePath $signtool -Arguments @(
     $catPath
 )
 
-foreach ($artifact in @(
-    "avshws.sys",
-    "avshws.inf",
-    "avshws.cat",
-    "VirtualCameraDriver-TestSign.cer",
-    "avshws.pdb"
-)) {
+foreach ($artifact in @((Get-VirtuaCamDriverArtifacts) + "avshws.pdb")) {
     $existing = Join-Path $out.Root $artifact
     if (Test-Path -LiteralPath $existing) {
         Remove-Item -LiteralPath $existing -Force
     }
 }
 
-foreach ($artifact in @(
-    "avshws.sys",
-    "avshws.inf",
-    "avshws.cat",
-    "VirtualCameraDriver-TestSign.cer"
-)) {
+foreach ($artifact in (Get-VirtuaCamDriverArtifacts)) {
     Copy-Item -LiteralPath (Join-Path $out.PackageTmp $artifact) -Destination (Join-Path $out.Root $artifact) -Force
 }
 

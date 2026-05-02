@@ -235,6 +235,7 @@ public static class AvshwsInstallerNative {
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $repoRoot = [System.IO.Path]::GetFullPath($scriptDir)
+. (Join-Path $repoRoot "tools\artifact-manifest.ps1")
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) { $OutputRoot = Join-Path $repoRoot "output" }
 $OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 
@@ -244,6 +245,8 @@ $logsDir = Join-Path $OutputRoot "logs"
 $logPath = Join-Path $logsDir "driver-install.log"
 
 $installDir = $OutputRoot
+$expectedArtifacts = Get-VirtuaCamInstallArtifacts
+
 $virtuaCamExe = Join-Path $installDir "VirtuaCam.exe"
 $processExe = Join-Path $installDir "VirtuaCamProcess.exe"
 $driverInf = Join-Path $OutputRoot "avshws.inf"
@@ -267,12 +270,13 @@ if ($Uninstall) {
 }
 
 Write-Step "Verify artifacts in output"
-foreach ($path in @($virtuaCamExe, $processExe, $driverInf, $driverSys, $driverCat)) {
+foreach ($name in $expectedArtifacts) {
+    $path = Join-Path $OutputRoot $name
     if (-not (Test-Path -LiteralPath $path)) {
-        Fail "Missing artifact in output: $path"
+        Fail "Missing staged artifact in output: $path"
     }
 }
-Write-Success "Artifacts present"
+Write-Success ("Artifacts present ({0})" -f ($expectedArtifacts -join ", "))
 
 Assert-Administrator
 $null = New-Item -ItemType Directory -Force -Path $logsDir

@@ -194,6 +194,7 @@ function Get-OrCreateTestCodeSigningCertificate {
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $repoRoot = [System.IO.Path]::GetFullPath($scriptDir)
+. (Join-Path $repoRoot "tools\artifact-manifest.ps1")
 $softwareDir = Join-Path $repoRoot "software-project"
 $softwareSrcDir = Join-Path $softwareDir "src"
 $softwareBuildDir = Join-Path $softwareDir "build"
@@ -299,19 +300,8 @@ if (-not $SkipSoftware) {
         }
     }
 
-    $softwareArtifacts = @(
-        "VirtuaCam.exe",
-        "VirtuaCamProcess.exe",
-        "DirectPortBroker.dll",
-        "DirectPortClient.dll",
-        "DirectPortConsumer.dll"
-    )
-
-    $vcRuntimeArtifacts = @(
-        "msvcp140.dll",
-        "vcruntime140.dll",
-        "vcruntime140_1.dll"
-    )
+    $softwareArtifacts = Get-VirtuaCamSoftwareArtifacts
+    $vcRuntimeArtifacts = Get-VirtuaCamRuntimeArtifacts
 
     foreach ($name in $softwareArtifacts) {
         $src = Join-Path $softwareArtifactDir $name
@@ -396,25 +386,14 @@ if (-not $SkipDriver) {
         $catPath
     )
 
-    foreach ($artifact in @(
-        "avshws.sys",
-        "avshws.inf",
-        "avshws.cat",
-        "VirtualCameraDriver-TestSign.cer",
-        "avshws.pdb"
-    )) {
+    foreach ($artifact in @((Get-VirtuaCamDriverArtifacts) + "avshws.pdb")) {
         $dst = Join-Path $OutputRoot $artifact
         if (Test-Path -LiteralPath $dst) {
             Remove-Item -LiteralPath $dst -Force
         }
     }
 
-    foreach ($artifact in @(
-        "avshws.sys",
-        "avshws.inf",
-        "avshws.cat",
-        "VirtualCameraDriver-TestSign.cer"
-    )) {
+    foreach ($artifact in (Get-VirtuaCamDriverArtifacts)) {
         Copy-Item -LiteralPath (Join-Path $driverPackageTmp $artifact) -Destination (Join-Path $OutputRoot $artifact) -Force
     }
     if (Test-Path -LiteralPath $driverPdb) {
@@ -427,22 +406,8 @@ if (-not $SkipDriver) {
 }
 
 Write-Step "Validate required artifacts"
-$requiredSoftware = @(
-    "VirtuaCam.exe",
-    "VirtuaCamProcess.exe",
-    "DirectPortBroker.dll",
-    "DirectPortClient.dll",
-    "DirectPortConsumer.dll",
-    "msvcp140.dll",
-    "vcruntime140.dll",
-    "vcruntime140_1.dll"
-)
-$requiredDriver = @(
-    "avshws.sys",
-    "avshws.inf",
-    "avshws.cat",
-    "VirtualCameraDriver-TestSign.cer"
-)
+$requiredSoftware = @((Get-VirtuaCamSoftwareArtifacts) + (Get-VirtuaCamRuntimeArtifacts))
+$requiredDriver = Get-VirtuaCamDriverArtifacts
 
 foreach ($name in $requiredSoftware) {
     if (-not $SkipSoftware -and -not (Test-Path -LiteralPath (Join-Path $OutputRoot $name))) {
