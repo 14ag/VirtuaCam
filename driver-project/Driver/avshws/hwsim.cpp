@@ -35,6 +35,7 @@ static const ULONG kSetDataRejectNotConnected = 3;
 static const ULONG kSetDataRejectNoSynth = 4;
 static const ULONG kSetDataRejectBadGeometry = 5;
 static const ULONG kSetDataRejectShortSource = 6;
+static const ULONG kSetDataRejectBusy = 7;
 static const ULONG kUserFrameStartupGraceInterrupts = 0;
 
 static NTSTATUS
@@ -53,6 +54,8 @@ MapSetDataRejectReasonToStatus(
         return STATUS_INVALID_BUFFER_SIZE;
     case kSetDataRejectShortSource:
         return STATUS_BUFFER_TOO_SMALL;
+    case kSetDataRejectBusy:
+        return STATUS_DEVICE_BUSY;
     default:
         return STATUS_UNSUCCESSFUL;
     }
@@ -915,7 +918,8 @@ Return Value:
     KeReleaseSpinLock(&m_FrameLock, Irql);
 
     while (InterlockedCompareExchange(&m_DpcActive, 0, 0) != 0 ||
-        InterlockedCompareExchange(&m_FrameWriteActive, 0, 0) != 0) {
+        InterlockedCompareExchange(&m_FrameWriteActive, 0, 0) != 0 ||
+        InterlockedCompareExchange(&m_FrameReadActive, 0, 0) != 0) {
         KeStallExecutionProcessor(50);
     }
 
@@ -1135,16 +1139,21 @@ CopyImageToStreamHeader (
     *BytesWritten = 0;
 
     PUCHAR buffer = reinterpret_cast<PUCHAR>(StreamHeader->Data);
-    if (!buffer || StreamHeader->FrameExtent == 0 || !m_ImageSynth || !m_SynthesisBuffer) {
+    if (!buffer || StreamHeader->FrameExtent == 0 || !m_ImageSynth) {
         m_LastFillStatus = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
         return STATUS_INVALID_PARAMETER;
     }
 
+    NTSTATUS status = STATUS_SUCCESS;
     HARDWARE_STATE hardwareState = HardwareStopped;
     ULONG width = 0;
     ULONG height = 0;
     ULONG imageSize = 0;
     ULONG bytesPerPixel = 0;
+    ULONG interruptTime = 0;
+    ULONG acceptedFrameCount = 0;
+    PUCHAR sourceFrame = NULL;
+    BOOLEAN framePinned = FALSE;
     KIRQL irql;
 
     KeAcquireSpinLock(&m_FrameLock, &irql);
@@ -1153,11 +1162,32 @@ CopyImageToStreamHeader (
     height = m_Height;
     imageSize = m_ImageSize;
     bytesPerPixel = m_ImageSynth ? static_cast<ULONG>(m_ImageSynth->GetBytesPerPixel()) : 0;
+    interruptTime = m_InterruptTime;
+    acceptedFrameCount = m_SetDataAcceptedCount;
+    if (hardwareState == HardwareRunning) {
+        const BOOLEAN useUploadedFrame =
+            (acceptedFrameCount > 0) &&
+            (interruptTime >= kUserFrameStartupGraceInterrupts);
+        sourceFrame = (useUploadedFrame && m_TemporaryBuffer)
+            ? m_TemporaryBuffer
+            : (m_DefaultFrameBuffer ? m_DefaultFrameBuffer : m_TemporaryBuffer);
+        if (sourceFrame) {
+            InterlockedIncrement(&m_FrameReadActive);
+            framePinned = TRUE;
+        }
+    }
     KeReleaseSpinLock(&m_FrameLock, irql);
 
-    if (hardwareState != HardwareRunning || width == 0 || height == 0 || imageSize == 0 || bytesPerPixel == 0) {
+    if (hardwareState != HardwareRunning ||
+        width == 0 ||
+        height == 0 ||
+        imageSize == 0 ||
+        bytesPerPixel == 0 ||
+        !framePinned ||
+        !sourceFrame) {
         m_LastFillStatus = static_cast<ULONG>(STATUS_DEVICE_NOT_READY);
-        return STATUS_DEVICE_NOT_READY;
+        status = STATUS_DEVICE_NOT_READY;
+        goto Exit;
     }
 
     LONG widthBytes = static_cast<LONG>(width * bytesPerPixel);
@@ -1169,7 +1199,8 @@ CopyImageToStreamHeader (
         if (frameInfo->lSurfacePitch != 0) {
             if (frameInfo->lSurfacePitch == LONG_MIN) {
                 m_LastFillStatus = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
-                return STATUS_INVALID_PARAMETER;
+                status = STATUS_INVALID_PARAMETER;
+                goto Exit;
             }
 
             bottomUp = (frameInfo->lSurfacePitch < 0);
@@ -1185,7 +1216,8 @@ CopyImageToStreamHeader (
         m_LastFillRequiredBytes = 0;
         m_LastFillBufferRemaining = StreamHeader->FrameExtent;
         m_LastFillStatus = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
-        return STATUS_INVALID_PARAMETER;
+        status = STATUS_INVALID_PARAMETER;
+        goto Exit;
     }
 
     ULONGLONG rowPitch = static_cast<ULONGLONG>(stride);
@@ -1198,7 +1230,8 @@ CopyImageToStreamHeader (
     if (requiredBytes > StreamHeader->FrameExtent) {
         m_LastFillBufferRemaining = StreamHeader->FrameExtent;
         m_LastFillStatus = static_cast<ULONG>(STATUS_INSUFFICIENT_RESOURCES);
-        return STATUS_INSUFFICIENT_RESOURCES;
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
     }
 
     PUCHAR destinationBase = buffer;
@@ -1206,7 +1239,7 @@ CopyImageToStreamHeader (
         destinationBase += rowPitch * (height - 1);
     }
 
-    PUCHAR source = m_SynthesisBuffer;
+    PUCHAR source = sourceFrame;
     for (ULONG y = 0; y < height; ++y) {
         PUCHAR destination =
             bottomUp ?
@@ -1222,7 +1255,14 @@ CopyImageToStreamHeader (
     m_LastFillBufferRemaining = 0;
     m_LastFillStatus = static_cast<ULONG>(STATUS_SUCCESS);
     *BytesWritten = imageSize;
-    return STATUS_SUCCESS;
+    status = STATUS_SUCCESS;
+
+Exit:
+    if (framePinned) {
+        InterlockedDecrement(&m_FrameReadActive);
+    }
+
+    return status;
 }
 
 /*************************************************/
@@ -1527,6 +1567,7 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     ULONG rejectReason = kSetDataRejectNone;
     BOOLEAN acceptedFrame = FALSE;
     NTSTATUS status = STATUS_SUCCESS;
+    BOOLEAN writerBusy = FALSE;
 
     KeAcquireSpinLock(&m_FrameLock, &irql);
     if (m_HardwareState != HardwareRunning) {
@@ -1537,6 +1578,9 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         rejectReason = kSetDataRejectNotConnected;
     } else if (!m_ImageSynth) {
         rejectReason = kSetDataRejectNoSynth;
+    } else if (m_FrameWriteActive != 0) {
+        rejectReason = kSetDataRejectBusy;
+        writerBusy = TRUE;
     } else {
         shouldWrite = TRUE;
         stagingBuffer = m_StagingBuffer;
@@ -1596,10 +1640,15 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 	    }
     }
 
+    while (InterlockedCompareExchange(&m_FrameReadActive, 0, 0) != 0) {
+        KeStallExecutionProcessor(50);
+    }
+
     KeAcquireSpinLock(&m_FrameLock, &irql);
     if (m_HardwareState == HardwareRunning &&
         m_TemporaryBuffer &&
-        m_StagingBuffer == stagingBuffer) {
+        m_StagingBuffer == stagingBuffer &&
+        InterlockedCompareExchange(&m_FrameReadActive, 0, 0) == 0) {
         m_StagingBuffer = m_TemporaryBuffer;
         m_TemporaryBuffer = stagingBuffer;
         if (m_ClientConnected) {
@@ -1607,7 +1656,10 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         }
         acceptedFrame = TRUE;
     } else {
-        rejectReason = kSetDataRejectNotRunning;
+        rejectReason =
+            (InterlockedCompareExchange(&m_FrameReadActive, 0, 0) != 0 || writerBusy)
+                ? kSetDataRejectBusy
+                : kSetDataRejectNotRunning;
     }
     KeReleaseSpinLock(&m_FrameLock, irql);
 
@@ -1652,6 +1704,16 @@ BOOLEAN CHardwareSimulation::IsClientConnected()
     connected = m_ClientConnected;
     KeReleaseSpinLock(&m_FrameLock, irql);
     return connected;
+}
+
+HARDWARE_STATE CHardwareSimulation::GetHardwareState()
+{
+    KIRQL irql;
+    HARDWARE_STATE hardwareState = HardwareStopped;
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    hardwareState = m_HardwareState;
+    KeReleaseSpinLock(&m_FrameLock, irql);
+    return hardwareState;
 }
 
 void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
