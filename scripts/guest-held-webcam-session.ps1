@@ -20,6 +20,20 @@ function Write-JsonFile {
     $Data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Join-TextOutput {
+    param([object[]]$InputObject)
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($InputObject)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $lines.Add([string]$item.ToString())
+    }
+
+    return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
+}
+
 function Get-BrowserPath {
     param([string]$RequestedBrowser)
 
@@ -40,16 +54,40 @@ function Get-BrowserPath {
 function Invoke-WithAttemptEnvironment {
     param(
         [Parameter(Mandatory = $true)][string]$AttemptValue,
-        [Parameter(Mandatory = $true)][scriptblock]$Action
+        [Parameter(Mandatory = $true)][scriptblock]$Action,
+        [hashtable]$AdditionalEnvironment = @{}
     )
 
     $oldAttempt = $env:VIRTUACAM_ATTEMPT_ID
     $hadAttempt = Test-Path Env:VIRTUACAM_ATTEMPT_ID
+    $savedEnvironment = @{}
+
+    foreach ($entry in $AdditionalEnvironment.GetEnumerator()) {
+        $name = [string]$entry.Key
+        $envPath = "Env:$name"
+        $savedEnvironment[$name] = [pscustomobject]@{
+            HadValue = (Test-Path $envPath)
+            Value = if (Test-Path $envPath) { (Get-Item $envPath).Value } else { "" }
+        }
+        Set-Item -Path $envPath -Value ([string]$entry.Value)
+    }
+
     $env:VIRTUACAM_ATTEMPT_ID = $AttemptValue
     try {
         & $Action
     }
     finally {
+        foreach ($entry in $savedEnvironment.GetEnumerator()) {
+            $name = [string]$entry.Key
+            $envPath = "Env:$name"
+            if ($entry.Value.HadValue) {
+                Set-Item -Path $envPath -Value ([string]$entry.Value.Value)
+            }
+            else {
+                Remove-Item $envPath -ErrorAction SilentlyContinue
+            }
+        }
+
         if ($hadAttempt) {
             $env:VIRTUACAM_ATTEMPT_ID = $oldAttempt
         }
@@ -213,10 +251,10 @@ function Get-TextTail {
     }
 
     if ([string]::IsNullOrWhiteSpace($EncodingName)) {
-        return Get-Content -LiteralPath $Path -Tail $Tail | Out-String
+        return Join-TextOutput @(Get-Content -LiteralPath $Path -Tail $Tail)
     }
 
-    return Get-Content -LiteralPath $Path -Encoding $EncodingName -Tail $Tail | Out-String
+    return Join-TextOutput @(Get-Content -LiteralPath $Path -Encoding $EncodingName -Tail $Tail)
 }
 
 function Write-GuestState {
@@ -527,19 +565,14 @@ try {
     if (Test-Path -LiteralPath $processExe) {
         $virtuaCamProcess = Invoke-WithAttemptEnvironment -AttemptValue $attemptId -Action {
             Start-Process -FilePath $processExe -WorkingDirectory $packageRoot -ArgumentList @("-debug") -WindowStyle Hidden -PassThru
+        } -AdditionalEnvironment @{
+            VIRTUACAM_STARTUP_ARGS = ("--source-window-hwnd {0}" -f $sourceWindowHwndText)
         }
     }
 
-    if (Test-Path -LiteralPath $runtimeExe) {
-        $virtuaCamRuntime = Invoke-WithAttemptEnvironment -AttemptValue $attemptId -Action {
-            Start-Process -FilePath $runtimeExe -WorkingDirectory $packageRoot -ArgumentList @("/startup", "-debug", "--source-window-hwnd", "$hwnd") -PassThru
-        }
-    }
-    else {
+    if (-not (Test-Path -LiteralPath $runtimeExe)) {
         throw "VirtuaCam.exe missing: $runtimeExe"
     }
-
-    Start-Sleep -Seconds 2
 
     if ($serveHttp) {
         Start-Process powershell.exe -ArgumentList @(
@@ -583,6 +616,17 @@ try {
         Start-Sleep -Milliseconds 250
         [void][NativeWindowOps]::SetForegroundWindow(([IntPtr][int64]$browserWindow.Hwnd))
     }
+
+    $runtimeDeadline = (Get-Date).AddSeconds(15)
+    do {
+        $runtimeCandidates = @(Get-Process -Name "VirtuaCam" -ErrorAction SilentlyContinue | Sort-Object StartTime -Descending)
+        if ($runtimeCandidates.Count -gt 0) {
+            $virtuaCamRuntime = $runtimeCandidates[0]
+            break
+        }
+
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $runtimeDeadline)
 
     Start-Sleep -Seconds 6
 

@@ -361,6 +361,7 @@ public:
 	void SetData(PVOID data, ULONG dataLength);
     void ConnectClient();
     void DisconnectClient();
+    NTSTATUS RegisterClientRequestEvent(HANDLE eventHandle, KPROCESSOR_MODE accessMode);
     void NotifyCameraState(BOOLEAN isRunning);
     void QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status);
 };

@@ -152,8 +152,9 @@ private:
     volatile LONG m_FrameWriteActive;
     BOOLEAN m_ClientConnected;
     LARGE_INTEGER m_LastFrameTime;
-    HANDLE m_ClientRequestEvent;
-    PKEVENT m_ClientRequestEventObject;
+    HANDLE m_NamedClientRequestEvent;
+    PKEVENT m_NamedClientRequestEventObject;
+    PKEVENT m_RegisteredClientRequestEventObject;
     ULONG m_LastFillStatus;
     ULONG m_LastFillStride;
     ULONG m_LastFillWidthBytes;
@@ -187,6 +188,11 @@ private:
 
     void
     ReleaseClientEventObject (
+        );
+
+    void
+    ReplaceRegisteredClientEventObject(
+        _In_opt_ PKEVENT eventObject
         );
 
 public:
@@ -323,6 +329,7 @@ public:
 	void SetData(PVOID data, ULONG dataLength);
     void SetClientConnected(BOOLEAN connected);
     BOOLEAN IsClientConnected();
+    NTSTATUS RegisterClientRequestEvent(HANDLE eventHandle, KPROCESSOR_MODE accessMode);
     void NotifyCameraState(BOOLEAN isRunning);
     void QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status);
 };

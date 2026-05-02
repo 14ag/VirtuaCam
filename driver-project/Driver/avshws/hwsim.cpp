@@ -383,12 +383,12 @@ Return Value:
 
     UNICODE_STRING eventName;
     RtlInitUnicodeString(&eventName, L"\\BaseNamedObjects\\VirtuaCamClientRequest");
-    m_ClientRequestEventObject = IoCreateNotificationEvent(&eventName, &m_ClientRequestEvent);
-    if (m_ClientRequestEventObject) {
-        ObReferenceObject(m_ClientRequestEventObject);
-        ZwClose(m_ClientRequestEvent);
-        m_ClientRequestEvent = NULL;
-        KeClearEvent(m_ClientRequestEventObject);
+    m_NamedClientRequestEventObject = IoCreateNotificationEvent(&eventName, &m_NamedClientRequestEvent);
+    if (m_NamedClientRequestEventObject) {
+        ObReferenceObject(m_NamedClientRequestEventObject);
+        ZwClose(m_NamedClientRequestEvent);
+        m_NamedClientRequestEvent = NULL;
+        KeClearEvent(m_NamedClientRequestEventObject);
     } else {
         DbgPrint("[avshws] IoCreateNotificationEvent failed in ctor sim=%p\n", this);
     }
@@ -404,7 +404,7 @@ CHardwareSimulation::
         m_TemporaryBuffer ||
         m_StagingBuffer ||
         m_DefaultFrameBuffer ||
-        m_ClientRequestEvent ||
+        m_NamedClientRequestEvent ||
         m_ScatterGatherMappingsQueued) {
         (void)Stop ();
     }
@@ -497,15 +497,73 @@ CHardwareSimulation::
 ReleaseClientEventObject (
     )
 {
-    if (m_ClientRequestEvent) {
-        ZwClose(m_ClientRequestEvent);
-        m_ClientRequestEvent = NULL;
+    if (m_NamedClientRequestEvent) {
+        ZwClose(m_NamedClientRequestEvent);
+        m_NamedClientRequestEvent = NULL;
     }
 
-    if (m_ClientRequestEventObject) {
-        ObDereferenceObject(m_ClientRequestEventObject);
-        m_ClientRequestEventObject = NULL;
+    if (m_RegisteredClientRequestEventObject) {
+        ObDereferenceObject(m_RegisteredClientRequestEventObject);
+        m_RegisteredClientRequestEventObject = NULL;
     }
+
+    if (m_NamedClientRequestEventObject) {
+        ObDereferenceObject(m_NamedClientRequestEventObject);
+        m_NamedClientRequestEventObject = NULL;
+    }
+}
+
+void
+CHardwareSimulation::
+ReplaceRegisteredClientEventObject(
+    _In_opt_ PKEVENT eventObject
+    )
+{
+    PKEVENT previousEventObject = NULL;
+    KIRQL irql;
+
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    previousEventObject = m_RegisteredClientRequestEventObject;
+    m_RegisteredClientRequestEventObject = eventObject;
+    KeReleaseSpinLock(&m_FrameLock, irql);
+
+    if (previousEventObject) {
+        ObDereferenceObject(previousEventObject);
+    }
+}
+
+NTSTATUS
+CHardwareSimulation::
+RegisterClientRequestEvent(
+    HANDLE eventHandle,
+    KPROCESSOR_MODE accessMode
+    )
+{
+    if (!eventHandle) {
+        return STATUS_INVALID_HANDLE;
+    }
+
+    PKEVENT eventObject = NULL;
+    NTSTATUS status = ObReferenceObjectByHandle(
+        eventHandle,
+        EVENT_MODIFY_STATE | SYNCHRONIZE,
+        *ExEventObjectType,
+        accessMode,
+        reinterpret_cast<PVOID*>(&eventObject),
+        NULL);
+    if (!NT_SUCCESS(status)) {
+        DbgPrint(
+            "[avshws] RegisterClientRequestEvent ObReferenceObjectByHandle failed status=0x%08X handle=%p accessMode=%lu\n",
+            status,
+            eventHandle,
+            (ULONG)accessMode);
+        return status;
+    }
+
+    KeClearEvent(eventObject);
+    ReplaceRegisteredClientEventObject(eventObject);
+    DbgPrint("[avshws] RegisterClientRequestEvent registered handle=%p event=%p\n", eventHandle, eventObject);
+    return STATUS_SUCCESS;
 }
 
 /*************************************************/
@@ -640,7 +698,7 @@ Return Value:
         }
     }
 
-    if (NT_SUCCESS(Status) && !m_ClientRequestEventObject) {
+    if (NT_SUCCESS(Status) && !m_NamedClientRequestEventObject) {
         DbgPrint("[avshws] HwSim::Start no client-request event; continuing without side-channel sim=%p\n", this);
     }
 
@@ -1460,23 +1518,34 @@ BOOLEAN CHardwareSimulation::IsClientConnected()
 
 void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
 {
-    PKEVENT clientRequestEventObject = NULL;
+    PKEVENT registeredClientRequestEventObject = NULL;
+    PKEVENT namedClientRequestEventObject = NULL;
     BOOLEAN clientConnected = FALSE;
     KIRQL irql;
 
     DbgPrint("[avshws] HwSim::NotifyCameraState running=%lu connected=%lu irql=%lu\n", (ULONG)isRunning, (ULONG)IsClientConnected(), (ULONG)KeGetCurrentIrql());
 
     KeAcquireSpinLock(&m_FrameLock, &irql);
-    clientRequestEventObject = m_ClientRequestEventObject;
+    registeredClientRequestEventObject = m_RegisteredClientRequestEventObject;
+    namedClientRequestEventObject = m_NamedClientRequestEventObject;
     clientConnected = m_ClientConnected;
     KeReleaseSpinLock(&m_FrameLock, irql);
 
     if (isRunning) {
-        if (clientRequestEventObject && !clientConnected) {
-            KeSetEvent(clientRequestEventObject, IO_NO_INCREMENT, FALSE);
+        if (!clientConnected) {
+            if (registeredClientRequestEventObject) {
+                KeSetEvent(registeredClientRequestEventObject, IO_NO_INCREMENT, FALSE);
+            } else if (namedClientRequestEventObject) {
+                KeSetEvent(namedClientRequestEventObject, IO_NO_INCREMENT, FALSE);
+            }
         }
-    } else if (clientRequestEventObject) {
-        KeClearEvent(clientRequestEventObject);
+    } else {
+        if (registeredClientRequestEventObject) {
+            KeClearEvent(registeredClientRequestEventObject);
+        }
+        if (namedClientRequestEventObject) {
+            KeClearEvent(namedClientRequestEventObject);
+        }
     }
 }
 

@@ -37,6 +37,80 @@ function Write-JsonFile {
     $Data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Join-TextOutput {
+    param([object[]]$InputObject)
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($InputObject)) {
+        if ($null -eq $item) {
+            continue
+        }
+        $lines.Add([string]$item.ToString())
+    }
+
+    return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
+}
+
+function Test-IsNestedPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$ParentPath,
+        [Parameter(Mandatory = $true)][string]$ChildPath
+    )
+
+    $parentFull = [System.IO.Path]::GetFullPath($ParentPath).TrimEnd('\')
+    $childFull = [System.IO.Path]::GetFullPath($ChildPath).TrimEnd('\')
+    if ($childFull.Length -le $parentFull.Length) {
+        return $false
+    }
+
+    return $childFull.StartsWith($parentFull + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function New-DriverPackageStage {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$ArtifactDirectory,
+        [Parameter(Mandatory = $true)][string]$AttemptId,
+        [Parameter(Mandatory = $true)][string]$LogFile
+    )
+
+    $stageParent = Join-Path $env:TEMP ("VirtuaCamProofStage-{0}-{1}" -f $AttemptId, ([guid]::NewGuid().ToString("N")))
+    $stagedSourceRoot = Join-Path $stageParent (Split-Path -Path $SourceRoot -Leaf)
+    $null = New-Item -ItemType Directory -Force -Path $stageParent
+
+    $robocopyArgs = @(
+        $SourceRoot,
+        $stagedSourceRoot,
+        "/E",
+        "/R:2",
+        "/W:1",
+        "/NFL",
+        "/NDL",
+        "/NJH",
+        "/NJS",
+        "/NP"
+    )
+    if (Test-IsNestedPath -ParentPath $SourceRoot -ChildPath $ArtifactDirectory) {
+        Write-HvLog -Message ("Preparing staged driver package and excluding artifact subtree: {0}" -f $ArtifactDirectory) -LogPath $LogFile -Level STEP
+        $robocopyArgs += @("/XD", $ArtifactDirectory)
+    }
+    else {
+        Write-HvLog -Message ("Preparing staged driver package from {0}" -f $SourceRoot) -LogPath $LogFile -Level STEP
+    }
+
+    & robocopy @robocopyArgs | Out-Null
+    $robocopyExit = $LASTEXITCODE
+    if ($robocopyExit -ge 8) {
+        throw "driver.StageCopyFailed"
+    }
+
+    return [pscustomobject]@{
+        StageParent = $stageParent
+        StagedSourceRoot = $stagedSourceRoot
+        RobocopyExitCode = $robocopyExit
+    }
+}
+
 function New-ResearchNote {
     param(
         [Parameter(Mandatory = $true)][string]$ErrorClass,
@@ -277,8 +351,22 @@ function Get-GuestDriverResidue {
     )
 
     return Invoke-HvGuestCommand -Session $Session -LogPath $LogFile -ScriptBlock {
-        $driverEnum = pnputil /enum-drivers 2>&1 | Out-String
-        $deviceEnum = pnputil /enum-devices /instanceid ROOT\AVSHWS\0000 2>&1 | Out-String
+        function Join-GuestTextOutput {
+            param([object[]]$InputObject)
+
+            $lines = New-Object System.Collections.Generic.List[string]
+            foreach ($item in @($InputObject)) {
+                if ($null -eq $item) {
+                    continue
+                }
+                $lines.Add([string]$item.ToString())
+            }
+
+            return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
+        }
+
+        $driverEnum = Join-GuestTextOutput @(pnputil /enum-drivers 2>&1)
+        $deviceEnum = Join-GuestTextOutput @(pnputil /enum-devices /instanceid ROOT\AVSHWS\0000 2>&1)
 
         [pscustomobject]@{
             DriverStoreHit = [bool](
@@ -312,8 +400,28 @@ function Get-GuestConsoleState {
     )
 
     return Invoke-HvGuestCommand -Session $Session -LogPath $LogFile -ScriptBlock {
-        $quserText = (cmd.exe /c quser 2>&1 | Out-String)
-        $consoleLine = ($quserText -split "`r?`n" | Where-Object { $_ -match '\bconsole\b' } | Select-Object -First 1)
+        function Join-GuestTextOutput {
+            param([object[]]$InputObject)
+
+            $lines = New-Object System.Collections.Generic.List[string]
+            foreach ($item in @($InputObject)) {
+                if ($null -eq $item) {
+                    continue
+                }
+                $lines.Add([string]$item.ToString())
+            }
+
+            return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
+        }
+
+        $quserText = Join-GuestTextOutput @(cmd.exe /c quser 2>&1)
+        $consoleLine = $null
+        foreach ($line in ($quserText -split "`r?`n")) {
+            if ($line -match '\bconsole\b') {
+                $consoleLine = $line
+                break
+            }
+        }
         $consoleUser = ""
         if ($consoleLine) {
             $parts = ($consoleLine -replace '^>', '').Trim() -split '\s+'
@@ -358,8 +466,10 @@ function Test-GuestConsoleReady {
 
 function Wait-ForGuestInteractiveDesktop {
     param(
-        [Parameter(Mandatory = $true)][System.Management.Automation.Runspaces.PSSession]$Session,
+        [Parameter(Mandatory = $true)][ref]$SessionRef,
         [Parameter(Mandatory = $true)][string]$LogFile,
+        [string]$VmName = "",
+        [System.Management.Automation.PSCredential]$Credential,
         [string]$ExpectedUser = "",
         [int]$TimeoutSeconds = 60,
         [int]$PollSeconds = 5
@@ -368,7 +478,30 @@ function Wait-ForGuestInteractiveDesktop {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $lastState = $null
     do {
-        $lastState = Get-GuestConsoleState -Session $Session -LogFile $LogFile
+        try {
+            $lastState = Get-GuestConsoleState -Session $SessionRef.Value -LogFile $LogFile
+        }
+        catch {
+            if ([string]::IsNullOrWhiteSpace($VmName) -or $null -eq $Credential) {
+                throw
+            }
+
+            Write-HvLog -Message ("Desktop probe lost session; attempting recovery: {0}" -f $_.Exception.Message) -LogPath $LogFile -Level WARN
+            if ($SessionRef.Value) {
+                Remove-PSSession -Session $SessionRef.Value -ErrorAction SilentlyContinue
+                $SessionRef.Value = $null
+            }
+
+            $recoveredSession = Wait-ForGuestRecovery -VmName $VmName -Credential $Credential -LogFile $LogFile -TimeoutSeconds ([Math]::Max(30, [Math]::Min(120, $PollSeconds * 6)))
+            if (-not $recoveredSession) {
+                throw
+            }
+
+            $SessionRef.Value = $recoveredSession
+            Start-Sleep -Seconds $PollSeconds
+            continue
+        }
+
         if (Test-GuestConsoleReady -State $lastState -ExpectedUser $ExpectedUser) {
             return $lastState
         }
@@ -492,6 +625,7 @@ $guestInstallDriver = Join-Path $guestScriptsRoot "install-driver.ps1"
 $guestWebcamHtml = Join-Path $guestRoot "webcam.html"
 $session = $null
 $holdProc = $null
+$driverPackageStage = $null
 $runSucceeded = $false
 $attemptChange = "browser=$Browser; verifier=$([bool]$EnableVerifier); source=Notepad; checkpoint=$CheckpointName; args=hold-defaults --force-directshow $($BrowserExtraArgs -join ' ')"
 $guestCred = Get-HvGuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
@@ -530,7 +664,7 @@ try {
         AutoLogon = $null
         Final = $null
     }
-    $consoleStateRecord.Initial = Wait-ForGuestInteractiveDesktop -Session $session -LogFile $LogPath -ExpectedUser $GuestUser -TimeoutSeconds 30 -PollSeconds 5
+    $consoleStateRecord.Initial = Wait-ForGuestInteractiveDesktop -SessionRef ([ref]$session) -LogFile $LogPath -VmName $VmName -Credential $guestCred -ExpectedUser $GuestUser -TimeoutSeconds 30 -PollSeconds 5
     $consoleStateRecord.Final = $consoleStateRecord.Initial
 
     if (-not (Test-GuestConsoleReady -State $consoleStateRecord.Initial -ExpectedUser $GuestUser)) {
@@ -543,7 +677,7 @@ try {
         $consoleStateRecord.AutoLogon = Enable-GuestAutoLogon -Session $session -LogFile $LogPath -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
         Restart-HvGuest -Session $session -LogPath $LogPath
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -LogPath $LogPath
-        $consoleStateRecord.Final = Wait-ForGuestInteractiveDesktop -Session $session -LogFile $LogPath -ExpectedUser $GuestUser -TimeoutSeconds 120 -PollSeconds 5
+        $consoleStateRecord.Final = Wait-ForGuestInteractiveDesktop -SessionRef ([ref]$session) -LogFile $LogPath -VmName $VmName -Credential $guestCred -ExpectedUser $GuestUser -TimeoutSeconds 120 -PollSeconds 5
     }
 
     Write-JsonFile -Path $consoleStatePath -Data ([pscustomobject]$consoleStateRecord)
@@ -554,7 +688,21 @@ try {
     $baseline = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
         param($BrowserName)
 
-        $bcd = & "$env:WINDIR\System32\bcdedit.exe" /enum "{current}" 2>&1 | Out-String
+        function Join-GuestTextOutput {
+            param([object[]]$InputObject)
+
+            $lines = New-Object System.Collections.Generic.List[string]
+            foreach ($item in @($InputObject)) {
+                if ($null -eq $item) {
+                    continue
+                }
+                $lines.Add([string]$item.ToString())
+            }
+
+            return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
+        }
+
+        $bcd = Join-GuestTextOutput @(& "$env:WINDIR\System32\bcdedit.exe" /enum "{current}" 2>&1)
         $testSigningOn = $bcd -match '(?im)^\s*testsigning\s+Yes\b'
         if (-not $testSigningOn) {
             throw "TESTSIGNING is OFF inside guest."
@@ -596,7 +744,8 @@ try {
         $null = New-Item -ItemType Directory -Force -Path $Root, $ScriptsRoot
     } -ArgumentList $guestRoot, $guestScriptsRoot | Out-Null
 
-    Copy-HvToGuest -Session $session -LocalPath $driverPackageRootPath -GuestPath $guestRoot -Recurse -LogPath $LogPath
+    $driverPackageStage = New-DriverPackageStage -SourceRoot $driverPackageRootPath -ArtifactDirectory $artifactDir -AttemptId "$nextAttemptId" -LogFile $LogPath
+    Copy-HvToGuest -Session $session -LocalPath $driverPackageStage.StagedSourceRoot -GuestPath $guestRoot -Recurse -LogPath $LogPath
     Copy-HvToGuest -Session $session -LocalPath $installDriverScript -GuestPath $guestScriptsRoot -LogPath $LogPath
     Copy-HvToGuest -Session $session -LocalPath $webcamHtml -GuestPath $guestRoot -LogPath $LogPath
 
@@ -631,8 +780,24 @@ try {
     Write-HvLog -Message "Installing driver inside guest." -LogPath $LogPath -Level STEP
     $installResult = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
         param($InstallScript, $PackageRoot)
+
+        function Join-GuestTextOutput {
+            param([object[]]$InputObject)
+
+            $lines = New-Object System.Collections.Generic.List[string]
+            foreach ($item in @($InputObject)) {
+                if ($null -eq $item) {
+                    continue
+                }
+                $lines.Add([string]$item.ToString())
+            }
+
+            return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
+        }
+
         $logFile = Join-Path $PackageRoot "logs\driver-install.log"
-        $output = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript -PackageRoot $PackageRoot -SkipCertificateImport -LogPath $logFile 2>&1 | Out-String
+        $outputLines = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript -PackageRoot $PackageRoot -SkipCertificateImport -LogPath $logFile 2>&1
+        $output = Join-GuestTextOutput @($outputLines)
         [pscustomobject]@{
             Output = $output
             ExitCode = $LASTEXITCODE
@@ -662,17 +827,36 @@ try {
         Write-HvLog -Message ("{0}; restarting guest before proof." -f $rebootReason) -LogPath $LogPath -Level STEP
         Restart-HvGuest -Session $session -LogPath $LogPath
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -LogPath $LogPath
-        $postInstallConsoleState = Wait-ForGuestInteractiveDesktop -Session $session -LogFile $LogPath -ExpectedUser $GuestUser -TimeoutSeconds 120 -PollSeconds 5
+        $postInstallConsoleState = Wait-ForGuestInteractiveDesktop -SessionRef ([ref]$session) -LogFile $LogPath -VmName $VmName -Credential $guestCred -ExpectedUser $GuestUser -TimeoutSeconds 120 -PollSeconds 5
         if (-not (Test-GuestConsoleReady -State $postInstallConsoleState -ExpectedUser $GuestUser)) {
             throw "guest.NoInteractiveDesktop"
         }
+
+        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+        $session = $null
+        Start-Sleep -Seconds 5
+        $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 180 -LogPath $LogPath
     }
 
     if ($EnableVerifier) {
         Write-HvLog -Message "Enabling Driver Verifier for avshws.sys." -LogPath $LogPath -Level STEP
         $verifierOutput = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
+            function Join-GuestTextOutput {
+                param([object[]]$InputObject)
+
+                $lines = New-Object System.Collections.Generic.List[string]
+                foreach ($item in @($InputObject)) {
+                    if ($null -eq $item) {
+                        continue
+                    }
+                    $lines.Add([string]$item.ToString())
+                }
+
+                return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
+            }
+
             verifier /reset 2>&1 | Out-Null
-            verifier /standard /driver avshws.sys 2>&1 | Out-String
+            Join-GuestTextOutput @(verifier /standard /driver avshws.sys 2>&1)
         }
         Set-Content -LiteralPath (Join-Path $artifactDir "verifier-enable.txt") -Value $verifierOutput
         Restart-HvGuest -Session $session -LogPath $LogPath
@@ -797,6 +981,9 @@ finally {
 
     if ($session) {
         Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+    }
+    if ($driverPackageStage -and (Test-Path -LiteralPath $driverPackageStage.StageParent)) {
+        Remove-Item -LiteralPath $driverPackageStage.StageParent -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     if ($RevertAfterRun) {

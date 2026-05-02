@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Process.h"
+#include "DriverBridge.h"
 #include "Resource.h"
 #include "RuntimeLog.h"
 #include "Tools.h"
@@ -661,12 +662,23 @@ namespace BuiltInCaptureProducer
         std::wstring exePath = GetVirtuaCamExePathFromRegistryOrDefault();
         const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
         const bool enableDebugLogging = HasArg(cmdLine, L"-debug");
+        std::wstring startupArgs = enableDebugLogging ? L"/startup -debug" : L"/startup";
+
+        wchar_t extraArgs[1024] = {};
+        const DWORD extraArgsLength = GetEnvironmentVariableW(
+            L"VIRTUACAM_STARTUP_ARGS",
+            extraArgs,
+            ARRAYSIZE(extraArgs));
+        if (extraArgsLength > 0 && extraArgsLength < ARRAYSIZE(extraArgs)) {
+            startupArgs += L" ";
+            startupArgs += extraArgs;
+        }
 
         SHELLEXECUTEINFOW sei = {};
         sei.cbSize = sizeof(sei);
         sei.fMask = SEE_MASK_NOCLOSEPROCESS;
         sei.lpFile = exePath.c_str();
-        sei.lpParameters = enableDebugLogging ? L"/startup -debug" : L"/startup";
+        sei.lpParameters = startupArgs.c_str();
         sei.nShow = SW_HIDE;
         if (!ShellExecuteExW(&sei)) {
             VirtuaCamLog::LogWin32(std::format(L"ShellExecuteExW failed for {}", exePath), GetLastError());
@@ -689,11 +701,43 @@ namespace BuiltInCaptureProducer
         return OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kClientRequestEventName);
     }
 
+    HANDLE CreateRegisteredClientRequestEventHandle()
+    {
+        HANDLE eventHandle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!eventHandle) {
+            VirtuaCamLog::LogWin32(L"CreateEventW failed for watcher request event", GetLastError());
+            return nullptr;
+        }
+
+        DriverBridge driverBridge;
+        HRESULT hr = driverBridge.Initialize();
+        if (FAILED(hr)) {
+            VirtuaCamLog::LogHr(L"Watcher DriverBridge::Initialize failed", hr);
+            CloseHandle(eventHandle);
+            return nullptr;
+        }
+
+        hr = driverBridge.RegisterClientRequestEvent(eventHandle);
+        if (FAILED(hr)) {
+            VirtuaCamLog::LogHr(L"Watcher DriverBridge::RegisterClientRequestEvent failed", hr);
+            CloseHandle(eventHandle);
+            return nullptr;
+        }
+
+        VirtuaCamLog::LogLine(std::format(
+            L"Watcher registered session-local client request event handle=0x{:X}",
+            static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(eventHandle))));
+        return eventHandle;
+    }
+
     DWORD WINAPI WatcherThreadProc(LPVOID)
     {
         int launchFailCount = 0;
         while (true) {
-            HANDLE requestEvent = OpenClientRequestEventHandle();
+            HANDLE requestEvent = CreateRegisteredClientRequestEventHandle();
+            if (!requestEvent) {
+                requestEvent = OpenClientRequestEventHandle();
+            }
             if (!requestEvent) {
                 Sleep(kWatcherOpenRetryMs);
                 continue;
