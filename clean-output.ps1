@@ -1,7 +1,5 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "High")]
-param(
-    [string]$OutputRoot = ""
-)
+param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -9,7 +7,7 @@ $ErrorActionPreference = "Stop"
 function Fail { param([string]$Message) Write-Host $Message -ForegroundColor Red; exit 1 }
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
-if ([string]::IsNullOrWhiteSpace($OutputRoot)) { $OutputRoot = Join-Path $scriptDir "output" }
+$OutputRoot = Join-Path $scriptDir "output"
 
 $resolvedScriptDir = (Resolve-Path -LiteralPath $scriptDir).Path.TrimEnd("\\/")
 $resolvedOutputRoot = $OutputRoot
@@ -28,4 +26,3 @@ if (Test-Path -LiteralPath $OutputRoot) {
 }
 
 Write-Host "Cleaned: $OutputRoot"
-
