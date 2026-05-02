@@ -14,15 +14,32 @@ Windows virtual camera driver using AVStream minidriver (avshws). Frame sink for
 - **Logic**: User-mode app pushes frame buffer via `Set` property. Driver copies to output pin.
 
 ## Build
-Use `build-driver.ps1` (requires WDK + VS 2022).
-Artifacts land in `v2/output/driver/package`.
+Use the repository root build script:
+
+```powershell
+.\build-all.ps1
+```
+
+For driver-only iteration, still use the same script:
+
+```powershell
+.\build-all.ps1 -SkipSoftware
+```
+
+Staged artifacts land in `v2/output/`.
 
 ## Installation
-1. Enable testsigning: `bcdedit.exe -set TESTSIGNING ON` (requires reboot).
-2. Install certificate: Import `VirtualCameraDriver-TestSign.cer` to Trusted Root Certification Authorities.
-3. Install driver:
-   - Command: `pnputil /add-driver avshws.inf /install`
-   - UI: `hdwwiz.exe` (Add legacy hardware).
+Use the repository root install script:
+
+```powershell
+.\install-all.ps1
+```
+
+If needed first:
+
+```powershell
+bcdedit.exe /set testsigning on
+```
 
 
 ## UserMode Software

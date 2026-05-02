@@ -214,7 +214,7 @@ They are no longer needed in the direct-driver path.
 
 ## Phase 7 — End-to-End Smoke Test
 
-- [ ] 7.1 Install driver: run `install-all.ps1` (or `install-driver.ps1`).
+- [ ] 7.1 Install driver: run `install-all.ps1`.
       Confirm `ROOT\AVSHWS\0000` appears in Device Manager under Cameras.
 
 - [ ] 7.2 Launch `VirtuaCam.exe` as admin. Confirm:

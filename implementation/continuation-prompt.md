@@ -157,7 +157,7 @@ Driver was rebuilt successfully after the recent driver changes and restaged int
 
 Build command:
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\driver-project\build-driver.ps1
+powershell -ExecutionPolicy Bypass -File .\build-all.ps1 -SkipSoftware
 ```
 
 ## Current diagnosis of the webcam failure path

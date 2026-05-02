@@ -56,8 +56,9 @@ Common commands:
 
 ```powershell
 .\build-all.ps1
-.\software-project\build.ps1
-.\driver-project\build-driver.ps1
+.\build-all.ps1 -Clean
+.\build-all.ps1 -SkipDriver
+.\build-all.ps1 -SkipSoftware
 ```
 
 Installer command:
@@ -66,7 +67,11 @@ Installer command:
 .\install-all.ps1
 ```
 
-Use the root scripts for normal end-to-end work. Component-only build scripts are useful during focused development, but `install-all.ps1` expects one complete staged package in `output/` or another shared `-OutputRoot`.
+There is one build script, one install script, and one staged package path:
+
+- `build-all.ps1`
+- `install-all.ps1`
+- `output/`
 
 If you add, remove, or rename staged binaries, update `tools/artifact-manifest.ps1` so build and install stay aligned.
 
