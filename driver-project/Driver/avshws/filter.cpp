@@ -182,10 +182,10 @@ SetData(
 		DbgPrint("[avshws] SetData frame=%ld len=%lu rawLen=%lu width=%lu height=%lu irql=%lu\n", n, dataLength, bufferLength, driverStatus.Width, driverStatus.Height, (ULONG)KeGetCurrentIrql());
 	}
 
-	device->SetData(frameCopy, dataLength);
+    NTSTATUS status = device->SetData(frameCopy, dataLength);
     ExFreePoolWithTag(frameCopy, AVSHWS_POOLTAG);
 
-	return STATUS_SUCCESS;
+	return status;
 }
 
 // Set VIRTUACAM_PROP_CONNECT.

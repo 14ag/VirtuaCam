@@ -129,22 +129,23 @@ DWORD LaunchProducer(const std::wstring& key, const std::wstring& args)
     std::filesystem::path childExe = std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"VirtuaCamProcess.exe";
     std::wstring exePath = childExe.wstring();
 
-    std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, args);
+    std::wstring argsWithBroker = std::format(L"{} --broker-pid {}", args, GetCurrentProcessId());
+    std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, argsWithBroker);
     if (g_debugLoggingEnabled) {
         cmdLine += L" -debug";
     }
-    VirtuaCamLog::LogLine(std::format(L"LaunchProducer request: key={} args={}", key, args));
+    VirtuaCamLog::LogLine(std::format(L"LaunchProducer request: key={} args={}", key, argsWithBroker));
     std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
     cmdLineMutable.push_back(L'\0');
 
     if (CreateProcessW(exePath.c_str(), cmdLineMutable.data(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
     {
         g_producerProcesses[key] = pi;
-        VirtuaCamLog::LogLine(std::format(L"LaunchProducer success: key={} pid={} args={}", key, pi.dwProcessId, args));
+        VirtuaCamLog::LogLine(std::format(L"LaunchProducer success: key={} pid={} args={}", key, pi.dwProcessId, argsWithBroker));
         Sleep(200);
         return pi.dwProcessId;
     }
-    VirtuaCamLog::LogLine(std::format(L"LaunchProducer failed: key={} args={}", key, args));
+    VirtuaCamLog::LogLine(std::format(L"LaunchProducer failed: key={} args={}", key, argsWithBroker));
     VirtuaCamLog::LogWin32(std::format(L"CreateProcessW failed: {}", exePath), GetLastError());
     return 0;
 }
@@ -390,6 +391,7 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
     static bool s_loggedNullTexture = false;
     static bool s_loggedFirstTexture = false;
     static bool s_loggedWaitingForBroker = false;
+    static bool s_loggedBrokerDropAfterUpload = false;
     static bool s_uploadedWhileConnected = false;
 
     if (!brokerFrameRendered || !g_driverBridge || !g_driverBridge->IsActive() || !g_pfnGetSharedTexture) {
@@ -397,21 +399,23 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
     }
 
     if (brokerState != BrokerState::Connected) {
-        if (s_uploadedWhileConnected) {
-            const HRESULT hrDisconnect = g_driverBridge->Disconnect();
-            if (FAILED(hrDisconnect) && hrDisconnect != S_FALSE) {
-                VirtuaCamLog::LogHr(L"DriverBridge::Disconnect while broker not connected failed", hrDisconnect);
+        if (!s_uploadedWhileConnected) {
+            if (!s_loggedWaitingForBroker) {
+                VirtuaCamLog::LogLine(L"Delaying DriverBridge upload until broker reports Connected");
+                s_loggedWaitingForBroker = true;
             }
-            s_uploadedWhileConnected = false;
+            return;
         }
-        if (!s_loggedWaitingForBroker) {
-            VirtuaCamLog::LogLine(L"Delaying DriverBridge upload until broker reports Connected");
-            s_loggedWaitingForBroker = true;
+        if (!s_loggedBrokerDropAfterUpload) {
+            VirtuaCamLog::LogLine(L"Broker left Connected; keeping last good driver feed alive");
+            s_loggedBrokerDropAfterUpload = true;
         }
-        return;
     }
 
     s_loggedWaitingForBroker = false;
+    if (brokerState == BrokerState::Connected) {
+        s_loggedBrokerDropAfterUpload = false;
+    }
 
     wil::com_ptr_nothrow<ID3D11Texture2D> sharedTexture;
     sharedTexture.attach(g_pfnGetSharedTexture());

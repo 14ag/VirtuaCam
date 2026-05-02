@@ -58,6 +58,7 @@ void Discovery::DiscoverStreams() {
                         stream.manifestName = manifestName;
                         stream.textureName = pView->textureName;
                         stream.fenceName = pView->fenceName;
+                        stream.sharedFenceHandleValue = pView->sharedFenceHandleValue;
                         stream.adapterLuid = pView->adapterLuid;
                         pImpl->m_discoveredStreams.push_back(stream);
                     }

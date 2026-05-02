@@ -18,6 +18,7 @@ namespace VirtuaCam {
         std::wstring manifestName;
         std::wstring textureName;
         std::wstring fenceName;
+        UINT64 sharedFenceHandleValue = 0;
         LUID adapterLuid;
     };
 

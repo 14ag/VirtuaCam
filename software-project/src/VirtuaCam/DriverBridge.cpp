@@ -25,6 +25,9 @@ namespace
     constexpr ULONG kDriverPropertyIdDisconnect = 2;
     constexpr ULONG kDriverPropertyIdStatus = 3;
     constexpr ULONG kDriverPropertyIdRegisterEvent = 4;
+    constexpr ULONG kDriverHardwareStateRunning = 2;
+    constexpr ULONG kDriverSetDataRejectNotRunning = 1;
+    constexpr ULONG kDriverSetDataRejectNotConnected = 3;
     const GUID kVideoCameraCategory = { 0xe5323777, 0xf976, 0x4f5b, { 0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44 } };
     const GUID kCaptureCategory = { 0x65e8773d, 0x8f56, 0x11d0, { 0xa3, 0xb9, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96 } };
     constexpr const wchar_t* kVideoCameraCategoryGuid = L"{e5323777-f976-4f5b-9b55-b94699c46e44}";
@@ -73,6 +76,20 @@ namespace
         ULONGLONG CompletedFrameCount = 0;
         ULONGLONG LastFrameTime100ns = 0;
     };
+
+    bool IsWarmupRejectStatus(const DriverStatusSnapshot& status)
+    {
+        if (status.SetDataAcceptedCount != 0) {
+            return false;
+        }
+
+        if (status.HardwareState != kDriverHardwareStateRunning) {
+            return true;
+        }
+
+        return status.LastSetDataReason == kDriverSetDataRejectNotRunning ||
+            status.LastSetDataReason == kDriverSetDataRejectNotConnected;
+    }
 
     const char* kVertexShaderSource = R"(
 struct VS_OUTPUT { float4 Pos : SV_POSITION; float2 Tex : TEXCOORD; };
@@ -475,6 +492,31 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
 
     HRESULT hr = SetDriverProperty(kDriverPropertyIdFrame, m_rgbBuffer.data(), static_cast<ULONG>(m_rgbBuffer.size()));
     if (FAILED(hr)) {
+        DriverStatusSnapshot status = {};
+        DWORD returned = 0;
+        if (SUCCEEDED(GetDriverProperty(
+                kDriverPropertyIdStatus,
+                &status,
+                static_cast<DWORD>(sizeof(status)),
+                &returned)) &&
+            returned >= sizeof(ULONG) * 4) {
+            if (status.LastSetDataReason == kDriverSetDataRejectNotConnected) {
+                m_connected = false;
+            }
+            if (IsWarmupRejectStatus(status)) {
+                if (n <= 5 || n % 30 == 0) {
+                    VirtuaCamLog::LogLine(std::format(
+                        L"Driver warm-up reject: frame={} hw={} client={} setOk={} setReject={} reason={}",
+                        n,
+                        status.HardwareState,
+                        status.ClientConnected,
+                        status.SetDataAcceptedCount,
+                        status.SetDataRejectedCount,
+                        status.LastSetDataReason));
+                }
+                return HRESULT_FROM_WIN32(ERROR_RETRY);
+            }
+        }
         SetLastError(std::format(L"Driver property set failed: 0x{:08X}", static_cast<unsigned>(hr)));
         LogDriverStatusSnapshot(L"Driver status after send failure", n);
     } else if (n <= 3 || n % 60 == 0) {

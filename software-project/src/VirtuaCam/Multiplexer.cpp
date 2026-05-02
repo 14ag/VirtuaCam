@@ -137,8 +137,6 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
     Microsoft::WRL::ComPtr<ID3D11Device5> device5;
     m_device.As(&device5);
 
-    wil::unique_handle hFence(GetHandleFromName(streamInfo.fenceName.c_str()));
-
     const HRESULT hrTexture = device1->OpenSharedResourceByName(
         streamInfo.textureName.c_str(),
         DXGI_SHARED_RESOURCE_READ,
@@ -153,20 +151,22 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
         return FAILED(hrTexture) ? hrTexture : E_FAIL;
     }
 
-    if (!hFence) {
+    if (streamInfo.sharedFenceHandleValue == 0) {
         VirtuaCamLog::LogLine(std::format(
-            L"UpdateProducerConnection failed to open shared fence handle by name: pid={} name='{}'",
+            L"UpdateProducerConnection missing duplicated shared fence handle: pid={} name='{}'",
             streamInfo.processId,
             streamInfo.fenceName));
         return E_FAIL;
     }
 
-    const HRESULT hrFence = device5->OpenSharedFence(hFence.get(), IID_PPV_ARGS(&newRes.sharedFence));
+    newRes.importedFenceHandle.reset(reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(streamInfo.sharedFenceHandleValue)));
+    const HRESULT hrFence = device5->OpenSharedFence(newRes.importedFenceHandle.get(), IID_PPV_ARGS(&newRes.sharedFence));
     if (FAILED(hrFence) || !newRes.sharedFence) {
         VirtuaCamLog::LogLine(std::format(
-            L"UpdateProducerConnection failed to open shared fence: pid={} name='{}' hr=0x{:08X}",
+            L"UpdateProducerConnection failed to open shared fence: pid={} name='{}' handle=0x{:X} hr=0x{:08X}",
             streamInfo.processId,
             streamInfo.fenceName,
+            static_cast<unsigned long long>(streamInfo.sharedFenceHandleValue),
             static_cast<unsigned>(hrFence)));
         return FAILED(hrFence) ? hrFence : E_FAIL;
     }
@@ -183,10 +183,11 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
     newRes.connected = true;
     m_producerResources.push_back(std::move(newRes));
     VirtuaCamLog::LogLine(std::format(
-        L"UpdateProducerConnection connected pid={} texture='{}' fence='{}'",
+        L"UpdateProducerConnection connected pid={} texture='{}' fence='{}' handle=0x{:X}",
         streamInfo.processId,
         streamInfo.textureName,
-        streamInfo.fenceName));
+        streamInfo.fenceName,
+        static_cast<unsigned long long>(streamInfo.sharedFenceHandleValue)));
 
     return S_OK;
 }

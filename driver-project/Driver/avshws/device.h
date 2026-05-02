@@ -493,7 +493,7 @@ public:
 	//
 	// Sets the virtual frame buffer of the device.
 	//
-	void SetData(PVOID data, ULONG dataLength);
+	NTSTATUS SetData(PVOID data, ULONG dataLength);
     void ConnectClient();
     void DisconnectClient();
     NTSTATUS RegisterClientRequestEvent(HANDLE eventHandle, KPROCESSOR_MODE accessMode);

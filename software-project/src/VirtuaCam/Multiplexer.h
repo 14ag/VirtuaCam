@@ -27,6 +27,7 @@ private:
     struct ProducerGpuResources {
         DWORD pid = 0;
         bool connected = false;
+        wil::unique_handle importedFenceHandle;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> sharedTexture;
         Microsoft::WRL::ComPtr<ID3D11Fence> sharedFence;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> privateTexture;

@@ -332,7 +332,7 @@ public:
 	//
 	// Sets the virtual frame buffer of the simulation.
 	//
-	void SetData(PVOID data, ULONG dataLength);
+	NTSTATUS SetData(PVOID data, ULONG dataLength);
     void SetClientConnected(BOOLEAN connected);
     BOOLEAN IsClientConnected();
     NTSTATUS RegisterClientRequestEvent(HANDLE eventHandle, KPROCESSOR_MODE accessMode);
