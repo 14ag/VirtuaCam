@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$VmName = "driver-test",
-    [string]$CheckpointName = "",
+    [string]$CheckpointName = "clean",
     [string]$DriverPackageRoot = "output",
     [string]$GuestUser = "Administrator",
     [System.Management.Automation.PSCredential]$GuestCredential,
@@ -27,10 +27,10 @@ $ErrorActionPreference = "Stop"
 Assert-HvAdministrator
 
 if (-not $PSBoundParameters.ContainsKey("EnableVerifier")) {
-    $EnableVerifier = $true
+    $EnableVerifier = $false
 }
 if (-not $PSBoundParameters.ContainsKey("EnableKernelDebug")) {
-    $EnableKernelDebug = $true
+    $EnableKernelDebug = $false
 }
 
 $artifactDir = if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) { Get-HvArtifactDirectory } else { Resolve-HvPath -Path $ArtifactRoot }
@@ -45,23 +45,19 @@ $repoRoot = Get-HvRepoRoot
 $driverPackageRootPath = Resolve-HvPath -Path $DriverPackageRoot -BasePath $repoRoot
 $installDriverScript = Resolve-HvPath -Path "driver-project\Driver\avshws\install-driver.ps1" -BasePath $repoRoot
 $webcamHtml = Resolve-HvPath -Path "software-project\webcam.html" -BasePath $repoRoot
-$guestRoot = "C:\Temp\VirtuaCamHyperV\current"
+$runId = Get-HvTimestamp
+$guestRoot = "C:\Temp\VirtuaCamHyperV\run-$runId"
 $guestPackageRoot = Join-Path $guestRoot (Split-Path -Path $driverPackageRootPath -Leaf)
 $guestScriptsRoot = Join-Path $guestRoot "scripts"
 $guestInstallDriver = Join-Path $guestScriptsRoot "install-driver.ps1"
 $guestWebcamHtml = Join-Path $guestRoot "webcam.html"
 $debuggerLogPath = ""
-$checkpoint = $null
-$restoredCheckpoint = $false
 $reproFailureMessage = ""
-
-if ([string]::IsNullOrWhiteSpace($CheckpointName)) {
-    $CheckpointName = "hyperv-driver-loop-$(Get-HvTimestamp)"
-}
 
 Write-HvLog -Message ("Hyper-V driver loop start for '{0}'" -f $VmName) -LogPath $LogPath -Level STEP
 Write-HvLog -Message ("ArtifactDir: {0}" -f $artifactDir) -LogPath $LogPath
 Write-HvLog -Message ("DriverPackageRoot: {0}" -f $driverPackageRootPath) -LogPath $LogPath
+Write-HvLog -Message ("CheckpointName: {0}" -f $CheckpointName) -LogPath $LogPath
 
 if (-not (Test-Path -LiteralPath $driverPackageRootPath)) {
     Fail-Hv -Message "Driver package root not found: $driverPackageRootPath" -LogPath $LogPath
@@ -72,8 +68,23 @@ if (-not (Test-Path -LiteralPath (Join-Path $driverPackageRootPath "avshws.inf")
 }
 
 try {
-    Write-HvLog -Message ("Creating checkpoint '{0}'" -f $CheckpointName) -LogPath $LogPath -Level STEP
-    $checkpoint = Checkpoint-VM -Name $VmName -SnapshotName $CheckpointName -Passthru -ErrorAction Stop
+    Write-HvLog -Message ("Restoring clean checkpoint '{0}' before run" -f $CheckpointName) -LogPath $LogPath -Level STEP
+    $existingCheckpoint = Get-VMSnapshot -VMName $VmName -Name $CheckpointName -ErrorAction SilentlyContinue
+    if (-not $existingCheckpoint) {
+        Fail-Hv -Message ("Checkpoint '{0}' was not found. Create the clean bench first." -f $CheckpointName) -LogPath $LogPath
+    }
+
+    try {
+        $vmState = (Get-VM -Name $VmName -ErrorAction Stop).State
+        if ($vmState -ne "Off") {
+            Stop-VM -Name $VmName -TurnOff -Force -Confirm:$false | Out-Null
+        }
+    }
+    catch {
+        Write-HvLog -Message ("Pre-restore VM stop skipped: {0}" -f $_.Exception.Message) -LogPath $LogPath -Level WARN
+    }
+
+    Restore-VMCheckpoint -VMName $VmName -Name $CheckpointName -Confirm:$false | Out-Null
 
     $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -LogPath $LogPath
     try {
@@ -159,7 +170,7 @@ try {
         $installResult = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
             param($InstallScript, $PackageRoot)
             $logFile = Join-Path $PackageRoot "logs\driver-install.log"
-            $output = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript -PackageRoot $PackageRoot -ForceDriverRebind -SkipCertificateImport -LogPath $logFile 2>&1 | Out-String
+            $output = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript -PackageRoot $PackageRoot -SkipCertificateImport -LogPath $logFile 2>&1 | Out-String
             [pscustomobject]@{
                 Output   = $output
                 ExitCode = $LASTEXITCODE
@@ -168,6 +179,13 @@ try {
         Set-Content -LiteralPath (Join-Path $artifactDir "guest-driver-install.txt") -Value $installResult.Output
         if ($installResult.ExitCode -ne 0) {
             Fail-Hv -Message ("Guest driver install failed with exit code {0}. See {1}" -f $installResult.ExitCode, (Join-Path $artifactDir "guest-driver-install.txt")) -LogPath $LogPath
+        }
+
+        $installNeedsReboot = $installResult.Output -match '(?i)reboot is needed|reboot is required|pending system reboot'
+        if ($installNeedsReboot) {
+            Write-HvLog -Message "Driver install requested reboot; restarting guest before repro." -LogPath $LogPath -Level STEP
+            Restart-HvGuest -Session $session -LogPath $LogPath
+            $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -LogPath $LogPath
         }
 
         if ($EnableVerifier) {
@@ -284,7 +302,7 @@ try {
     }
 }
 finally {
-    if ($checkpoint -and $RevertAfterRun -and -not $restoredCheckpoint) {
+    if ($RevertAfterRun) {
         Write-HvLog -Message ("Restoring checkpoint '{0}'" -f $CheckpointName) -LogPath $LogPath -Level STEP
         try {
             $vmState = (Get-VM -Name $VmName -ErrorAction Stop).State
@@ -297,8 +315,6 @@ finally {
         }
 
         Restore-VMCheckpoint -VMName $VmName -Name $CheckpointName -Confirm:$false | Out-Null
-        Remove-VMCheckpoint -VMName $VmName -Name $CheckpointName -Confirm:$false | Out-Null
-        $restoredCheckpoint = $true
     }
 }
 
