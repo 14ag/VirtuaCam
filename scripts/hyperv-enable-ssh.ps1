@@ -4,8 +4,10 @@ param(
     [string]$GuestUser = "Administrator",
     [System.Management.Automation.PSCredential]$GuestCredential,
     [string]$GuestPasswordPlaintext = "",
+    [ValidateSet("Password", "PasswordAndKey")][string]$AuthMode = "Password",
     [string]$HostPublicKeyPath = "",
-    [string]$LogPath = ""
+    [string]$LogPath = "",
+    [string]$ResultPath = ""
 )
 
 Set-StrictMode -Version Latest
@@ -19,23 +21,31 @@ if ([string]::IsNullOrWhiteSpace($LogPath)) {
     $LogPath = Resolve-HvPath -Path "output\hyperv-enable-ssh.log"
 }
 
-if ([string]::IsNullOrWhiteSpace($HostPublicKeyPath)) {
+if ([string]::IsNullOrWhiteSpace($ResultPath)) {
+    $ResultPath = Resolve-HvPath -Path "output\hyperv-enable-ssh.json"
+}
+
+$keyRequested = ($AuthMode -eq "PasswordAndKey")
+if ($keyRequested -and [string]::IsNullOrWhiteSpace($HostPublicKeyPath)) {
     $HostPublicKeyPath = Join-Path $env:USERPROFILE ".ssh\driver-test-ed25519.pub"
 }
 
-if (-not (Test-Path -LiteralPath $HostPublicKeyPath)) {
-    Fail-Hv -Message "Host public key missing: $HostPublicKeyPath" -LogPath $LogPath
+$guestCred = Get-HvGuestCredential -GuestCredential $GuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
+$publicKey = ""
+if ($keyRequested) {
+    if (-not (Test-Path -LiteralPath $HostPublicKeyPath)) {
+        Fail-Hv -Message "Host public key missing: $HostPublicKeyPath" -LogPath $LogPath
+    }
+
+    $publicKey = (Get-Content -LiteralPath $HostPublicKeyPath -Raw).Trim()
 }
 
-$guestCred = Get-HvGuestCredential -GuestCredential $GuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
-$publicKey = (Get-Content -LiteralPath $HostPublicKeyPath -Raw).Trim()
-
-Write-HvLog -Message ("Configuring OpenSSH in guest '{0}'" -f $VmName) -LogPath $LogPath -Level STEP
+Write-HvLog -Message ("Configuring OpenSSH in guest '{0}' (auth mode: {1})" -f $VmName, $AuthMode) -LogPath $LogPath -Level STEP
 $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -LogPath $LogPath
 
 try {
     $result = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
-        param($KeyText)
+        param($KeyText, $RequestedAuthMode)
 
         function Get-OpenSshCapability {
             $capability = Get-WindowsCapability -Online | Where-Object Name -like "OpenSSH.Server*"
@@ -230,11 +240,15 @@ try {
         $sshDir = Split-Path -Parent $adminKeys
 
         $null = New-Item -ItemType Directory -Force -Path $sshDir
-        [System.IO.File]::WriteAllText($adminKeys, $KeyText + [Environment]::NewLine, [System.Text.Encoding]::ASCII)
-        Write-PermissiveSshdConfig -ConfigPath $sshdConfig
+        $keyInstalled = $false
+        if ($RequestedAuthMode -eq "PasswordAndKey") {
+            [System.IO.File]::WriteAllText($adminKeys, $KeyText + [Environment]::NewLine, [System.Text.Encoding]::ASCII)
+            & icacls.exe $adminKeys /inheritance:r | Out-Null
+            & icacls.exe $adminKeys /grant "Administrators:F" "SYSTEM:F" | Out-Null
+            $keyInstalled = $true
+        }
 
-        & icacls.exe $adminKeys /inheritance:r | Out-Null
-        & icacls.exe $adminKeys /grant "Administrators:F" "SYSTEM:F" | Out-Null
+        Write-PermissiveSshdConfig -ConfigPath $sshdConfig
 
         Set-Service -Name sshd -StartupType Automatic
         Start-Service -Name sshd
@@ -274,6 +288,7 @@ try {
             Select-Object -First 1 -ExpandProperty IPAddress)
 
         [pscustomobject]@{
+            AuthMode = $RequestedAuthMode
             CapabilityState = (Get-OpenSshCapability | Select-Object -ExpandProperty State)
             SshdStatus = (Get-Service sshd | Select-Object Status, StartType)
             ListenerCount = @(Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue).Count
@@ -281,10 +296,16 @@ try {
             GuestIp = $guestIp
             SshdConfigPath = $sshdConfig
             AdminKeysPath = $adminKeys
+            KeyInstalled = $keyInstalled
         }
-    } -ArgumentList $publicKey
+    } -ArgumentList $publicKey, $AuthMode
 
-    $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Resolve-HvPath -Path "output\hyperv-enable-ssh.json") -Encoding UTF8
+    $resultDir = Split-Path -Parent $ResultPath
+    if (-not [string]::IsNullOrWhiteSpace($resultDir)) {
+        $null = New-Item -ItemType Directory -Force -Path $resultDir
+    }
+
+    $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ResultPath -Encoding UTF8
     $result
 }
 finally {
