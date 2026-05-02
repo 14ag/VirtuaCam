@@ -128,10 +128,26 @@ function mergeConsoleLines(consoleLines, statusLogs) {
   const status = readJson(statusPath);
   const consoleLines = [];
   const attachBase = `http://${status.GuestIp}:9223`;
+  const sourceWindow = {
+    SourceWindowMode: status.SourceWindowMode || '',
+    SourceWindowProcess: status.SourceWindowProcess || '',
+    SourceWindowTitle: status.SourceWindowTitle || '',
+    SourceWindowPid: status.SourceWindowPid || '',
+    SourceWindowHwnd: status.SourceWindowHwnd || '',
+    SourceMarker: status.SourceMarker || ''
+  };
 
   let browser;
   let page;
   let lastState = null;
+
+  function buildResult(data) {
+    return Object.assign({
+      attachBase,
+      browserUrl: status.BrowserUrl,
+      guestIp: status.GuestIp
+    }, sourceWindow, data);
+  }
 
   function pickPage(pages) {
     const targetUrl = (status.BrowserUrl || '').toLowerCase();
@@ -167,6 +183,22 @@ function mergeConsoleLines(consoleLines, statusLogs) {
   }
 
   try {
+    if (!sourceWindow.SourceWindowMode || sourceWindow.SourceWindowMode === 'ProofPanel') {
+      const errorMessage = !sourceWindow.SourceWindowMode
+        ? 'SourceWindowMode missing from held guest status.'
+        : 'ProofPanel source is synthetic and does not qualify as real-window proof.';
+      fs.writeFileSync(consolePath, '', 'utf8');
+      writeJson(resultPath, buildResult({
+        success: false,
+        errorClass: 'proof.InvalidSourceWindowMode',
+        errorMessage,
+        state: lastState,
+        consoleLineCount: 0,
+        capturedAt: new Date().toISOString()
+      }));
+      process.exit(1);
+    }
+
     browser = await chromium.connectOverCDP(attachBase);
     const contexts = browser.contexts();
     if (!contexts.length) {
@@ -193,17 +225,14 @@ function mergeConsoleLines(consoleLines, statusLogs) {
         await page.screenshot({ path: screenshotPath });
         const mergedLogs = mergeConsoleLines(consoleLines, lastState.logs || []);
         fs.writeFileSync(consolePath, mergedLogs.join('\n'), 'utf8');
-        writeJson(resultPath, {
+        writeJson(resultPath, buildResult({
           success: true,
           errorClass: '',
-          attachBase,
           screenshotPath,
-          browserUrl: status.BrowserUrl,
-          guestIp: status.GuestIp,
           state: lastState,
           consoleLineCount: mergedLogs.length,
           capturedAt: new Date().toISOString()
-        });
+        }));
         await browser.close();
         process.exit(0);
       }
@@ -218,31 +247,25 @@ function mergeConsoleLines(consoleLines, statusLogs) {
     const errorClass = lastState && lastState.errorName
       ? `chrome.${lastState.errorName}`
       : 'chrome.NoLiveFrame';
-    writeJson(resultPath, {
+    writeJson(resultPath, buildResult({
       success: false,
       errorClass,
-      attachBase,
-      browserUrl: status.BrowserUrl,
-      guestIp: status.GuestIp,
       state: lastState,
       consoleLineCount: mergedLogs.length,
       capturedAt: new Date().toISOString()
-    });
+    }));
     await browser.close();
     process.exit(1);
   } catch (error) {
     fs.writeFileSync(consolePath, consoleLines.join('\n'), 'utf8');
-    writeJson(resultPath, {
+    writeJson(resultPath, buildResult({
       success: false,
       errorClass: 'playwright.CDPAttachFailed',
-      attachBase,
-      browserUrl: status.BrowserUrl,
-      guestIp: status.GuestIp,
       errorMessage: error && error.message ? error.message : String(error),
       state: lastState,
       consoleLineCount: consoleLines.length,
       capturedAt: new Date().toISOString()
-    });
+    }));
     if (browser) {
       try {
         await browser.close();
