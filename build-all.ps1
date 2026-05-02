@@ -4,7 +4,6 @@ param(
     [string]$BuildConfig = "Release",
     [switch]$SkipSoftware,
     [switch]$SkipDriver,
-    [string]$OutputRoot = "",
     [string]$VcpkgRoot = ""
 )
 
@@ -200,9 +199,7 @@ $softwareSrcDir = Join-Path $softwareDir "src"
 $softwareBuildDir = Join-Path $softwareDir "build"
 $driverRoot = Join-Path $repoRoot "driver-project\Driver\avshws"
 $driverSolutionPath = Join-Path $driverRoot "avshws.sln"
-
-if ([string]::IsNullOrWhiteSpace($OutputRoot)) { $OutputRoot = Join-Path $repoRoot "output" }
-$OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
+$OutputRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "output"))
 $logsDir = Join-Path $OutputRoot "logs"
 $driverPackageTmp = Join-Path $repoRoot ".driver-package-work"
 

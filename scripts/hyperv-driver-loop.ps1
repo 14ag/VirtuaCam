@@ -2,7 +2,6 @@
 param(
     [string]$VmName = "driver-test",
     [string]$CheckpointName = "clean",
-    [string]$DriverPackageRoot = "output",
     [string]$GuestUser = "Administrator",
     [System.Management.Automation.PSCredential]$GuestCredential,
     [string]$GuestPasswordPlaintext = "",
@@ -42,21 +41,22 @@ if ([string]::IsNullOrWhiteSpace($LogPath)) {
 
 $guestCred = Get-HvGuestCredential -GuestCredential $GuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
 $repoRoot = Get-HvRepoRoot
-$driverPackageRootPath = Resolve-HvPath -Path $DriverPackageRoot -BasePath $repoRoot
-$installDriverScript = Resolve-HvPath -Path "driver-project\Driver\avshws\install-driver.ps1" -BasePath $repoRoot
+$driverPackageRootPath = Resolve-HvPath -Path "output" -BasePath $repoRoot
+$installAllScript = Resolve-HvPath -Path "install-all.ps1" -BasePath $repoRoot
+$artifactManifestScript = Resolve-HvPath -Path "tools\artifact-manifest.ps1" -BasePath $repoRoot
 $webcamHtml = Resolve-HvPath -Path "software-project\webcam.html" -BasePath $repoRoot
 $runId = Get-HvTimestamp
 $guestRoot = "C:\Temp\VirtuaCamHyperV\run-$runId"
 $guestPackageRoot = Join-Path $guestRoot (Split-Path -Path $driverPackageRootPath -Leaf)
-$guestScriptsRoot = Join-Path $guestRoot "scripts"
-$guestInstallDriver = Join-Path $guestScriptsRoot "install-driver.ps1"
+$guestToolsRoot = Join-Path $guestRoot "tools"
+$guestInstallAll = Join-Path $guestRoot "install-all.ps1"
 $guestWebcamHtml = Join-Path $guestRoot "webcam.html"
 $debuggerLogPath = ""
 $reproFailureMessage = ""
 
 Write-HvLog -Message ("Hyper-V driver loop start for '{0}'" -f $VmName) -LogPath $LogPath -Level STEP
 Write-HvLog -Message ("ArtifactDir: {0}" -f $artifactDir) -LogPath $LogPath
-Write-HvLog -Message ("DriverPackageRoot: {0}" -f $driverPackageRootPath) -LogPath $LogPath
+Write-HvLog -Message ("PackageRoot: {0}" -f $driverPackageRootPath) -LogPath $LogPath
 Write-HvLog -Message ("CheckpointName: {0}" -f $CheckpointName) -LogPath $LogPath
 
 if (-not (Test-Path -LiteralPath $driverPackageRootPath)) {
@@ -123,59 +123,34 @@ try {
 
         Write-HvLog -Message "Preparing guest staging folders." -LogPath $LogPath -Level STEP
         Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
-            param($Root, $ScriptsRoot)
-            $null = New-Item -ItemType Directory -Force -Path $Root, $ScriptsRoot
+            param($Root, $ToolsRoot)
+            if (Test-Path -LiteralPath $Root) {
+                Remove-Item -LiteralPath $Root -Recurse -Force
+            }
+            $null = New-Item -ItemType Directory -Force -Path $Root, $ToolsRoot
             $outputRoot = Join-Path $Root "output"
             if (Test-Path -LiteralPath $outputRoot) {
                 Remove-Item -LiteralPath $outputRoot -Recurse -Force
             }
             $null = New-Item -ItemType Directory -Force -Path $outputRoot
-        } -ArgumentList $guestRoot, $guestScriptsRoot | Out-Null
+        } -ArgumentList $guestRoot, $guestToolsRoot | Out-Null
 
         Copy-HvToGuest -Session $session -LocalPath $driverPackageRootPath -GuestPath $guestRoot -Recurse -LogPath $LogPath
-        Copy-HvToGuest -Session $session -LocalPath $installDriverScript -GuestPath $guestScriptsRoot -LogPath $LogPath
+        Copy-HvToGuest -Session $session -LocalPath $installAllScript -GuestPath $guestRoot -LogPath $LogPath
+        Copy-HvToGuest -Session $session -LocalPath $artifactManifestScript -GuestPath $guestToolsRoot -LogPath $LogPath
         if (Test-Path -LiteralPath $webcamHtml) {
             Copy-HvToGuest -Session $session -LocalPath $webcamHtml -GuestPath $guestRoot -LogPath $LogPath
         }
 
-        Write-HvLog -Message "Importing driver signing certificate into guest trust stores." -LogPath $LogPath -Level STEP
-        Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
-            param($CertPath)
-
-            if (-not (Test-Path -LiteralPath $CertPath)) {
-                throw "Guest cert file missing: $CertPath"
-            }
-
-            $certBytes = [System.IO.File]::ReadAllBytes($CertPath)
-            $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certBytes)
-            foreach ($storeName in @("Root", "TrustedPublisher")) {
-                $store = [System.Security.Cryptography.X509Certificates.X509Store]::new($storeName, "LocalMachine")
-                $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-                try {
-                    $existing = $store.Certificates.Find(
-                        [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
-                        $cert.Thumbprint,
-                        $false)
-                    if ($existing.Count -eq 0) {
-                        $store.Add($cert)
-                    }
-                }
-                finally {
-                    $store.Close()
-                }
-            }
-        } -ArgumentList (Join-Path $guestPackageRoot "VirtualCameraDriver-TestSign.cer") | Out-Null
-
         Write-HvLog -Message "Installing/rebinding driver inside guest." -LogPath $LogPath -Level STEP
         $installResult = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
-            param($InstallScript, $PackageRoot)
-            $logFile = Join-Path $PackageRoot "logs\driver-install.log"
-            $output = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript -PackageRoot $PackageRoot -SkipCertificateImport -LogPath $logFile 2>&1 | Out-String
+            param($InstallScript)
+            $output = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript 2>&1 | Out-String
             [pscustomobject]@{
                 Output   = $output
                 ExitCode = $LASTEXITCODE
             }
-        } -ArgumentList $guestInstallDriver, $guestPackageRoot
+        } -ArgumentList $guestInstallAll
         Set-Content -LiteralPath (Join-Path $artifactDir "guest-driver-install.txt") -Value $installResult.Output
         if ($installResult.ExitCode -ne 0) {
             Fail-Hv -Message ("Guest driver install failed with exit code {0}. See {1}" -f $installResult.ExitCode, (Join-Path $artifactDir "guest-driver-install.txt")) -LogPath $LogPath

@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [string]$OutputRoot = "",
     [switch]$SkipDriverInstall,
     [switch]$SkipDllRegister,
     [switch]$ForceDriverRebind,
@@ -236,8 +235,7 @@ public static class AvshwsInstallerNative {
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $repoRoot = [System.IO.Path]::GetFullPath($scriptDir)
 . (Join-Path $repoRoot "tools\artifact-manifest.ps1")
-if ([string]::IsNullOrWhiteSpace($OutputRoot)) { $OutputRoot = Join-Path $repoRoot "output" }
-$OutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
+$OutputRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "output"))
 
 $runKeyPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
 $virtuaCamRegPath = "HKLM:\SOFTWARE\VirtuaCam"
@@ -301,8 +299,12 @@ if (-not $SkipDriverInstall) {
 
     $existingDevices = @(Get-AvshwsDevices)
     if ($existingDevices.Count -eq 0) {
+        Write-Info "No ROOT\AVSHWS device present. Creating it now."
         $cameraClassGuid = [Guid]::Parse("{ca3e7ab9-b4c3-4ae6-8251-579ef933890f}")
         [AvshwsInstallerNative]::CreateRootDevice("AVSHWS", "AVSHWS", "Virtual Camera Driver", $cameraClassGuid)
+    }
+    else {
+        Write-Info "ROOT\AVSHWS already exists. Reusing existing device node."
     }
 
     $rebootRequired = $false
@@ -320,13 +322,27 @@ if (-not $SkipDriverInstall) {
         Fail "Install finished but no ROOT\AVSHWS device was found."
     }
 
+    foreach ($device in $finalDevices) {
+        if (-not [string]::IsNullOrWhiteSpace($device.PNPDeviceID)) {
+            Write-Info ("Restarting device node: {0}" -f $device.PNPDeviceID)
+            Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/restart-device", $device.PNPDeviceID) -AllowedExitCodes @(0, 259, 3010)
+        }
+    }
+
+    Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/scan-devices")
+
+    $finalDevices = @(Get-AvshwsDevices)
+    if ($finalDevices.Count -eq 0) {
+        Fail "Device node disappeared after restart."
+    }
+
     $bad = @($finalDevices | Where-Object { $_.Status -and $_.Status -ne "OK" })
     if ($bad.Count -gt 0) {
         Fail "Installed device present but not OK status."
     }
 
     if ($rebootRequired) {
-        Write-Info "Reboot required to finalize driver bind"
+        Write-Info "A reboot is required to finalize installation."
     }
 
     Write-Success "Driver install OK from $OutputRoot"
