@@ -6,7 +6,8 @@ param(
     [string]$GuestPackageRoot = "C:\Temp\VirtuaCamHyperV\manual\package-repro",
     [string]$GuestWebcamHtml = "C:\Temp\VirtuaCamHyperV\manual\webcam.html",
     [ValidateSet("Chrome", "Edge")][string]$Browser = "Chrome",
-    [ValidateSet("Notepad", "Explorer", "ProofPanel")][string]$SourceWindowMode = "Notepad",
+    [ValidateSet("Notepad", "Settings", "Explorer", "ProofPanel")][string]$SourceWindowMode = "Notepad",
+    [ValidateSet("auto", "printwindow", "wgc", "bitblt")][string]$CaptureBackend = "auto",
     [string[]]$BrowserExtraArgs = @(),
     [string]$AttemptId = "manual",
     [switch]$ServeHttp,
@@ -112,6 +113,7 @@ try {
             $HtmlPath,
             $BrowserName,
             $RequestedSourceWindowMode,
+            $RequestedCaptureBackend,
             $ShouldServeHttp,
             $RequestedHttpPort,
             $RequestedBrowserExtraArgs,
@@ -140,6 +142,7 @@ try {
             HtmlPath = $HtmlPath
             Browser = $BrowserName
             SourceWindowMode = $RequestedSourceWindowMode
+            CaptureBackend = $RequestedCaptureBackend
             ServeHttp = [bool]$ShouldServeHttp
             HttpPort = [int]$RequestedHttpPort
             BrowserExtraArgs = @($RequestedBrowserExtraArgs)
@@ -174,6 +177,7 @@ try {
         $GuestWebcamHtml,
         $Browser,
         $SourceWindowMode,
+        $CaptureBackend,
         $ServeHttp,
         $HttpPort,
         $BrowserExtraArgs,

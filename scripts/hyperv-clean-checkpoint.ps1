@@ -73,9 +73,24 @@ function Invoke-CleanBenchPass {
         Get-Process -Name "VirtuaCam", "VirtuaCamProcess", "chrome", "msedge", "WindowsCamera" -ErrorAction SilentlyContinue |
             Stop-Process -Force -ErrorAction SilentlyContinue
 
-        $benchRoot = "C:\Temp\VirtuaCamHyperV"
-        if (Test-Path -LiteralPath $benchRoot) {
-            Remove-Item -LiteralPath $benchRoot -Recurse -Force -ErrorAction SilentlyContinue
+        $benchRoots = @(
+            "C:\Temp\VirtuaCamHyperV",
+            "C:\Temp\VirtuaCamChat",
+            "C:\Temp\VirtuaCamServiceMenu"
+        )
+        foreach ($benchRoot in $benchRoots) {
+            if (Test-Path -LiteralPath $benchRoot) {
+                Remove-Item -LiteralPath $benchRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        $tempOpenSshArtifacts = @(
+            "C:\Temp\OpenSSH-Win64.zip",
+            "C:\Temp\OpenSSH-Win64-extract"
+        )
+        foreach ($tempArtifact in $tempOpenSshArtifacts) {
+            if (Test-Path -LiteralPath $tempArtifact) {
+                Remove-Item -LiteralPath $tempArtifact -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
 
         $minidumpDir = Join-Path $env:SystemRoot "Minidump"
