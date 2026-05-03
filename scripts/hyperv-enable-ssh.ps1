@@ -88,6 +88,49 @@ try {
             return [string](Get-ItemProperty -LiteralPath $serviceKey -Name ImagePath -ErrorAction SilentlyContinue).ImagePath
         }
 
+        function Resolve-SshdImageExe {
+            param([string]$ImagePath)
+
+            if ([string]::IsNullOrWhiteSpace($ImagePath)) {
+                return ""
+            }
+
+            $trimmed = $ImagePath.Trim()
+            if ($trimmed.StartsWith('"')) {
+                $endQuote = $trimmed.IndexOf('"', 1)
+                if ($endQuote -gt 1) {
+                    return $trimmed.Substring(1, $endQuote - 1)
+                }
+            }
+
+            $exeIndex = $trimmed.IndexOf(".exe", [System.StringComparison]::OrdinalIgnoreCase)
+            if ($exeIndex -ge 0) {
+                return $trimmed.Substring(0, $exeIndex + 4)
+            }
+
+            return $trimmed
+        }
+
+        function Test-SshdImageHealthy {
+            param([string]$ImagePath)
+
+            $exe = Resolve-SshdImageExe -ImagePath $ImagePath
+            if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe)) {
+                return $false
+            }
+
+            $previousPath = $env:Path
+            $exeDir = Split-Path -Parent $exe
+            $env:Path = "$exeDir;$previousPath"
+            try {
+                & $exe -T *> $null
+                return ($LASTEXITCODE -eq 0)
+            }
+            finally {
+                $env:Path = $previousPath
+            }
+        }
+
         function Repair-SshdServiceRegistration {
             $installSshd = Get-SystemInstallSshdScript
             $systemSshdExe = Join-Path (Get-SystemOpenSshDir) "sshd.exe"
@@ -209,15 +252,19 @@ try {
 
             $expectedBinary = Join-Path $openSshDir "sshd.exe"
             $imagePath = Get-SshdImagePath
+            if (Test-SshdImageHealthy -ImagePath $imagePath) {
+                return
+            }
+
             if ([string]::IsNullOrWhiteSpace($imagePath) -or
-                $imagePath.IndexOf($expectedBinary, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                $imagePath.IndexOf($expectedBinary, [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+                -not (Test-SshdImageHealthy -ImagePath $imagePath)) {
                 Repair-SshdServiceRegistration
                 $imagePath = Get-SshdImagePath
             }
 
-            if ([string]::IsNullOrWhiteSpace($imagePath) -or
-                $imagePath.IndexOf($expectedBinary, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-                throw "sshd service image path is not using system OpenSSH binary: $imagePath"
+            if (-not (Test-SshdImageHealthy -ImagePath $imagePath)) {
+                throw "sshd service image path is not healthy: $imagePath"
             }
         }
 
