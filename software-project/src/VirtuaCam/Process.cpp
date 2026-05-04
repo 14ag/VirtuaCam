@@ -17,6 +17,8 @@
 #include <atomic>
 #include <tlhelp32.h>
 #include <vector>
+#include <wtsapi32.h>
+#include <userenv.h>
 
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
@@ -26,8 +28,14 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "runtimeobject.lib")
+#pragma comment(lib, "wtsapi32.lib")
+#pragma comment(lib, "userenv.lib")
 
 using Microsoft::WRL::ComPtr;
+
+// Globals (outside anonymous namespace) so wWinMain can reference service entrypoints.
+constexpr wchar_t kWatcherServiceName[] = L"VirtuaCamWatcher";
+void WINAPI WatcherServiceMain(DWORD, LPWSTR*);
 
 namespace
 {
@@ -212,7 +220,8 @@ namespace BuiltInCaptureProducer
     {
         None,
         Wgc,
-        Gdi
+        PrintWindow,
+        BitBlt
     };
 
     static ComPtr<ID3D11Device> g_d3d11Device;
@@ -241,6 +250,98 @@ namespace BuiltInCaptureProducer
     static UINT g_captureWidth = 0;
     static UINT g_captureHeight = 0;
     static std::vector<BYTE> g_gdiFrame;
+    static bool g_roInitialized = false;
+
+    constexpr UINT kPrintWindowFlagsClientOnly = 0x00000001;
+    constexpr UINT kPrintWindowFlagsRenderFullContent = 0x00000002; // PW_RENDERFULLCONTENT (Win8.1+)
+    constexpr UINT kPrintWindowFlagsClientFullContent = kPrintWindowFlagsClientOnly | kPrintWindowFlagsRenderFullContent; // 0x3
+
+    static std::wstring GetWindowClassName(HWND hwnd)
+    {
+        wchar_t cls[256] = {};
+        if (!hwnd) return {};
+        if (!GetClassNameW(hwnd, cls, ARRAYSIZE(cls))) return {};
+        return cls;
+    }
+
+    static HWND FindDescendantWindowByClass(HWND root, const wchar_t* className)
+    {
+        if (!root || !className || !*className) return nullptr;
+
+        struct FindData
+        {
+            const wchar_t* className = nullptr;
+            HWND found = nullptr;
+        } data;
+        data.className = className;
+
+        EnumChildWindows(
+            root,
+            [](HWND hwnd, LPARAM lParam) -> BOOL {
+                auto* d = reinterpret_cast<FindData*>(lParam);
+                if (!d || d->found) return FALSE;
+
+                wchar_t cls[256] = {};
+                if (GetClassNameW(hwnd, cls, ARRAYSIZE(cls)) && _wcsicmp(cls, d->className) == 0) {
+                    d->found = hwnd;
+                    return FALSE;
+                }
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&data));
+
+        return data.found;
+    }
+
+    static HWND GetWgcTargetHwnd(HWND selectedHwnd)
+    {
+        // WGC CreateForWindow expects the target HWND; for UWP/ApplicationFrameWindow
+        // the top-level frame is the stable capture target. Child CoreWindow can fail E_INVALIDARG.
+        return selectedHwnd;
+    }
+
+    static bool IsProbablyAllBlackBgrx(const BYTE* bits, UINT width, UINT height)
+    {
+        if (!bits || width == 0 || height == 0) {
+            return true;
+        }
+
+        constexpr UINT kGrid = 8;
+        const size_t stride = static_cast<size_t>(width) * 4;
+
+        for (UINT gy = 0; gy < kGrid; ++gy) {
+            const UINT y = (height == 1) ? 0 : (gy * (height - 1)) / (kGrid - 1);
+            const BYTE* row = bits + static_cast<size_t>(y) * stride;
+            for (UINT gx = 0; gx < kGrid; ++gx) {
+                const UINT x = (width == 1) ? 0 : (gx * (width - 1)) / (kGrid - 1);
+                const BYTE* p = row + static_cast<size_t>(x) * 4;
+                if ((p[0] | p[1] | p[2]) != 0) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    static void ResetSharedOutputs()
+    {
+        if (g_pManifestView) UnmapViewOfFile(g_pManifestView);
+        if (g_hManifest) CloseHandle(g_hManifest);
+        g_pManifestView = nullptr;
+        g_hManifest = nullptr;
+
+        if (g_hSharedTextureHandle) CloseHandle(g_hSharedTextureHandle);
+        if (g_hSharedFenceHandle) CloseHandle(g_hSharedFenceHandle);
+        g_hSharedTextureHandle = nullptr;
+        g_hSharedFenceHandle = nullptr;
+        g_brokerFenceHandleValue = 0;
+
+        g_sharedD3D11Fence.Reset();
+        g_sharedD3D11Texture.Reset();
+        g_captureWidth = 0;
+        g_captureHeight = 0;
+        g_gdiFrame.clear();
+    }
 
     // Accessor to unwrap IDirect3DSurface -> underlying D3D11 texture.
     struct __declspec(uuid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")) IDirect3DDxgiInterfaceAccess : public IUnknown
@@ -281,6 +382,9 @@ namespace BuiltInCaptureProducer
         HRESULT hrInit = RoInitialize(RO_INIT_MULTITHREADED);
         if (FAILED(hrInit) && hrInit != RPC_E_CHANGED_MODE) {
             return hrInit;
+        }
+        if (SUCCEEDED(hrInit)) {
+            g_roInitialized = true;
         }
 
         // Create GraphicsCaptureItem for HWND.
@@ -341,6 +445,53 @@ namespace BuiltInCaptureProducer
 
         RETURN_IF_FAILED(g_session->StartCapture());
         return S_OK;
+    }
+
+    static HRESULT InitSharedOutputs(UINT width, UINT height);
+
+    static HRESULT InitPrintWindowCapture(HWND hwndToCapture)
+    {
+        RECT rc{};
+        if (!GetClientRect(hwndToCapture, &rc)) {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+
+        const LONG width = rc.right - rc.left;
+        const LONG height = rc.bottom - rc.top;
+        RETURN_HR_IF(E_INVALIDARG, width <= 0 || height <= 0);
+
+        RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(width), static_cast<UINT>(height)));
+        g_captureWidth = static_cast<UINT>(width);
+        g_captureHeight = static_cast<UINT>(height);
+        g_gdiFrame.resize(static_cast<size_t>(g_captureWidth) * static_cast<size_t>(g_captureHeight) * 4);
+        return S_OK;
+    }
+
+    static HRESULT InitBitBltCapture(HWND hwndToCapture)
+    {
+        // Keep size consistent with PrintWindow path: client area.
+        return InitPrintWindowCapture(hwndToCapture);
+    }
+
+    static CaptureBackend GetCaptureBackendOverride()
+    {
+        wchar_t value[64] = {};
+        const DWORD len = GetEnvironmentVariableW(L"VIRTUACAM_CAPTURE_BACKEND", value, ARRAYSIZE(value));
+        if (len == 0 || len >= ARRAYSIZE(value) || _wcsicmp(value, L"auto") == 0) {
+            return CaptureBackend::None;
+        }
+        if (_wcsicmp(value, L"printwindow") == 0) {
+            return CaptureBackend::PrintWindow;
+        }
+        if (_wcsicmp(value, L"wgc") == 0) {
+            return CaptureBackend::Wgc;
+        }
+        if (_wcsicmp(value, L"bitblt") == 0) {
+            return CaptureBackend::BitBlt;
+        }
+
+        VirtuaCamLog::LogLine(std::format(L"Ignoring unknown VIRTUACAM_CAPTURE_BACKEND={}", value));
+        return CaptureBackend::None;
     }
 
     static HRESULT InitSharedOutputs(UINT width, UINT height)
@@ -405,30 +556,12 @@ namespace BuiltInCaptureProducer
         return S_OK;
     }
 
-    static HRESULT InitGdiCapture(HWND hwndToCapture)
-    {
-        RECT rc{};
-        if (!GetWindowRect(hwndToCapture, &rc)) {
-            return HRESULT_FROM_WIN32(GetLastError());
-        }
-
-        const LONG width = rc.right - rc.left;
-        const LONG height = rc.bottom - rc.top;
-        RETURN_HR_IF(E_INVALIDARG, width <= 0 || height <= 0);
-
-        RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(width), static_cast<UINT>(height)));
-        g_captureWidth = static_cast<UINT>(width);
-        g_captureHeight = static_cast<UINT>(height);
-        g_gdiFrame.resize(static_cast<size_t>(g_captureWidth) * static_cast<size_t>(g_captureHeight) * 4);
-        return S_OK;
-    }
-
-    static HRESULT CaptureGdiFrame()
+    static HRESULT CapturePrintWindowFrame()
     {
         RETURN_HR_IF_NULL(E_HANDLE, g_captureTargetHwnd);
 
         RECT rc{};
-        if (!GetWindowRect(g_captureTargetHwnd, &rc)) {
+        if (!GetClientRect(g_captureTargetHwnd, &rc)) {
             return HRESULT_FROM_WIN32(GetLastError());
         }
 
@@ -437,7 +570,7 @@ namespace BuiltInCaptureProducer
         RETURN_HR_IF(E_INVALIDARG, width == 0 || height == 0);
         RETURN_HR_IF(E_NOTIMPL, width != g_captureWidth || height != g_captureHeight);
 
-        HDC windowDc = GetWindowDC(g_captureTargetHwnd);
+        HDC windowDc = GetDC(g_captureTargetHwnd);
         if (!windowDc) {
             return HRESULT_FROM_WIN32(GetLastError());
         }
@@ -469,10 +602,85 @@ namespace BuiltInCaptureProducer
         }
 
         HGDIOBJ oldBitmap = SelectObject(memoryDc, dib);
-        BOOL copied = PrintWindow(g_captureTargetHwnd, memoryDc, 0);
+        BOOL copied = PrintWindow(g_captureTargetHwnd, memoryDc, kPrintWindowFlagsClientFullContent);
+
+        HRESULT hr = S_OK;
         if (!copied) {
-            copied = BitBlt(memoryDc, 0, 0, static_cast<int>(width), static_cast<int>(height), windowDc, 0, 0, SRCCOPY | CAPTUREBLT);
+            hr = HRESULT_FROM_WIN32(GetLastError());
+        } else if (IsProbablyAllBlackBgrx(reinterpret_cast<const BYTE*>(bits), width, height)) {
+            hr = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        } else {
+            const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+            if (g_gdiFrame.size() != byteCount) {
+                g_gdiFrame.resize(byteCount);
+            }
+            memcpy(g_gdiFrame.data(), bits, byteCount);
+            g_d3d11Context->UpdateSubresource(g_sharedD3D11Texture.Get(), 0, nullptr, g_gdiFrame.data(), width * 4, 0);
         }
+
+        SelectObject(memoryDc, oldBitmap);
+        DeleteObject(dib);
+        DeleteDC(memoryDc);
+        ReleaseDC(g_captureTargetHwnd, windowDc);
+        return hr;
+    }
+
+    static HRESULT CaptureBitBltFrame()
+    {
+        RETURN_HR_IF_NULL(E_HANDLE, g_captureTargetHwnd);
+
+        RECT rc{};
+        if (!GetClientRect(g_captureTargetHwnd, &rc)) {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+
+        const UINT width = static_cast<UINT>(rc.right - rc.left);
+        const UINT height = static_cast<UINT>(rc.bottom - rc.top);
+        RETURN_HR_IF(E_INVALIDARG, width == 0 || height == 0);
+        RETURN_HR_IF(E_NOTIMPL, width != g_captureWidth || height != g_captureHeight);
+
+        HDC windowDc = GetDC(g_captureTargetHwnd);
+        if (!windowDc) {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+
+        HDC memoryDc = CreateCompatibleDC(windowDc);
+        if (!memoryDc) {
+            ReleaseDC(g_captureTargetHwnd, windowDc);
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = static_cast<LONG>(width);
+        bmi.bmiHeader.biHeight = -static_cast<LONG>(height);
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = nullptr;
+        HBITMAP dib = CreateDIBSection(windowDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!dib || !bits) {
+            const DWORD err = GetLastError();
+            if (dib) {
+                DeleteObject(dib);
+            }
+            DeleteDC(memoryDc);
+            ReleaseDC(g_captureTargetHwnd, windowDc);
+            return HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
+        }
+
+        HGDIOBJ oldBitmap = SelectObject(memoryDc, dib);
+        const BOOL copied = BitBlt(
+            memoryDc,
+            0,
+            0,
+            static_cast<int>(width),
+            static_cast<int>(height),
+            windowDc,
+            0,
+            0,
+            SRCCOPY | CAPTUREBLT);
 
         HRESULT hr = S_OK;
         if (!copied) {
@@ -510,20 +718,85 @@ namespace BuiltInCaptureProducer
         g_captureBackend = CaptureBackend::None;
         g_captureWidth = 0;
         g_captureHeight = 0;
+        g_roInitialized = false;
 
         RETURN_IF_FAILED(InitD3D11());
-        HRESULT hr = InitWgc(hwndToCapture);
-        if (SUCCEEDED(hr)) {
+
+        const CaptureBackend backendOverride = GetCaptureBackendOverride();
+        HRESULT hr = S_OK;
+
+        if (backendOverride == CaptureBackend::PrintWindow) {
+            RETURN_IF_FAILED(InitPrintWindowCapture(hwndToCapture));
+            RETURN_IF_FAILED(CapturePrintWindowFrame());
+            VirtuaCamLog::LogLine(L"Capture init: using PrintWindow(PW_RENDERFULLCONTENT|PW_CLIENTONLY) forced by VIRTUACAM_CAPTURE_BACKEND");
+            g_captureBackend = CaptureBackend::PrintWindow;
+        } else if (backendOverride == CaptureBackend::Wgc) {
+            const HWND wgcHwnd = GetWgcTargetHwnd(hwndToCapture);
+            RETURN_IF_FAILED(InitWgc(wgcHwnd));
             ABI::Windows::Graphics::SizeInt32 size{};
             RETURN_IF_FAILED(g_captureItem->get_Size(&size));
             RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(size.Width), static_cast<UINT>(size.Height)));
             g_captureWidth = static_cast<UINT>(size.Width);
             g_captureHeight = static_cast<UINT>(size.Height);
+            VirtuaCamLog::LogLine(std::format(
+                L"Capture init: using WGC forced by VIRTUACAM_CAPTURE_BACKEND hwnd={} (selected hwnd={}) size={}x{}",
+                static_cast<UINT64>(reinterpret_cast<UINT_PTR>(wgcHwnd)),
+                static_cast<UINT64>(reinterpret_cast<UINT_PTR>(hwndToCapture)),
+                g_captureWidth,
+                g_captureHeight));
             g_captureBackend = CaptureBackend::Wgc;
-        } else {
-            VirtuaCamLog::LogHr(L"InitWgc failed; falling back to GDI capture", hr);
-            RETURN_IF_FAILED(InitGdiCapture(hwndToCapture));
-            g_captureBackend = CaptureBackend::Gdi;
+        } else if (backendOverride == CaptureBackend::BitBlt) {
+            RETURN_IF_FAILED(InitBitBltCapture(hwndToCapture));
+            VirtuaCamLog::LogLine(L"Capture init: using BitBlt forced by VIRTUACAM_CAPTURE_BACKEND");
+            g_captureBackend = CaptureBackend::BitBlt;
+        }
+
+        if (g_captureBackend == CaptureBackend::None) {
+            // Method 2: PrintWindow(PW_RENDERFULLCONTENT|PW_CLIENTONLY) -> if non-black use it.
+            hr = InitPrintWindowCapture(hwndToCapture);
+            if (SUCCEEDED(hr)) {
+                const HRESULT testHr = CapturePrintWindowFrame();
+                if (SUCCEEDED(testHr)) {
+                    VirtuaCamLog::LogLine(L"Capture init: using PrintWindow(PW_RENDERFULLCONTENT|PW_CLIENTONLY)");
+                    g_captureBackend = CaptureBackend::PrintWindow;
+                } else {
+                    VirtuaCamLog::LogHr(L"PrintWindow test frame black/failed; falling through to WGC", testHr);
+                    ResetSharedOutputs();
+                }
+            } else {
+                VirtuaCamLog::LogHr(L"InitPrintWindowCapture failed; falling through to WGC", hr);
+                ResetSharedOutputs();
+            }
+        }
+
+        if (g_captureBackend == CaptureBackend::None) {
+            // Method 3: Windows Graphics Capture (WGC) -> best for GPU/UWP.
+            const HWND wgcHwnd = GetWgcTargetHwnd(hwndToCapture);
+            hr = InitWgc(wgcHwnd);
+            if (SUCCEEDED(hr)) {
+                ABI::Windows::Graphics::SizeInt32 size{};
+                RETURN_IF_FAILED(g_captureItem->get_Size(&size));
+                RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(size.Width), static_cast<UINT>(size.Height)));
+                g_captureWidth = static_cast<UINT>(size.Width);
+                g_captureHeight = static_cast<UINT>(size.Height);
+                VirtuaCamLog::LogLine(std::format(
+                    L"Capture init: using WGC hwnd={} (selected hwnd={}) size={}x{}",
+                    static_cast<UINT64>(reinterpret_cast<UINT_PTR>(wgcHwnd)),
+                    static_cast<UINT64>(reinterpret_cast<UINT_PTR>(hwndToCapture)),
+                    g_captureWidth,
+                    g_captureHeight));
+                g_captureBackend = CaptureBackend::Wgc;
+            } else {
+                VirtuaCamLog::LogHr(L"InitWgc failed; falling back to BitBlt", hr);
+                ResetSharedOutputs();
+            }
+        }
+
+        if (g_captureBackend == CaptureBackend::None) {
+            // Method 1: BitBlt last resort (classic Win32 only).
+            RETURN_IF_FAILED(InitBitBltCapture(hwndToCapture));
+            VirtuaCamLog::LogLine(L"Capture init: using BitBlt fallback");
+            g_captureBackend = CaptureBackend::BitBlt;
         }
 
         g_isCapturing = true;
@@ -535,53 +808,36 @@ namespace BuiltInCaptureProducer
     {
         if (!g_isCapturing) return;
 
-        if (g_captureBackend == CaptureBackend::Gdi) {
-            if (FAILED(CaptureGdiFrame())) {
+        if (g_captureBackend == CaptureBackend::PrintWindow) {
+            if (FAILED(CapturePrintWindowFrame())) return;
+        } else if (g_captureBackend == CaptureBackend::BitBlt) {
+            if (FAILED(CaptureBitBltFrame())) return;
+        } else {
+            // WGC path
+            if (!g_framePool) return;
+
+            ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFrame> frame;
+            if (FAILED(g_framePool->TryGetNextFrame(frame.ReleaseAndGetAddressOf())) || !frame) {
                 return;
             }
 
-            UINT64 newFenceValue = g_fenceValue.fetch_add(1) + 1;
-            g_d3d11Context4->Signal(g_sharedD3D11Fence.Get(), newFenceValue);
-
-            if (g_pManifestView) {
-                InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
+            ComPtr<ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface> surface;
+            if (FAILED(frame->get_Surface(surface.ReleaseAndGetAddressOf())) || !surface) {
+                return;
             }
 
-            if (!g_loggedFirstFrame) {
-                VirtuaCamLog::LogLine(std::format(
-                    L"First producer frame: type=capture-gdi hwnd={} size={}x{} frameValue={}",
-                    static_cast<UINT64>(reinterpret_cast<UINT_PTR>(g_captureTargetHwnd)),
-                    g_captureWidth,
-                    g_captureHeight,
-                    newFenceValue));
-                g_loggedFirstFrame = true;
+            ComPtr<IDirect3DDxgiInterfaceAccess> surfaceAccess;
+            if (FAILED(surface.As(&surfaceAccess)) || !surfaceAccess) {
+                return;
             }
-            return;
+
+            ComPtr<ID3D11Texture2D> frameTexture;
+            if (FAILED(surfaceAccess->GetInterface(IID_PPV_ARGS(&frameTexture))) || !frameTexture) {
+                return;
+            }
+
+            g_d3d11Context->CopyResource(g_sharedD3D11Texture.Get(), frameTexture.Get());
         }
-
-        if (!g_framePool) return;
-
-        ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFrame> frame;
-        if (FAILED(g_framePool->TryGetNextFrame(frame.ReleaseAndGetAddressOf())) || !frame) {
-            return;
-        }
-
-        ComPtr<ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface> surface;
-        if (FAILED(frame->get_Surface(surface.ReleaseAndGetAddressOf())) || !surface) {
-            return;
-        }
-
-        ComPtr<IDirect3DDxgiInterfaceAccess> surfaceAccess;
-        if (FAILED(surface.As(&surfaceAccess)) || !surfaceAccess) {
-            return;
-        }
-
-        ComPtr<ID3D11Texture2D> frameTexture;
-        if (FAILED(surfaceAccess->GetInterface(IID_PPV_ARGS(&frameTexture))) || !frameTexture) {
-            return;
-        }
-
-        g_d3d11Context->CopyResource(g_sharedD3D11Texture.Get(), frameTexture.Get());
 
         UINT64 newFenceValue = g_fenceValue.fetch_add(1) + 1;
         g_d3d11Context4->Signal(g_sharedD3D11Fence.Get(), newFenceValue);
@@ -592,8 +848,11 @@ namespace BuiltInCaptureProducer
 
         if (!g_loggedFirstFrame) {
             VirtuaCamLog::LogLine(std::format(
-                L"First producer frame: type=capture hwnd={} frameValue={}",
+                L"First producer frame: type=capture backend={} hwnd={} size={}x{} frameValue={}",
+                (g_captureBackend == CaptureBackend::Wgc) ? L"wgc" : (g_captureBackend == CaptureBackend::PrintWindow) ? L"printwindow" : L"bitblt",
                 static_cast<UINT64>(reinterpret_cast<UINT_PTR>(g_captureTargetHwnd)),
+                g_captureWidth,
+                g_captureHeight,
                 newFenceValue));
             g_loggedFirstFrame = true;
         }
@@ -609,26 +868,10 @@ namespace BuiltInCaptureProducer
         g_framePool.Reset();
         g_captureItem.Reset();
         g_winrtD3dDevice.Reset();
-
-        if (g_pManifestView) UnmapViewOfFile(g_pManifestView);
-        if (g_hManifest) CloseHandle(g_hManifest);
-        g_pManifestView = nullptr;
-        g_hManifest = nullptr;
-
-        if (g_hSharedTextureHandle) CloseHandle(g_hSharedTextureHandle);
-        if (g_hSharedFenceHandle) CloseHandle(g_hSharedFenceHandle);
-        g_hSharedTextureHandle = nullptr;
-        g_hSharedFenceHandle = nullptr;
+        ResetSharedOutputs();
         g_brokerProcessId = 0;
-        g_brokerFenceHandleValue = 0;
-
-        g_sharedD3D11Fence.Reset();
-        g_sharedD3D11Texture.Reset();
         g_captureTargetHwnd = nullptr;
         g_captureBackend = CaptureBackend::None;
-        g_captureWidth = 0;
-        g_captureHeight = 0;
-        g_gdiFrame.clear();
 
         if (g_d3d11Context) g_d3d11Context->ClearState();
         g_d3d11Context4.Reset();
@@ -636,7 +879,10 @@ namespace BuiltInCaptureProducer
         g_d3d11Device5.Reset();
         g_d3d11Device.Reset();
 
-        RoUninitialize();
+        if (g_roInitialized) {
+            RoUninitialize();
+            g_roInitialized = false;
+        }
     }
 
     bool IsProcessRunning(const wchar_t* processName)
@@ -698,6 +944,75 @@ namespace BuiltInCaptureProducer
         return GetDefaultVirtuaCamExePath();
     }
 
+    bool LaunchVirtuaCamStartupInActiveSession(const std::wstring& exePath, const std::wstring& startupArgs)
+    {
+        const DWORD sessionId = WTSGetActiveConsoleSessionId();
+        if (sessionId == 0xFFFFFFFF) {
+            VirtuaCamLog::LogLine(L"Watcher: no active console session for CreateProcessAsUser");
+            return false;
+        }
+
+        wil::unique_handle userToken;
+        if (!WTSQueryUserToken(sessionId, userToken.put())) {
+            VirtuaCamLog::LogWin32(L"WTSQueryUserToken failed", GetLastError());
+            return false;
+        }
+
+        wil::unique_handle primaryToken;
+        if (!DuplicateTokenEx(
+                userToken.get(),
+                TOKEN_ALL_ACCESS,
+                nullptr,
+                SecurityIdentification,
+                TokenPrimary,
+                primaryToken.put())) {
+            VirtuaCamLog::LogWin32(L"DuplicateTokenEx failed", GetLastError());
+            return false;
+        }
+
+        LPVOID envBlock = nullptr;
+        if (!CreateEnvironmentBlock(&envBlock, primaryToken.get(), FALSE)) {
+            VirtuaCamLog::LogWin32(L"CreateEnvironmentBlock failed", GetLastError());
+            envBlock = nullptr;
+        }
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.lpDesktop = (LPWSTR)L"winsta0\\default";
+
+        PROCESS_INFORMATION pi{};
+        const std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, startupArgs);
+        std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
+        cmdLineMutable.push_back(L'\0');
+
+        const DWORD createFlags = CREATE_UNICODE_ENVIRONMENT;
+        const BOOL ok = CreateProcessAsUserW(
+            primaryToken.get(),
+            exePath.c_str(),
+            cmdLineMutable.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            createFlags,
+            envBlock,
+            nullptr,
+            &si,
+            &pi);
+
+        if (envBlock) {
+            DestroyEnvironmentBlock(envBlock);
+        }
+
+        if (!ok) {
+            VirtuaCamLog::LogWin32(std::format(L"CreateProcessAsUserW failed: {}", exePath), GetLastError());
+            return false;
+        }
+
+        if (pi.hThread) CloseHandle(pi.hThread);
+        if (pi.hProcess) CloseHandle(pi.hProcess);
+        return true;
+    }
+
     bool LaunchVirtuaCamStartup()
     {
         std::wstring exePath = GetVirtuaCamExePathFromRegistryOrDefault();
@@ -715,21 +1030,23 @@ namespace BuiltInCaptureProducer
             startupArgs += extraArgs;
         }
 
+        // Prefer ShellExecuteExW for normal user-session watcher; fall back to CreateProcessAsUser for service/session-0.
         SHELLEXECUTEINFOW sei = {};
         sei.cbSize = sizeof(sei);
         sei.fMask = SEE_MASK_NOCLOSEPROCESS;
         sei.lpFile = exePath.c_str();
         sei.lpParameters = startupArgs.c_str();
         sei.nShow = SW_HIDE;
-        if (!ShellExecuteExW(&sei)) {
-            VirtuaCamLog::LogWin32(std::format(L"ShellExecuteExW failed for {}", exePath), GetLastError());
-            return false;
+        if (ShellExecuteExW(&sei)) {
+            if (sei.hProcess) {
+                CloseHandle(sei.hProcess);
+            }
+            return true;
         }
 
-        if (sei.hProcess) {
-            CloseHandle(sei.hProcess);
-        }
-        return true;
+        const DWORD err = GetLastError();
+        VirtuaCamLog::LogWin32(std::format(L"ShellExecuteExW failed for {}; falling back to CreateProcessAsUser", exePath), err);
+        return LaunchVirtuaCamStartupInActiveSession(exePath, startupArgs);
     }
 
     HANDLE OpenClientRequestEventHandle()
@@ -771,10 +1088,14 @@ namespace BuiltInCaptureProducer
         return eventHandle;
     }
 
-    DWORD WINAPI WatcherThreadProc(LPVOID)
+    DWORD RunWatcherLoop(HANDLE stopEvent)
     {
         int launchFailCount = 0;
         while (true) {
+            if (stopEvent && WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
+                return 0;
+            }
+
             HANDLE requestEvent = CreateRegisteredClientRequestEventHandle();
             if (!requestEvent) {
                 Sleep(kWatcherOpenRetryMs);
@@ -782,9 +1103,22 @@ namespace BuiltInCaptureProducer
             }
 
             while (true) {
-                DWORD waitResult = WaitForSingleObject(requestEvent, INFINITE);
-                if (waitResult != WAIT_OBJECT_0) {
-                    break;
+                DWORD waitResult = WAIT_FAILED;
+                if (stopEvent) {
+                    HANDLE handles[2] = { stopEvent, requestEvent };
+                    waitResult = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+                    if (waitResult == WAIT_OBJECT_0) {
+                        CloseHandle(requestEvent);
+                        return 0;
+                    }
+                    if (waitResult != (WAIT_OBJECT_0 + 1)) {
+                        break;
+                    }
+                } else {
+                    waitResult = WaitForSingleObject(requestEvent, INFINITE);
+                    if (waitResult != WAIT_OBJECT_0) {
+                        break;
+                    }
                 }
 
                 if (!IsProcessRunning(L"VirtuaCam.exe")) {
@@ -802,6 +1136,306 @@ namespace BuiltInCaptureProducer
             CloseHandle(requestEvent);
         }
     }
+
+    DWORD WINAPI WatcherThreadProc(LPVOID)
+    {
+        return RunWatcherLoop(nullptr);
+    }
+
+}
+
+static SERVICE_STATUS_HANDLE g_serviceStatusHandle = nullptr;
+static SERVICE_STATUS g_serviceStatus = {};
+static HANDLE g_serviceStopEvent = nullptr;
+static HANDLE g_serviceWorkerThread = nullptr;
+
+static bool IsProcessRunningForService(const wchar_t* processName)
+{
+    if (!processName || !*processName) {
+        return false;
+    }
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    PROCESSENTRY32W pe = {};
+    pe.dwSize = sizeof(pe);
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, processName) == 0) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+static std::wstring GetVirtuaCamExePathFromRegistryOrDefaultForService()
+{
+    HKEY hKey = nullptr;
+    wchar_t value[MAX_PATH] = {};
+    DWORD valueSize = sizeof(value);
+    DWORD valueType = 0;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\VirtuaCam", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        const LSTATUS status = RegQueryValueExW(hKey, L"VirtuaCamExe", nullptr, &valueType, reinterpret_cast<LPBYTE>(value), &valueSize);
+        RegCloseKey(hKey);
+        if (status == ERROR_SUCCESS && valueType == REG_SZ && value[0] != L'\0') {
+            return value;
+        }
+    }
+
+    wchar_t modulePath[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, modulePath, ARRAYSIZE(modulePath))) {
+        return L"VirtuaCam.exe";
+    }
+    std::wstring path = modulePath;
+    size_t slash = path.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) {
+        path.resize(slash + 1);
+    }
+    path += L"VirtuaCam.exe";
+    return path;
+}
+
+static bool LaunchVirtuaCamStartupFromService()
+{
+    std::wstring exePath = GetVirtuaCamExePathFromRegistryOrDefaultForService();
+    std::wstring startupArgs = L"/startup";
+
+    wchar_t extraArgs[1024] = {};
+    const DWORD extraArgsLength = GetEnvironmentVariableW(
+        L"VIRTUACAM_STARTUP_ARGS",
+        extraArgs,
+        ARRAYSIZE(extraArgs));
+    if (extraArgsLength > 0 && extraArgsLength < ARRAYSIZE(extraArgs)) {
+        startupArgs += L" ";
+        startupArgs += extraArgs;
+    }
+
+    const DWORD sessionId = WTSGetActiveConsoleSessionId();
+    if (sessionId == 0xFFFFFFFF) {
+        VirtuaCamLog::LogLine(L"Watcher service: no active console session for CreateProcessAsUser");
+        return false;
+    }
+
+    wil::unique_handle userToken;
+    if (!WTSQueryUserToken(sessionId, userToken.put())) {
+        VirtuaCamLog::LogWin32(L"Watcher service: WTSQueryUserToken failed", GetLastError());
+        return false;
+    }
+
+    wil::unique_handle primaryToken;
+    if (!DuplicateTokenEx(
+            userToken.get(),
+            TOKEN_ALL_ACCESS,
+            nullptr,
+            SecurityIdentification,
+            TokenPrimary,
+            primaryToken.put())) {
+        VirtuaCamLog::LogWin32(L"Watcher service: DuplicateTokenEx failed", GetLastError());
+        return false;
+    }
+
+    LPVOID envBlock = nullptr;
+    if (!CreateEnvironmentBlock(&envBlock, primaryToken.get(), FALSE)) {
+        VirtuaCamLog::LogWin32(L"Watcher service: CreateEnvironmentBlock failed", GetLastError());
+        envBlock = nullptr;
+    }
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.lpDesktop = (LPWSTR)L"winsta0\\default";
+
+    PROCESS_INFORMATION pi{};
+    const std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, startupArgs);
+    std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
+    cmdLineMutable.push_back(L'\0');
+
+    const DWORD createFlags = CREATE_UNICODE_ENVIRONMENT;
+    const BOOL ok = CreateProcessAsUserW(
+        primaryToken.get(),
+        exePath.c_str(),
+        cmdLineMutable.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        createFlags,
+        envBlock,
+        nullptr,
+        &si,
+        &pi);
+
+    if (envBlock) {
+        DestroyEnvironmentBlock(envBlock);
+    }
+
+    if (!ok) {
+        VirtuaCamLog::LogWin32(std::format(L"Watcher service: CreateProcessAsUserW failed: {}", exePath), GetLastError());
+        return false;
+    }
+
+    if (pi.hThread) CloseHandle(pi.hThread);
+    if (pi.hProcess) CloseHandle(pi.hProcess);
+    return true;
+}
+
+static HANDLE CreateRegisteredClientRequestEventHandleForService()
+{
+    HANDLE eventHandle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!eventHandle) {
+        VirtuaCamLog::LogWin32(L"Watcher service: CreateEventW failed", GetLastError());
+        return nullptr;
+    }
+
+    DriverBridge driverBridge;
+    HRESULT hr = driverBridge.Initialize();
+    if (FAILED(hr)) {
+        VirtuaCamLog::LogHr(L"Watcher service: DriverBridge::Initialize failed", hr);
+        CloseHandle(eventHandle);
+        return nullptr;
+    }
+
+    hr = driverBridge.RegisterClientRequestEvent(eventHandle);
+    if (FAILED(hr)) {
+        VirtuaCamLog::LogHr(L"Watcher service: DriverBridge::RegisterClientRequestEvent failed", hr);
+        CloseHandle(eventHandle);
+        return nullptr;
+    }
+
+    VirtuaCamLog::LogLine(std::format(
+        L"Watcher service: registered client request event handle=0x{:X}",
+        static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(eventHandle))));
+    return eventHandle;
+}
+
+static DWORD RunWatcherLoopForService(HANDLE stopEvent)
+{
+    int launchFailCount = 0;
+    while (true) {
+        if (stopEvent && WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
+            return 0;
+        }
+
+        HANDLE requestEvent = CreateRegisteredClientRequestEventHandleForService();
+        if (!requestEvent) {
+            Sleep(1000);
+            continue;
+        }
+
+        while (true) {
+            HANDLE handles[2] = { stopEvent, requestEvent };
+            const DWORD waitResult = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+            if (waitResult == WAIT_OBJECT_0) {
+                CloseHandle(requestEvent);
+                return 0;
+            }
+            if (waitResult != (WAIT_OBJECT_0 + 1)) {
+                break;
+            }
+
+            if (!IsProcessRunningForService(L"VirtuaCam.exe")) {
+                if (launchFailCount < 3) {
+                    if (LaunchVirtuaCamStartupFromService()) {
+                        launchFailCount = 0;
+                    } else {
+                        launchFailCount++;
+                    }
+                }
+            }
+            ResetEvent(requestEvent);
+        }
+
+        CloseHandle(requestEvent);
+    }
+}
+
+static void SetWatcherServiceStatus(DWORD state, DWORD win32ExitCode = NO_ERROR, DWORD waitHintMs = 0)
+{
+    if (!g_serviceStatusHandle) return;
+
+    g_serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    g_serviceStatus.dwCurrentState = state;
+    g_serviceStatus.dwWin32ExitCode = win32ExitCode;
+    g_serviceStatus.dwWaitHint = waitHintMs;
+
+    if (state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING) {
+        g_serviceStatus.dwControlsAccepted = 0;
+        g_serviceStatus.dwCheckPoint++;
+    } else {
+        g_serviceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
+        g_serviceStatus.dwCheckPoint = 0;
+    }
+
+    (void)SetServiceStatus(g_serviceStatusHandle, &g_serviceStatus);
+}
+
+static void WINAPI WatcherServiceCtrlHandler(DWORD control)
+{
+    switch (control) {
+        case SERVICE_CONTROL_STOP:
+        case SERVICE_CONTROL_SHUTDOWN:
+            SetWatcherServiceStatus(SERVICE_STOP_PENDING, NO_ERROR, 2000);
+            if (g_serviceStopEvent) {
+                SetEvent(g_serviceStopEvent);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+static DWORD WINAPI WatcherServiceWorkerThreadProc(LPVOID)
+{
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(hr)) {
+        VirtuaCamLog::LogHr(L"Watcher service CoInitializeEx failed", hr);
+        return 1;
+    }
+    const DWORD exitCode = RunWatcherLoopForService(g_serviceStopEvent);
+    CoUninitialize();
+    return exitCode;
+}
+
+void WINAPI WatcherServiceMain(DWORD, LPWSTR*)
+{
+    g_serviceStatusHandle = RegisterServiceCtrlHandlerW(kWatcherServiceName, WatcherServiceCtrlHandler);
+    if (!g_serviceStatusHandle) {
+        return;
+    }
+
+    g_serviceStatus.dwCheckPoint = 1;
+    SetWatcherServiceStatus(SERVICE_START_PENDING, NO_ERROR, 5000);
+
+    g_serviceStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_serviceStopEvent) {
+        SetWatcherServiceStatus(SERVICE_STOPPED, GetLastError(), 0);
+        return;
+    }
+
+    g_serviceWorkerThread = CreateThread(nullptr, 0, WatcherServiceWorkerThreadProc, nullptr, 0, nullptr);
+    if (!g_serviceWorkerThread) {
+        const DWORD err = GetLastError();
+        CloseHandle(g_serviceStopEvent);
+        g_serviceStopEvent = nullptr;
+        SetWatcherServiceStatus(SERVICE_STOPPED, err, 0);
+        return;
+    }
+
+    SetWatcherServiceStatus(SERVICE_RUNNING, NO_ERROR, 0);
+    WaitForSingleObject(g_serviceWorkerThread, INFINITE);
+
+    CloseHandle(g_serviceWorkerThread);
+    g_serviceWorkerThread = nullptr;
+    CloseHandle(g_serviceStopEvent);
+    g_serviceStopEvent = nullptr;
+
+    SetWatcherServiceStatus(SERVICE_STOPPED, NO_ERROR, 0);
 }
 
 namespace BuiltInCameraProducer
@@ -1130,6 +1764,19 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
     logOpts.allocConsoleIfMissing = false;
     logOpts.enabled = enableDebugLogging;
     VirtuaCamLog::Init(logOpts);
+
+    if (HasArg(cmdLine, L"--service")) {
+        VirtuaCamLog::LogLine(L"Starting watcher service mode (--service)");
+        SERVICE_TABLE_ENTRYW serviceTable[] = {
+            { (LPWSTR)kWatcherServiceName, WatcherServiceMain },
+            { nullptr, nullptr }
+        };
+        if (!StartServiceCtrlDispatcherW(serviceTable)) {
+            VirtuaCamLog::LogWin32(L"StartServiceCtrlDispatcherW failed", GetLastError());
+            return 20;
+        }
+        return 0;
+    }
 
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 
