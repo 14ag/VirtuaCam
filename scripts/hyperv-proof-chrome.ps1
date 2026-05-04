@@ -6,6 +6,8 @@ param(
     [string]$GuestPasswordPlaintext = "",
     [string]$ArtifactRoot = "output\playwright",
     [ValidateSet("Chrome", "Edge")][string]$Browser = "Chrome",
+    [ValidateSet("Notepad", "Settings", "Explorer")][string]$SourceWindowMode = "Notepad",
+    [ValidateSet("auto", "printwindow", "wgc", "bitblt")][string]$CaptureBackend = "auto",
     [string[]]$BrowserExtraArgs = @(),
     [switch]$EnableVerifier,
     [bool]$RevertAfterRun = $true,
@@ -627,7 +629,7 @@ $session = $null
 $holdProc = $null
 $driverPackageStage = $null
 $runSucceeded = $false
-$attemptChange = "browser=$Browser; verifier=$([bool]$EnableVerifier); source=Notepad; checkpoint=$CheckpointName; args=hold-defaults --force-directshow $($BrowserExtraArgs -join ' ')"
+$attemptChange = "browser=$Browser; verifier=$([bool]$EnableVerifier); source=$SourceWindowMode; captureBackend=$CaptureBackend; checkpoint=$CheckpointName; args=hold-defaults --force-directshow $($BrowserExtraArgs -join ' ')"
 $guestCred = Get-HvGuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
 
 Write-HvLog -Message ("Hyper-V proof harness start for '{0}'" -f $VmName) -LogPath $LogPath -Level STEP
@@ -847,7 +849,8 @@ try {
         "-GuestPackageRoot", $guestPackageRoot,
         "-GuestWebcamHtml", $guestWebcamHtml,
         "-Browser", $Browser,
-        "-SourceWindowMode", "Notepad",
+        "-SourceWindowMode", $SourceWindowMode,
+        "-CaptureBackend", $CaptureBackend,
         "-AttemptId", "$nextAttemptId",
         "-ServeHttp",
         "-HttpPort", "8000",

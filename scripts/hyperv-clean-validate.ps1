@@ -58,7 +58,7 @@ function Assert-PoshSshAvailable {
         Fail-Hv -Message "Posh-SSH module is required for clean bench validation." -LogPath $LogFile
     }
 
-    Import-Module $module.ModuleBase -Force
+    Import-Module $module.Path -Force
     return $module
 }
 

@@ -15,7 +15,7 @@ set(VCAM_COMMON_VCPKG_LIBS WIL::WIL)
 set(VCAM_MF_LIBS mfplat mfuuid mfreadwrite mf)
 set(VCAM_MF_GUID_LIBS mfuuid)
 set(VCAM_D3D_LIBS d3d11 d2d1 dwrite windowscodecs d3d12 d3dcompiler dxgi)
-set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 comctl32 shlwapi synchronization dwmapi windowsapp avrt strmiids ksproxy)
+set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 comctl32 shlwapi synchronization dwmapi windowsapp avrt strmiids ksproxy wtsapi32 userenv)
 
 add_library(VirtuaCamCommon STATIC
     VirtuaCam/Tools.cpp
