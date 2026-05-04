@@ -66,15 +66,5 @@ output/
 wiki/
 ignition.txt
 driver-project/Driver/avshws/avshws.inf
-output0/avshws.cat
-output0/avshws.sys
-output0/VirtualCameraDriver-TestSign.cer
-output0/playwright/attempt-state.json
-output0/playwright/browser-commandline.txt
-output0/playwright/guest-baseline.json
-output0/playwright/guest-console-state.json
-output0/playwright/guest-driver-install.txt
-output0/playwright/guest-preinstall-clean.json
-output0/playwright/vm-session-status.json
-output0/playwright/vm-webcam-proof.json
-output0/playwright/vm-webcam-proof.png
+
+test-reports/
