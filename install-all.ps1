@@ -239,6 +239,7 @@ $OutputRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "output"))
 
 $runKeyPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
 $virtuaCamRegPath = "HKLM:\SOFTWARE\VirtuaCam"
+$watcherServiceName = "VirtuaCamWatcher"
 $logsDir = Join-Path $OutputRoot "logs"
 $logPath = Join-Path $logsDir "driver-install.log"
 
@@ -253,6 +254,65 @@ $driverCat = Join-Path $OutputRoot "avshws.cat"
 $driverCer = Join-Path $OutputRoot "VirtualCameraDriver-TestSign.cer"
 $clientDll = Join-Path $OutputRoot "DirectPortClient.dll"
 
+function Install-WatcherService {
+    param([Parameter(Mandatory = $true)][string]$ProcessPath)
+
+    if (-not (Test-Path -LiteralPath $ProcessPath)) {
+        Fail "Cannot install watcher service because ProcessExe is missing: $ProcessPath"
+    }
+
+    $binPath = "`"$ProcessPath`" --service"
+    $service = Get-Service -Name $watcherServiceName -ErrorAction SilentlyContinue
+    if ($service) {
+        Write-Info "Updating service: $watcherServiceName"
+        if ($service.Status -ne "Stopped") {
+            Invoke-NativeProcess -FilePath "$env:WINDIR\System32\sc.exe" -Arguments @("stop", $watcherServiceName) -AllowedExitCodes @(0, 1062)
+            try {
+                $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(15))
+            } catch {
+                $service.Refresh()
+                if ($service.Status -ne "Stopped") {
+                    Fail "Timed out stopping watcher service before update: $watcherServiceName"
+                }
+            }
+        }
+        Invoke-NativeProcess -FilePath "$env:WINDIR\System32\sc.exe" -Arguments @("config", $watcherServiceName, "binPath=", $binPath, "start=", "auto")
+    } else {
+        Write-Info "Creating service: $watcherServiceName"
+        Invoke-NativeProcess -FilePath "$env:WINDIR\System32\sc.exe" -Arguments @("create", $watcherServiceName, "binPath=", $binPath, "start=", "auto", "DisplayName=", "VirtuaCam Watcher")
+    }
+
+    Invoke-NativeProcess -FilePath "$env:WINDIR\System32\sc.exe" -Arguments @("description", $watcherServiceName, "Starts VirtuaCam when the virtual camera is accessed.")
+
+    $service = Get-Service -Name $watcherServiceName -ErrorAction Stop
+    if ($service.Status -ne "Running") {
+        Invoke-NativeProcess -FilePath "$env:WINDIR\System32\sc.exe" -Arguments @("start", $watcherServiceName) -AllowedExitCodes @(0, 1056)
+    }
+
+    Write-Success "Watcher service installed and running: $watcherServiceName"
+}
+
+function Uninstall-WatcherService {
+    $service = Get-Service -Name $watcherServiceName -ErrorAction SilentlyContinue
+    if (-not $service) {
+        return
+    }
+
+    if ($service.Status -ne "Stopped") {
+        Invoke-NativeProcess -FilePath "$env:WINDIR\System32\sc.exe" -Arguments @("stop", $watcherServiceName) -AllowedExitCodes @(0, 1062)
+        try {
+            $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(15))
+        } catch {
+            $service.Refresh()
+            if ($service.Status -ne "Stopped") {
+                Fail "Timed out stopping watcher service before removal: $watcherServiceName"
+            }
+        }
+    }
+    Invoke-NativeProcess -FilePath "$env:WINDIR\System32\sc.exe" -Arguments @("delete", $watcherServiceName)
+    Write-Success "Watcher service removed: $watcherServiceName"
+}
+
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host " Install All"
 Write-Host "============================================================" -ForegroundColor Green
@@ -260,6 +320,7 @@ Write-Info "OutputRoot: $OutputRoot"
 
 if ($Uninstall) {
     Write-Step "Uninstall startup and VirtuaCam registry entries"
+    Uninstall-WatcherService
     Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCamProcess" -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCam" -ErrorAction SilentlyContinue
     Remove-Item -Path $virtuaCamRegPath -Recurse -ErrorAction SilentlyContinue
@@ -363,9 +424,10 @@ New-Item -Path $virtuaCamRegPath -Force | Out-Null
 Set-ItemProperty -Path $virtuaCamRegPath -Name "InstallDir" -Value $installDir
 Set-ItemProperty -Path $virtuaCamRegPath -Name "VirtuaCamExe" -Value $virtuaCamExe
 Set-ItemProperty -Path $virtuaCamRegPath -Name "ProcessExe" -Value $processExe
-Set-ItemProperty -Path $runKeyPath -Name "VirtuaCamProcess" -Value "`"$processExe`""
-Set-ItemProperty -Path $runKeyPath -Name "VirtuaCam" -Value "`"$virtuaCamExe`" /startup"
-Write-Success "Configured HKLM\SOFTWARE\VirtuaCam and HKCU Run keys"
+Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCamProcess" -ErrorAction SilentlyContinue
+Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCam" -ErrorAction SilentlyContinue
+Install-WatcherService -ProcessPath $processExe
+Write-Success "Configured HKLM\SOFTWARE\VirtuaCam and watcher service startup"
 
 Write-Host "`n============================================================" -ForegroundColor Green
 Write-Host " INSTALL-ALL SUCCEEDED"
