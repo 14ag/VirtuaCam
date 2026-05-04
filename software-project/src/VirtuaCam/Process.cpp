@@ -19,6 +19,9 @@
 #include <vector>
 #include <wtsapi32.h>
 #include <userenv.h>
+#include <d3dcompiler.h>
+#include <algorithm>
+#include <cmath>
 
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
@@ -30,6 +33,7 @@
 #pragma comment(lib, "runtimeobject.lib")
 #pragma comment(lib, "wtsapi32.lib")
 #pragma comment(lib, "userenv.lib")
+#pragma comment(lib, "d3dcompiler.lib")
 
 using Microsoft::WRL::ComPtr;
 
@@ -168,6 +172,97 @@ namespace
         duplicatedHandleValue = static_cast<UINT64>(reinterpret_cast<UINT_PTR>(duplicatedHandle));
         return S_OK;
     }
+
+    constexpr UINT kProducerCanvasWidth = 1920;
+    constexpr UINT kProducerCanvasHeight = 1080;
+
+    const char* kCanvasBlitVertexShader = R"(
+struct VS_OUTPUT { float4 Pos : SV_POSITION; float2 Tex : TEXCOORD; };
+VS_OUTPUT main(uint id : SV_VertexID) {
+    VS_OUTPUT output;
+    output.Tex = float2((id << 1) & 2, id & 2);
+    output.Pos = float4(output.Tex.x * 2.0 - 1.0, 1.0 - output.Tex.y * 2.0, 0.0, 1.0);
+    return output;
+})";
+
+    const char* kCanvasBlitPixelShader = R"(
+Texture2D inputTexture : register(t0);
+SamplerState inputSampler : register(s0);
+float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
+    return inputTexture.Sample(inputSampler, uv);
+})";
+
+    HRESULT CreateCanvasBlitResources(
+        ID3D11Device* device,
+        ID3D11VertexShader** vertexShader,
+        ID3D11PixelShader** pixelShader,
+        ID3D11SamplerState** samplerState)
+    {
+        RETURN_HR_IF_NULL(E_POINTER, device);
+        RETURN_HR_IF_NULL(E_POINTER, vertexShader);
+        RETURN_HR_IF_NULL(E_POINTER, pixelShader);
+        RETURN_HR_IF_NULL(E_POINTER, samplerState);
+
+        ComPtr<ID3DBlob> vsBlob;
+        ComPtr<ID3DBlob> psBlob;
+        RETURN_IF_FAILED(D3DCompile(
+            kCanvasBlitVertexShader,
+            strlen(kCanvasBlitVertexShader),
+            nullptr,
+            nullptr,
+            nullptr,
+            "main",
+            "vs_5_0",
+            0,
+            0,
+            &vsBlob,
+            nullptr));
+        RETURN_IF_FAILED(D3DCompile(
+            kCanvasBlitPixelShader,
+            strlen(kCanvasBlitPixelShader),
+            nullptr,
+            nullptr,
+            nullptr,
+            "main",
+            "ps_5_0",
+            0,
+            0,
+            &psBlob,
+            nullptr));
+        RETURN_IF_FAILED(device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, vertexShader));
+        RETURN_IF_FAILED(device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, pixelShader));
+
+        D3D11_SAMPLER_DESC samplerDesc = {};
+        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        samplerDesc.MinLOD = 0;
+        samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+        RETURN_IF_FAILED(device->CreateSamplerState(&samplerDesc, samplerState));
+        return S_OK;
+    }
+
+    D3D11_VIEWPORT GetCoverViewport(UINT sourceWidth, UINT sourceHeight)
+    {
+        const float sourceW = static_cast<float>(std::max<UINT>(1, sourceWidth));
+        const float sourceH = static_cast<float>(std::max<UINT>(1, sourceHeight));
+        const float canvasW = static_cast<float>(kProducerCanvasWidth);
+        const float canvasH = static_cast<float>(kProducerCanvasHeight);
+        const float scale = (std::max)(canvasW / sourceW, canvasH / sourceH);
+        const float scaledW = sourceW * scale;
+        const float scaledH = sourceH * scale;
+
+        D3D11_VIEWPORT viewport = {};
+        viewport.TopLeftX = (canvasW - scaledW) * 0.5f;
+        viewport.TopLeftY = (canvasH - scaledH) * 0.5f;
+        viewport.Width = scaledW;
+        viewport.Height = scaledH;
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
+        return viewport;
+    }
 }
 
     bool ParseCommandLine(const WCHAR* cmdLine, std::wstring& type, std::wstring& args)
@@ -231,6 +326,12 @@ namespace BuiltInCaptureProducer
 
     static ComPtr<ID3D11Texture2D> g_sharedD3D11Texture;
     static ComPtr<ID3D11Fence> g_sharedD3D11Fence;
+    static ComPtr<ID3D11RenderTargetView> g_canvasRTV;
+    static ComPtr<ID3D11Texture2D> g_sourceD3D11Texture;
+    static ComPtr<ID3D11ShaderResourceView> g_sourceSRV;
+    static ComPtr<ID3D11VertexShader> g_canvasVS;
+    static ComPtr<ID3D11PixelShader> g_canvasPS;
+    static ComPtr<ID3D11SamplerState> g_canvasSampler;
     static HANDLE g_hSharedTextureHandle = nullptr;
     static HANDLE g_hSharedFenceHandle = nullptr;
     static HANDLE g_hManifest = nullptr;
@@ -338,6 +439,18 @@ namespace BuiltInCaptureProducer
 
         g_sharedD3D11Fence.Reset();
         g_sharedD3D11Texture.Reset();
+        g_canvasRTV.Reset();
+        g_sourceSRV.Reset();
+        g_sourceD3D11Texture.Reset();
+        g_canvasVS.Reset();
+        g_canvasPS.Reset();
+        g_canvasSampler.Reset();
+        g_canvasRTV.Reset();
+        g_sourceSRV.Reset();
+        g_sourceD3D11Texture.Reset();
+        g_canvasVS.Reset();
+        g_canvasPS.Reset();
+        g_canvasSampler.Reset();
         g_captureWidth = 0;
         g_captureHeight = 0;
         g_gdiFrame.clear();
@@ -374,6 +487,71 @@ namespace BuiltInCaptureProducer
             &g_d3d11Context));
         RETURN_IF_FAILED(g_d3d11Device.As(&g_d3d11Device5));
         RETURN_IF_FAILED(g_d3d11Context.As(&g_d3d11Context4));
+        return S_OK;
+    }
+
+    static HRESULT EnsureCaptureSourceTexture(UINT width, UINT height)
+    {
+        RETURN_HR_IF(E_INVALIDARG, width == 0 || height == 0);
+
+        D3D11_TEXTURE2D_DESC currentDesc = {};
+        if (g_sourceD3D11Texture) {
+            g_sourceD3D11Texture->GetDesc(&currentDesc);
+        }
+        if (g_sourceD3D11Texture && g_sourceSRV && currentDesc.Width == width && currentDesc.Height == height) {
+            return S_OK;
+        }
+
+        g_sourceSRV.Reset();
+        g_sourceD3D11Texture.Reset();
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = width;
+        td.Height = height;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        RETURN_IF_FAILED(g_d3d11Device->CreateTexture2D(&td, nullptr, &g_sourceD3D11Texture));
+        RETURN_IF_FAILED(g_d3d11Device->CreateShaderResourceView(g_sourceD3D11Texture.Get(), nullptr, &g_sourceSRV));
+        return S_OK;
+    }
+
+    static HRESULT RenderTextureToCanvas(ID3D11Texture2D* sourceTexture, UINT sourceWidth, UINT sourceHeight)
+    {
+        RETURN_HR_IF_NULL(E_POINTER, sourceTexture);
+        RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasRTV.Get());
+        RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasVS.Get());
+        RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasPS.Get());
+        RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasSampler.Get());
+
+        ComPtr<ID3D11ShaderResourceView> sourceSRV;
+        if (sourceTexture == g_sourceD3D11Texture.Get() && g_sourceSRV) {
+            sourceSRV = g_sourceSRV;
+        } else {
+            RETURN_IF_FAILED(g_d3d11Device->CreateShaderResourceView(sourceTexture, nullptr, &sourceSRV));
+        }
+
+        const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        D3D11_VIEWPORT viewport = GetCoverViewport(sourceWidth, sourceHeight);
+        ID3D11RenderTargetView* rtvs[] = { g_canvasRTV.Get() };
+        ID3D11ShaderResourceView* srvs[] = { sourceSRV.Get() };
+        ID3D11SamplerState* samplers[] = { g_canvasSampler.Get() };
+
+        g_d3d11Context->OMSetRenderTargets(1, rtvs, nullptr);
+        g_d3d11Context->ClearRenderTargetView(g_canvasRTV.Get(), clearColor);
+        g_d3d11Context->RSSetViewports(1, &viewport);
+        g_d3d11Context->VSSetShader(g_canvasVS.Get(), nullptr, 0);
+        g_d3d11Context->PSSetShader(g_canvasPS.Get(), nullptr, 0);
+        g_d3d11Context->PSSetShaderResources(0, 1, srvs);
+        g_d3d11Context->PSSetSamplers(0, 1, samplers);
+        g_d3d11Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        g_d3d11Context->Draw(3, 0);
+
+        ID3D11ShaderResourceView* nullSrv[] = { nullptr };
+        g_d3d11Context->PSSetShaderResources(0, 1, nullSrv);
         return S_OK;
     }
 
@@ -460,9 +638,10 @@ namespace BuiltInCaptureProducer
         const LONG height = rc.bottom - rc.top;
         RETURN_HR_IF(E_INVALIDARG, width <= 0 || height <= 0);
 
-        RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(width), static_cast<UINT>(height)));
+        RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
         g_captureWidth = static_cast<UINT>(width);
         g_captureHeight = static_cast<UINT>(height);
+        RETURN_IF_FAILED(EnsureCaptureSourceTexture(g_captureWidth, g_captureHeight));
         g_gdiFrame.resize(static_cast<size_t>(g_captureWidth) * static_cast<size_t>(g_captureHeight) * 4);
         return S_OK;
     }
@@ -496,6 +675,9 @@ namespace BuiltInCaptureProducer
 
     static HRESULT InitSharedOutputs(UINT width, UINT height)
     {
+        width = kProducerCanvasWidth;
+        height = kProducerCanvasHeight;
+
         D3D11_TEXTURE2D_DESC td{};
         td.Width = width;
         td.Height = height;
@@ -504,9 +686,15 @@ namespace BuiltInCaptureProducer
         td.ArraySize = 1;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         td.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
         RETURN_IF_FAILED(g_d3d11Device->CreateTexture2D(&td, nullptr, &g_sharedD3D11Texture));
+        RETURN_IF_FAILED(g_d3d11Device->CreateRenderTargetView(g_sharedD3D11Texture.Get(), nullptr, &g_canvasRTV));
+        RETURN_IF_FAILED(CreateCanvasBlitResources(
+            g_d3d11Device.Get(),
+            g_canvasVS.ReleaseAndGetAddressOf(),
+            g_canvasPS.ReleaseAndGetAddressOf(),
+            g_canvasSampler.ReleaseAndGetAddressOf()));
         RETURN_IF_FAILED(g_d3d11Device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&g_sharedD3D11Fence)));
 
         DWORD pid = GetCurrentProcessId();
@@ -568,7 +756,12 @@ namespace BuiltInCaptureProducer
         const UINT width = static_cast<UINT>(rc.right - rc.left);
         const UINT height = static_cast<UINT>(rc.bottom - rc.top);
         RETURN_HR_IF(E_INVALIDARG, width == 0 || height == 0);
-        RETURN_HR_IF(E_NOTIMPL, width != g_captureWidth || height != g_captureHeight);
+        if (width != g_captureWidth || height != g_captureHeight) {
+            g_captureWidth = width;
+            g_captureHeight = height;
+            RETURN_IF_FAILED(EnsureCaptureSourceTexture(width, height));
+            VirtuaCamLog::LogLine(std::format(L"PrintWindow source resized: {}x{}", width, height));
+        }
 
         HDC windowDc = GetDC(g_captureTargetHwnd);
         if (!windowDc) {
@@ -615,7 +808,9 @@ namespace BuiltInCaptureProducer
                 g_gdiFrame.resize(byteCount);
             }
             memcpy(g_gdiFrame.data(), bits, byteCount);
-            g_d3d11Context->UpdateSubresource(g_sharedD3D11Texture.Get(), 0, nullptr, g_gdiFrame.data(), width * 4, 0);
+            RETURN_IF_FAILED(EnsureCaptureSourceTexture(width, height));
+            g_d3d11Context->UpdateSubresource(g_sourceD3D11Texture.Get(), 0, nullptr, g_gdiFrame.data(), width * 4, 0);
+            hr = RenderTextureToCanvas(g_sourceD3D11Texture.Get(), width, height);
         }
 
         SelectObject(memoryDc, oldBitmap);
@@ -637,7 +832,12 @@ namespace BuiltInCaptureProducer
         const UINT width = static_cast<UINT>(rc.right - rc.left);
         const UINT height = static_cast<UINT>(rc.bottom - rc.top);
         RETURN_HR_IF(E_INVALIDARG, width == 0 || height == 0);
-        RETURN_HR_IF(E_NOTIMPL, width != g_captureWidth || height != g_captureHeight);
+        if (width != g_captureWidth || height != g_captureHeight) {
+            g_captureWidth = width;
+            g_captureHeight = height;
+            RETURN_IF_FAILED(EnsureCaptureSourceTexture(width, height));
+            VirtuaCamLog::LogLine(std::format(L"BitBlt source resized: {}x{}", width, height));
+        }
 
         HDC windowDc = GetDC(g_captureTargetHwnd);
         if (!windowDc) {
@@ -691,7 +891,9 @@ namespace BuiltInCaptureProducer
                 g_gdiFrame.resize(byteCount);
             }
             memcpy(g_gdiFrame.data(), bits, byteCount);
-            g_d3d11Context->UpdateSubresource(g_sharedD3D11Texture.Get(), 0, nullptr, g_gdiFrame.data(), width * 4, 0);
+            RETURN_IF_FAILED(EnsureCaptureSourceTexture(width, height));
+            g_d3d11Context->UpdateSubresource(g_sourceD3D11Texture.Get(), 0, nullptr, g_gdiFrame.data(), width * 4, 0);
+            hr = RenderTextureToCanvas(g_sourceD3D11Texture.Get(), width, height);
         }
 
         SelectObject(memoryDc, oldBitmap);
@@ -735,7 +937,7 @@ namespace BuiltInCaptureProducer
             RETURN_IF_FAILED(InitWgc(wgcHwnd));
             ABI::Windows::Graphics::SizeInt32 size{};
             RETURN_IF_FAILED(g_captureItem->get_Size(&size));
-            RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(size.Width), static_cast<UINT>(size.Height)));
+            RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
             g_captureWidth = static_cast<UINT>(size.Width);
             g_captureHeight = static_cast<UINT>(size.Height);
             VirtuaCamLog::LogLine(std::format(
@@ -776,7 +978,7 @@ namespace BuiltInCaptureProducer
             if (SUCCEEDED(hr)) {
                 ABI::Windows::Graphics::SizeInt32 size{};
                 RETURN_IF_FAILED(g_captureItem->get_Size(&size));
-                RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(size.Width), static_cast<UINT>(size.Height)));
+                RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
                 g_captureWidth = static_cast<UINT>(size.Width);
                 g_captureHeight = static_cast<UINT>(size.Height);
                 VirtuaCamLog::LogLine(std::format(
@@ -836,7 +1038,16 @@ namespace BuiltInCaptureProducer
                 return;
             }
 
-            g_d3d11Context->CopyResource(g_sharedD3D11Texture.Get(), frameTexture.Get());
+            D3D11_TEXTURE2D_DESC frameDesc = {};
+            frameTexture->GetDesc(&frameDesc);
+            if (frameDesc.Width != g_captureWidth || frameDesc.Height != g_captureHeight) {
+                g_captureWidth = frameDesc.Width;
+                g_captureHeight = frameDesc.Height;
+                VirtuaCamLog::LogLine(std::format(L"WGC source resized: {}x{}", g_captureWidth, g_captureHeight));
+            }
+            if (FAILED(RenderTextureToCanvas(frameTexture.Get(), frameDesc.Width, frameDesc.Height))) {
+                return;
+            }
         }
 
         UINT64 newFenceValue = g_fenceValue.fetch_add(1) + 1;
@@ -1446,6 +1657,12 @@ namespace BuiltInCameraProducer
     static ComPtr<ID3D11DeviceContext4> g_d3d11Context4;
     static ComPtr<ID3D11Texture2D> g_sharedD3D11Texture;
     static ComPtr<ID3D11Fence> g_sharedD3D11Fence;
+    static ComPtr<ID3D11RenderTargetView> g_canvasRTV;
+    static ComPtr<ID3D11Texture2D> g_sourceD3D11Texture;
+    static ComPtr<ID3D11ShaderResourceView> g_sourceSRV;
+    static ComPtr<ID3D11VertexShader> g_canvasVS;
+    static ComPtr<ID3D11PixelShader> g_canvasPS;
+    static ComPtr<ID3D11SamplerState> g_canvasSampler;
     static HANDLE g_hSharedTextureHandle = nullptr;
     static HANDLE g_hSharedFenceHandle = nullptr;
     static HANDLE g_hManifest = nullptr;
@@ -1470,8 +1687,21 @@ namespace BuiltInCameraProducer
         return S_OK;
     }
 
-    static HRESULT InitSharedOutputs(UINT width, UINT height)
+    static HRESULT EnsureCameraSourceTexture(UINT width, UINT height)
     {
+        RETURN_HR_IF(E_INVALIDARG, width == 0 || height == 0);
+
+        D3D11_TEXTURE2D_DESC currentDesc = {};
+        if (g_sourceD3D11Texture) {
+            g_sourceD3D11Texture->GetDesc(&currentDesc);
+        }
+        if (g_sourceD3D11Texture && g_sourceSRV && currentDesc.Width == width && currentDesc.Height == height) {
+            return S_OK;
+        }
+
+        g_sourceSRV.Reset();
+        g_sourceD3D11Texture.Reset();
+
         D3D11_TEXTURE2D_DESC td{};
         td.Width = width;
         td.Height = height;
@@ -1481,8 +1711,69 @@ namespace BuiltInCameraProducer
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        RETURN_IF_FAILED(g_d3d11Device->CreateTexture2D(&td, nullptr, &g_sourceD3D11Texture));
+        RETURN_IF_FAILED(g_d3d11Device->CreateShaderResourceView(g_sourceD3D11Texture.Get(), nullptr, &g_sourceSRV));
+        return S_OK;
+    }
+
+    static HRESULT RenderCameraTextureToCanvas(ID3D11Texture2D* sourceTexture, UINT sourceWidth, UINT sourceHeight)
+    {
+        RETURN_HR_IF_NULL(E_POINTER, sourceTexture);
+        RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasRTV.Get());
+        RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasVS.Get());
+        RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasPS.Get());
+        RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasSampler.Get());
+
+        ComPtr<ID3D11ShaderResourceView> sourceSRV;
+        if (sourceTexture == g_sourceD3D11Texture.Get() && g_sourceSRV) {
+            sourceSRV = g_sourceSRV;
+        } else {
+            RETURN_IF_FAILED(g_d3d11Device->CreateShaderResourceView(sourceTexture, nullptr, &sourceSRV));
+        }
+
+        const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        D3D11_VIEWPORT viewport = GetCoverViewport(sourceWidth, sourceHeight);
+        ID3D11RenderTargetView* rtvs[] = { g_canvasRTV.Get() };
+        ID3D11ShaderResourceView* srvs[] = { sourceSRV.Get() };
+        ID3D11SamplerState* samplers[] = { g_canvasSampler.Get() };
+
+        g_d3d11Context->OMSetRenderTargets(1, rtvs, nullptr);
+        g_d3d11Context->ClearRenderTargetView(g_canvasRTV.Get(), clearColor);
+        g_d3d11Context->RSSetViewports(1, &viewport);
+        g_d3d11Context->VSSetShader(g_canvasVS.Get(), nullptr, 0);
+        g_d3d11Context->PSSetShader(g_canvasPS.Get(), nullptr, 0);
+        g_d3d11Context->PSSetShaderResources(0, 1, srvs);
+        g_d3d11Context->PSSetSamplers(0, 1, samplers);
+        g_d3d11Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        g_d3d11Context->Draw(3, 0);
+
+        ID3D11ShaderResourceView* nullSrv[] = { nullptr };
+        g_d3d11Context->PSSetShaderResources(0, 1, nullSrv);
+        return S_OK;
+    }
+
+    static HRESULT InitSharedOutputs(UINT width, UINT height)
+    {
+        width = kProducerCanvasWidth;
+        height = kProducerCanvasHeight;
+
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = width;
+        td.Height = height;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         td.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
         RETURN_IF_FAILED(g_d3d11Device->CreateTexture2D(&td, nullptr, &g_sharedD3D11Texture));
+        RETURN_IF_FAILED(g_d3d11Device->CreateRenderTargetView(g_sharedD3D11Texture.Get(), nullptr, &g_canvasRTV));
+        RETURN_IF_FAILED(CreateCanvasBlitResources(
+            g_d3d11Device.Get(),
+            g_canvasVS.ReleaseAndGetAddressOf(),
+            g_canvasPS.ReleaseAndGetAddressOf(),
+            g_canvasSampler.ReleaseAndGetAddressOf()));
         RETURN_IF_FAILED(g_d3d11Device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&g_sharedD3D11Fence)));
 
         DWORD pid = GetCurrentProcessId();
@@ -1637,7 +1928,8 @@ namespace BuiltInCameraProducer
         MFGetAttributeSize(currentType.Get(), MF_MT_FRAME_SIZE, (UINT32*)&g_videoWidth, (UINT32*)&g_videoHeight);
         RETURN_HR_IF(E_FAIL, g_videoWidth <= 0 || g_videoHeight <= 0);
 
-        RETURN_IF_FAILED(InitSharedOutputs(static_cast<UINT>(g_videoWidth), static_cast<UINT>(g_videoHeight)));
+        RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
+        RETURN_IF_FAILED(EnsureCameraSourceTexture(static_cast<UINT>(g_videoWidth), static_cast<UINT>(g_videoHeight)));
 
         g_isCapturing = true;
         g_loggedFirstFrame = false;
@@ -1660,8 +1952,18 @@ namespace BuiltInCameraProducer
         BYTE* data = nullptr;
         DWORD length = 0;
         if (FAILED(buffer->Lock(&data, NULL, &length)) || !data) return;
-        g_d3d11Context->UpdateSubresource(g_sharedD3D11Texture.Get(), 0, NULL, data, g_videoWidth * 4, 0);
+        if (FAILED(EnsureCameraSourceTexture(static_cast<UINT>(g_videoWidth), static_cast<UINT>(g_videoHeight)))) {
+            (void)buffer->Unlock();
+            return;
+        }
+        g_d3d11Context->UpdateSubresource(g_sourceD3D11Texture.Get(), 0, NULL, data, g_videoWidth * 4, 0);
         (void)buffer->Unlock();
+        if (FAILED(RenderCameraTextureToCanvas(
+                g_sourceD3D11Texture.Get(),
+                static_cast<UINT>(g_videoWidth),
+                static_cast<UINT>(g_videoHeight)))) {
+            return;
+        }
 
         UINT64 newFenceValue = g_fenceValue.fetch_add(1) + 1;
         g_d3d11Context4->Signal(g_sharedD3D11Fence.Get(), newFenceValue);

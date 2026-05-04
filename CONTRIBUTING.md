@@ -11,7 +11,7 @@ Read:
 - `wiki/Architecture.md`
 - `wiki/Development-Guide.md`
 
-Use `implementation/` notes when you work on startup flow, producer flow, packaging, or AVStream behavior. That folder contains project rationale not fully captured in code comments.
+Use current docs and source first when you work on startup flow, producer flow, packaging, or AVStream behavior. `implementation/` is reserved for retained WDK and AVStream audit references.
 
 ## Ways to contribute
 
@@ -55,33 +55,35 @@ Prerequisites:
 Common commands:
 
 ```powershell
-.\build-all.ps1
-.\build-all.ps1 -Clean
-.\build-all.ps1 -SkipDriver
-.\build-all.ps1 -SkipSoftware
+.\scripts\build-all.ps1
+.\scripts\build-all.ps1 -Clean
+.\scripts\build-all.ps1 -SkipDriver
+.\scripts\build-all.ps1 -SkipSoftware
 ```
 
 Installer command:
 
 ```powershell
-.\install-all.ps1
+.\scripts\install-all.ps1
 ```
 
 There is one build script, one install script, and one staged package path:
 
-- `build-all.ps1`
-- `install-all.ps1`
+- `scripts\build-all.ps1`
+- `scripts\install-all.ps1`
 - `output/`
 
-If you add, remove, or rename staged binaries, update `tools/artifact-manifest.ps1` so build and install stay aligned.
+If you add, remove, or rename staged binaries, update `scripts/tools/artifact-manifest.ps1` so build and install stay aligned.
 
 ## Development expectations
 
 - keep changes grounded in current repo architecture
 - update docs in same change when behavior changes
-- do not remove or rewrite implementation notes unless change makes them obsolete
+- keep retained implementation references aligned with driver work
 - preserve user changes outside your task scope
 - test manually when you touch build, install, startup, producer selection, or driver bridge behavior
+- before changing anything under `driver-project`, check the relevant local PDF table of contents, read the relevant section, and cite the section in your work notes or PR summary
+- keep current docs in `README.md`, `software-project/README.md`, `driver-project/README.md`, and `wiki/`; do not treat implementation scratch notes as user-facing project docs
 
 ## Validation expectations
 

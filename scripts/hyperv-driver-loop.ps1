@@ -42,14 +42,15 @@ if ([string]::IsNullOrWhiteSpace($LogPath)) {
 $guestCred = Get-HvGuestCredential -GuestCredential $GuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
 $repoRoot = Get-HvRepoRoot
 $driverPackageRootPath = Resolve-HvPath -Path "output" -BasePath $repoRoot
-$installAllScript = Resolve-HvPath -Path "install-all.ps1" -BasePath $repoRoot
-$artifactManifestScript = Resolve-HvPath -Path "tools\artifact-manifest.ps1" -BasePath $repoRoot
+$installAllScript = Resolve-HvPath -Path "scripts\install-all.ps1" -BasePath $repoRoot
+$artifactManifestScript = Resolve-HvPath -Path "scripts\tools\artifact-manifest.ps1" -BasePath $repoRoot
 $webcamHtml = Resolve-HvPath -Path "software-project\webcam.html" -BasePath $repoRoot
 $runId = Get-HvTimestamp
 $guestRoot = "C:\Temp\VirtuaCamHyperV\run-$runId"
 $guestPackageRoot = Join-Path $guestRoot (Split-Path -Path $driverPackageRootPath -Leaf)
-$guestToolsRoot = Join-Path $guestRoot "tools"
-$guestInstallAll = Join-Path $guestRoot "install-all.ps1"
+$guestScriptsRoot = Join-Path $guestRoot "scripts"
+$guestToolsRoot = Join-Path $guestScriptsRoot "tools"
+$guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
 $guestWebcamHtml = Join-Path $guestRoot "webcam.html"
 $debuggerLogPath = ""
 $reproFailureMessage = ""
@@ -123,20 +124,20 @@ try {
 
         Write-HvLog -Message "Preparing guest staging folders." -LogPath $LogPath -Level STEP
         Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
-            param($Root, $ToolsRoot)
+            param($Root, $ScriptsRoot, $ToolsRoot)
             if (Test-Path -LiteralPath $Root) {
                 Remove-Item -LiteralPath $Root -Recurse -Force
             }
-            $null = New-Item -ItemType Directory -Force -Path $Root, $ToolsRoot
+            $null = New-Item -ItemType Directory -Force -Path $Root, $ScriptsRoot, $ToolsRoot
             $outputRoot = Join-Path $Root "output"
             if (Test-Path -LiteralPath $outputRoot) {
                 Remove-Item -LiteralPath $outputRoot -Recurse -Force
             }
             $null = New-Item -ItemType Directory -Force -Path $outputRoot
-        } -ArgumentList $guestRoot, $guestToolsRoot | Out-Null
+        } -ArgumentList $guestRoot, $guestScriptsRoot, $guestToolsRoot | Out-Null
 
         Copy-HvToGuest -Session $session -LocalPath $driverPackageRootPath -GuestPath $guestRoot -Recurse -LogPath $LogPath
-        Copy-HvToGuest -Session $session -LocalPath $installAllScript -GuestPath $guestRoot -LogPath $LogPath
+        Copy-HvToGuest -Session $session -LocalPath $installAllScript -GuestPath $guestScriptsRoot -LogPath $LogPath
         Copy-HvToGuest -Session $session -LocalPath $artifactManifestScript -GuestPath $guestToolsRoot -LogPath $LogPath
         if (Test-Path -LiteralPath $webcamHtml) {
             Copy-HvToGuest -Session $session -LocalPath $webcamHtml -GuestPath $guestRoot -LogPath $LogPath

@@ -5,6 +5,7 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <wil/com.h>
+#include <wil/resource.h>
 
 class WASAPICapture {
 public:
@@ -37,7 +38,8 @@ private:
     wil::com_ptr_nothrow<IAudioClient> m_audioClient;
     wil::com_ptr_nothrow<IAudioCaptureClient> m_captureClient;
 
-    HANDLE m_hCaptureThread = NULL;
-    HANDLE m_hShutdownEvent = NULL;
+    wil::unique_handle m_hCaptureThread;
+    wil::unique_handle m_hShutdownEvent;
+    wil::unique_handle m_hAudioEvent;
     bool m_isCapturing = false;
 };

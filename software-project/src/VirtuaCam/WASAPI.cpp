@@ -7,14 +7,11 @@
 #pragma comment(lib, "avrt.lib")
 
 WASAPICapture::WASAPICapture() {
-    m_hShutdownEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    m_hShutdownEvent.reset(CreateEvent(NULL, TRUE, FALSE, NULL));
 }
 
 WASAPICapture::~WASAPICapture() {
     StopCapture();
-    if (m_hShutdownEvent) {
-        CloseHandle(m_hShutdownEvent);
-    }
 }
 
 // Enumerates active audio output (render) devices.
@@ -96,8 +93,10 @@ HRESULT WASAPICapture::StartCapture(int deviceIndex, bool isLoopback) {
 
     RETURN_IF_FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&m_audioClient));
 
-    WAVEFORMATEX* pwfx = NULL;
-    RETURN_IF_FAILED(m_audioClient->GetMixFormat(&pwfx));
+    WAVEFORMATEX* rawFormat = NULL;
+    RETURN_IF_FAILED(m_audioClient->GetMixFormat(&rawFormat));
+    wil::unique_cotaskmem_ptr<WAVEFORMATEX> format(rawFormat);
+    WAVEFORMATEX* pwfx = format.get();
 
     REFERENCE_TIME hnsRequestedDuration = 10000000; // 1 second buffer
 
@@ -107,40 +106,44 @@ HRESULT WASAPICapture::StartCapture(int deviceIndex, bool isLoopback) {
 
     RETURN_IF_FAILED(m_audioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, streamFlags, hnsRequestedDuration, 0, pwfx, NULL));
 
-    wil::unique_cotaskmem_ptr<WAVEFORMATEX> format(pwfx);
-
-    HANDLE hAudioEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-    RETURN_HR_IF_NULL(E_FAIL, hAudioEvent);
-    m_audioClient->SetEventHandle(hAudioEvent);
+    m_hAudioEvent.reset(CreateEvent(NULL, FALSE, FALSE, NULL));
+    RETURN_HR_IF_NULL(E_FAIL, m_hAudioEvent.get());
+    RETURN_IF_FAILED(m_audioClient->SetEventHandle(m_hAudioEvent.get()));
 
     RETURN_IF_FAILED(m_audioClient->GetService(IID_PPV_ARGS(&m_captureClient)));
 
-    ResetEvent(m_hShutdownEvent);
-    m_hCaptureThread = CreateThread(NULL, 0, CaptureThread, this, 0, NULL);
-    RETURN_HR_IF_NULL(E_FAIL, m_hCaptureThread);
+    ResetEvent(m_hShutdownEvent.get());
+    m_hCaptureThread.reset(CreateThread(NULL, 0, CaptureThread, this, 0, NULL));
+    RETURN_HR_IF_NULL(E_FAIL, m_hCaptureThread.get());
 
     m_isCapturing = true;
-    RETURN_IF_FAILED(m_audioClient->Start());
+    HRESULT hrStart = m_audioClient->Start();
+    if (FAILED(hrStart)) {
+        StopCapture();
+        return hrStart;
+    }
 
     return S_OK;
 }
 
 // Stops any active capture stream and cleans up resources.
 void WASAPICapture::StopCapture() {
-    if (m_isCapturing) {
-        if (m_audioClient) m_audioClient->Stop();
-
-        SetEvent(m_hShutdownEvent);
-        if (m_hCaptureThread) {
-            WaitForSingleObject(m_hCaptureThread, INFINITE);
-            CloseHandle(m_hCaptureThread);
-            m_hCaptureThread = NULL;
-        }
-
-        m_captureClient.reset();
-        m_audioClient.reset();
-        m_isCapturing = false;
+    if (m_audioClient && m_isCapturing) {
+        m_audioClient->Stop();
     }
+
+    if (m_hShutdownEvent) {
+        SetEvent(m_hShutdownEvent.get());
+    }
+    if (m_hCaptureThread) {
+        WaitForSingleObject(m_hCaptureThread.get(), INFINITE);
+        m_hCaptureThread.reset();
+    }
+
+    m_hAudioEvent.reset();
+    m_captureClient.reset();
+    m_audioClient.reset();
+    m_isCapturing = false;
 }
 
 // Static entry point for the capture thread.
@@ -158,7 +161,7 @@ void WASAPICapture::CaptureThreadImpl() {
     DWORD taskIndex = 0;
     HANDLE hTask = AvSetMmThreadCharacteristics(L"Audio", &taskIndex);
 
-    while (WaitForSingleObject(m_hShutdownEvent, 100) == WAIT_TIMEOUT) {
+    while (WaitForSingleObject(m_hShutdownEvent.get(), 100) == WAIT_TIMEOUT) {
         BYTE* pData;
         UINT32 numFramesAvailable;
         DWORD flags;

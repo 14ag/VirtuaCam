@@ -80,7 +80,7 @@ function Get-HvArtifactDirectory {
     )
 
     if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
-        $ArtifactRoot = Resolve-HvPath -Path "output\hyperv-runs"
+        $ArtifactRoot = Resolve-HvPath -Path "test-reports\hyperv-runs"
     } else {
         $ArtifactRoot = Resolve-HvPath -Path $ArtifactRoot
     }

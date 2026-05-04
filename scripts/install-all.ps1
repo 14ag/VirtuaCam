@@ -233,14 +233,14 @@ public static class AvshwsInstallerNative {
 }
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
-$repoRoot = [System.IO.Path]::GetFullPath($scriptDir)
-. (Join-Path $repoRoot "tools\artifact-manifest.ps1")
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
+. (Join-Path $repoRoot "scripts\tools\artifact-manifest.ps1")
 $OutputRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "output"))
 
 $runKeyPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
 $virtuaCamRegPath = "HKLM:\SOFTWARE\VirtuaCam"
 $watcherServiceName = "VirtuaCamWatcher"
-$logsDir = Join-Path $OutputRoot "logs"
+$logsDir = Join-Path $repoRoot "test-reports\install"
 $logPath = Join-Path $logsDir "driver-install.log"
 
 $installDir = $OutputRoot

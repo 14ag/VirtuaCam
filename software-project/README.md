@@ -2,39 +2,42 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Platform: Windows 10+ / 11](https://img.shields.io/badge/Platform-Windows_10%2B_/_11-blue.svg) ![Language: C++20](https://img.shields.io/badge/Language-C++20-orange.svg)
 
-VirtuaCam is a modern, high-performance virtual camera system for Windows. It enables low-latency, zero-copy video injection from external DirectX applications, games, or other video sources directly into a kernel-mode driver path. This exposes them as a standard webcam for use in applications like Zoom, Microsoft Teams, OBS, and Discord.
+VirtuaCam is the user-mode side of Virtual Webcam v2. It runs the tray controller, producer host, GPU broker, and driver bridge that feed frames into the `avshws` AVStream camera driver.
 
 ## Architecture: Direct-to-Driver Path
 
-VirtuaCam uses a decoupled architecture to achieve maximum performance and stability:
+VirtuaCam uses a direct-to-driver architecture:
 
 `[Producer (Built-in or External)]` ---> `[Shared D3D11 Texture & Fence]` ---> `[VirtuaCam Broker]` ---> `[DriverBridge]` ---> `[avshws Kernel Driver]`
 
-This design avoids the overhead of the Media Foundation virtual camera pipeline by pushing raw frames directly from the user-mode broker to a kernel-mode AVStream minidriver.
+This design avoids the Media Foundation virtual camera output path. The broker composites producer frames on D3D11, then `DriverBridge` converts broker output to the driver frame contract and uploads through the custom KS property set.
 
 ## Key Components
 
-1.  **VirtuaCam Broker (`DirectPortBroker.dll`):** Composites video feeds from multiple sources on the GPU.
-2.  **VirtuaCam Process (`VirtuaCamProcess.exe`):** A lightweight host for built-in producers (Camera and Screen Capture).
-3.  **Driver Bridge:** A user-mode interface that handles communication with the kernel driver.
-4.  **avshws Driver:** The kernel-mode component that presents the video feed as a hardware camera device to the system.
+1. **VirtuaCam (`VirtuaCam.exe`):** tray controller, source selection, broker lifecycle, and driver upload loop.
+2. **VirtuaCam Process (`VirtuaCamProcess.exe`):** built-in camera producer, built-in window capture producer, `DirectPortConsumer.dll` host, and watcher/service mode.
+3. **VirtuaCam Broker (`DirectPortBroker.dll`):** D3D11 composition and shared texture/fence publication.
+4. **DirectPort Client (`DirectPortClient.dll`):** registerable compatibility DLL kept in the default install path.
+5. **Driver Bridge:** user-mode bridge to `avshws.sys` through `IKsPropertySet`.
 
 ## Features
 
-*   **Zero-Copy GPU Path:** Frames stay on the GPU from capture to driver submission.
-*   **Built-in Producers:** High-performance screen capture and physical camera passthrough are built directly into the process host.
-*   **Kernel-Mode Output:** Appears as a real hardware device, bypassing virtual camera detection in many apps.
-*   **Tray Controller:** Manage sources, layouts (Grid/PIP), and preview from a professional tray interface.
+* **Direct AVStream output:** frames reach Windows camera clients through `avshws.sys`.
+* **Built-in producers:** camera passthrough and window capture run inside `VirtuaCamProcess.exe`.
+* **External producer support:** `DirectPortConsumer.dll` remains the default dynamic producer module.
+* **Tray controller:** source selection, grid/PIP composition, and driver status telemetry.
 
 ## Build and Run
 
 Use the repository root scripts. This subproject does not have a separate public build or install path.
 
-1. From the repo root, run `.\build-all.ps1`.
-2. From an elevated PowerShell window in the repo root, run `.\install-all.ps1`.
+1. From the repo root, run `.\scripts\build-all.ps1`.
+2. From an elevated PowerShell window in the repo root, run `.\scripts\install-all.ps1`.
 3. Launch `.\output\VirtuaCam.exe`.
 4. Select a source from the tray icon menu.
 5. Open the target app and select `VirtuaCam` or `Virtual Camera Driver` as the camera.
+
+Default staged user-mode artifacts are `VirtuaCam.exe`, `VirtuaCamProcess.exe`, `DirectPortBroker.dll`, `DirectPortClient.dll`, and `DirectPortConsumer.dll`.
 
 ## License
 

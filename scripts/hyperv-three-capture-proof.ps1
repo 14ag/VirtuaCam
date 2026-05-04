@@ -4,7 +4,7 @@ param(
     [string]$CheckpointName = "clean",
     [string]$GuestUser = "Administrator",
     [string]$GuestPasswordPlaintext = "",
-    [string]$ArtifactRoot = "output\playwright\three-capture-proof",
+    [string]$ArtifactRoot = "test-reports\playwright\three-capture-proof",
     [ValidateSet("Chrome", "Edge")][string]$Browser = "Chrome",
     [string[]]$BrowserExtraArgs = @()
 )

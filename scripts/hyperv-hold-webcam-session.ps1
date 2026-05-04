@@ -53,13 +53,13 @@ function Join-TextOutput {
 }
 
 if ([string]::IsNullOrWhiteSpace($HostStatusPath)) {
-    $HostStatusPath = Resolve-HvPath -Path "output\playwright\vm-session-status.json"
+    $HostStatusPath = Resolve-HvPath -Path "test-reports\playwright\vm-session-status.json"
 }
 if ([string]::IsNullOrWhiteSpace($HostStopSignalPath)) {
-    $HostStopSignalPath = Resolve-HvPath -Path "output\playwright\vm-session-stop.signal"
+    $HostStopSignalPath = Resolve-HvPath -Path "test-reports\playwright\vm-session-stop.signal"
 }
 if ([string]::IsNullOrWhiteSpace($LogPath)) {
-    $LogPath = Resolve-HvPath -Path "output\playwright\vm-session-host.log"
+    $LogPath = Resolve-HvPath -Path "test-reports\playwright\vm-session-host.log"
 }
 
 $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $HostStatusPath), (Split-Path -Parent $HostStopSignalPath), (Split-Path -Parent $LogPath)
