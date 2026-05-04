@@ -184,6 +184,7 @@ $htmlPath = [string]$config.HtmlPath
 $browser = [string]$config.Browser
 $attemptId = [string]$config.AttemptId
 $requestedSourceWindowMode = [string]$config.SourceWindowMode
+$captureBackend = if ($config.PSObject.Properties["CaptureBackend"] -and $config.CaptureBackend) { [string]$config.CaptureBackend } else { "auto" }
 $httpPort = [int]$config.HttpPort
 $guestStatusPath = [string]$config.GuestStatusPath
 $serveHttp = [bool]$config.ServeHttp
@@ -271,6 +272,7 @@ function Write-GuestState {
         GuestIp = $guestIp
         Browser = $browser
         SourceWindowMode = $sourceWindowMode
+        CaptureBackend = $captureBackend
         SourceWindowProcess = $sourceWindowProcess
         SourceWindowTitle = $sourceWindowTitle
         SourceWindowPid = $sourceWindowPidText
@@ -430,6 +432,9 @@ try {
     if ($sourceWindowMode -eq "Notepad") {
         $cleanupNames += "notepad"
     }
+    if ($sourceWindowMode -eq "Settings") {
+        $cleanupNames += "SystemSettings"
+    }
     Get-Process -Name $cleanupNames -ErrorAction SilentlyContinue |
         Where-Object { $_.Id -ne $PID } |
         Stop-Process -Force -ErrorAction SilentlyContinue
@@ -470,6 +475,17 @@ try {
             $sourceWindowInfo = Wait-ForProcessMainWindow -ProcessId $sourceLaunchProc.Id -TitleLike $sourceWindowTitleHint -TimeoutSeconds 20
             if (-not $sourceWindowInfo) {
                 throw "Timed out waiting for Notepad source window."
+            }
+        }
+        "Settings" {
+            Get-Process -Name SystemSettings -ErrorAction SilentlyContinue |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+            Start-Process "ms-settings:" | Out-Null
+            $sourceWindowTitleHint = "Settings"
+            $sourceWindowInfo = Wait-ForProcessNameWindow -ProcessName "ApplicationFrameHost" -TitleLike $sourceWindowTitleHint -TimeoutSeconds 30
+            if (-not $sourceWindowInfo) {
+                throw "Timed out waiting for Settings source window."
             }
         }
         "Explorer" {
@@ -567,6 +583,7 @@ try {
             Start-Process -FilePath $processExe -WorkingDirectory $packageRoot -ArgumentList @("-debug") -WindowStyle Hidden -PassThru
         } -AdditionalEnvironment @{
             VIRTUACAM_STARTUP_ARGS = ("--source-window-hwnd {0}" -f $sourceWindowHwndText)
+            VIRTUACAM_CAPTURE_BACKEND = $captureBackend
         }
     }
 

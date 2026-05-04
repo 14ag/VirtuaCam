@@ -428,7 +428,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
-void BuildSourceSubMenu(CustomMenu* subMenu, bool isPip, PipPosition pos = PipPosition::BR) {
+void BuildSourceSubMenu(
+    CustomMenu* subMenu,
+    const std::vector<std::wstring>& cameras,
+    const std::vector<CapturableWindow>& windows,
+    bool isPip,
+    PipPosition pos = PipPosition::BR) {
     UINT id_off, id_consumer, id_camera_first, id_window_first, id_discovered_first;
     std::map<UINT, HWND>* windowMap = nullptr;
     const SourceState* state = nullptr;
@@ -469,7 +474,6 @@ void BuildSourceSubMenu(CustomMenu* subMenu, bool isPip, PipPosition pos = PipPo
     subMenu->AddItem(isPip ? L"Discovery" : L"Auto-Discovery Grid", id_consumer, state->mode == SourceMode::Consumer);
     subMenu->AddSeparator();
 
-    auto cameras = EnumerateCameras();
     if (!cameras.empty()) {
         for (size_t i = 0; i < cameras.size(); ++i) {
             std::wstring name = cameras[i];
@@ -479,7 +483,6 @@ void BuildSourceSubMenu(CustomMenu* subMenu, bool isPip, PipPosition pos = PipPo
         subMenu->AddSeparator();
     }
 
-    auto windows = EnumerateWindows();
     if (!windows.empty()) {
         for (size_t i = 0; i < windows.size() && i < (ID_SOURCE_DISCOVERED_FIRST - ID_SOURCE_WINDOW_FIRST); ++i) {
             UINT menuId = id_window_first + (UINT)i;
@@ -513,24 +516,26 @@ void BuildSourceSubMenu(CustomMenu* subMenu, bool isPip, PipPosition pos = PipPo
 void ShowContextMenu(HWND hwnd) {
     CustomMenu::CloseAllMenus();
     POINT pt; GetCursorPos(&pt);
+    const auto cameras = EnumerateCameras();
+    const auto windows = EnumerateWindows();
 
     auto menu = new CustomMenu(hwnd, g_instance);
     menu->AddItem(L"Show Preview", ID_TRAY_PREVIEW_WINDOW);
     menu->AddSeparator();
 
-    BuildSourceSubMenu(menu->AddSubMenu(L"Source"), false);
+    BuildSourceSubMenu(menu->AddSubMenu(L"Source"), cameras, windows, false);
 
     if (GetPipTlEnabled()) {
-        BuildSourceSubMenu(menu->AddSubMenu(L"PIP (Top Left)"), true, PipPosition::TL);
+        BuildSourceSubMenu(menu->AddSubMenu(L"PIP (Top Left)"), cameras, windows, true, PipPosition::TL);
     }
     if (GetPipTrEnabled()) {
-        BuildSourceSubMenu(menu->AddSubMenu(L"PIP (Top Right)"), true, PipPosition::TR);
+        BuildSourceSubMenu(menu->AddSubMenu(L"PIP (Top Right)"), cameras, windows, true, PipPosition::TR);
     }
     if (GetPipBlEnabled()) {
-        BuildSourceSubMenu(menu->AddSubMenu(L"PIP (Bottom Left)"), true, PipPosition::BL);
+        BuildSourceSubMenu(menu->AddSubMenu(L"PIP (Bottom Left)"), cameras, windows, true, PipPosition::BL);
     }
 
-    BuildSourceSubMenu(menu->AddSubMenu(L"Picture-in-Picture"), true, PipPosition::BR);
+    BuildSourceSubMenu(menu->AddSubMenu(L"Picture-in-Picture"), cameras, windows, true, PipPosition::BR);
 
     CustomMenu* audioSubMenu = menu->AddSubMenu(L"Audio Source");
     if (audioSubMenu) {
