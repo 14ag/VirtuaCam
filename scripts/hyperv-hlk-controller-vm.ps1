@@ -26,7 +26,7 @@ if (-not (Test-Path -LiteralPath $resolvedIso)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($LogPath)) {
-    $LogPath = Join-Path (Get-HvArtifactDirectory -ArtifactRoot "output\hyperv-hlk-controller") "hyperv-hlk-controller-vm.log"
+    $LogPath = Join-Path (Get-HvArtifactDirectory -ArtifactRoot "test-reports\hyperv-hlk-controller") "hyperv-hlk-controller-vm.log"
 }
 
 if ([string]::IsNullOrWhiteSpace($SwitchName)) {

@@ -7,16 +7,17 @@ $ErrorActionPreference = "Stop"
 function Fail { param([string]$Message) Write-Host $Message -ForegroundColor Red; exit 1 }
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
-$OutputRoot = Join-Path $scriptDir "output"
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
+$OutputRoot = Join-Path $repoRoot "output"
 
-$resolvedScriptDir = (Resolve-Path -LiteralPath $scriptDir).Path.TrimEnd("\\/")
+$resolvedRepoRoot = (Resolve-Path -LiteralPath $repoRoot).Path.TrimEnd("\\/")
 $resolvedOutputRoot = $OutputRoot
 if (Test-Path -LiteralPath $resolvedOutputRoot) {
     $resolvedOutputRoot = (Resolve-Path -LiteralPath $resolvedOutputRoot).Path
 }
 
-if (-not ($resolvedOutputRoot.StartsWith($resolvedScriptDir, [System.StringComparison]::OrdinalIgnoreCase))) {
-    Fail "Refuse to delete OutputRoot outside repo. OutputRoot='$resolvedOutputRoot' RepoRoot='$resolvedScriptDir'"
+if (-not ($resolvedOutputRoot.StartsWith($resolvedRepoRoot, [System.StringComparison]::OrdinalIgnoreCase))) {
+    Fail "Refuse to delete OutputRoot outside repo. OutputRoot='$resolvedOutputRoot' RepoRoot='$resolvedRepoRoot'"
 }
 
 if (Test-Path -LiteralPath $OutputRoot) {

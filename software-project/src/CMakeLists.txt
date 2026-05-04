@@ -75,7 +75,6 @@ add_executable(VirtuaCam WIN32
     VirtuaCam/App.cpp
     VirtuaCam/DriverBridge.cpp
     VirtuaCam/UI.cpp
-    VirtuaCam/Menu.cpp
     VirtuaCam/WASAPI.cpp
     VirtuaCam/App.rc
 )

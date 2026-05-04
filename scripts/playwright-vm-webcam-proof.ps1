@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$StatusPath = "output\playwright\vm-session-status.json",
-    [string]$ArtifactRoot = "output\playwright",
+    [string]$StatusPath = "test-reports\playwright\vm-session-status.json",
+    [string]$ArtifactRoot = "test-reports\playwright",
     [int]$TimeoutSeconds = 90,
     [string]$LogPath = ""
 )

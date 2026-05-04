@@ -9,13 +9,13 @@ Repository goal: build and install a virtual camera that appears to Windows came
 
 ## What is here
 
-- `build-all.ps1`: single build entrypoint; builds software and driver and stages everything into `output/`
-- `install-all.ps1`: single install entrypoint; installs only from `output/`, registers `DirectPortClient.dll`, and configures startup
-- `clean-output.ps1`: removes `output/` so the next build recreates a fresh staged package
+- `scripts\build-all.ps1`: single build entrypoint; builds software and driver and stages everything into `output/`
+- `scripts\install-all.ps1`: single install entrypoint; installs only from `output/`, registers `DirectPortClient.dll`, and configures startup
+- `scripts\clean-output.ps1`: removes `output/` so the next build recreates a fresh staged package
 - `software-project/`: CMake-based user-mode code
 - `driver-project/`: Visual Studio / WDK driver code
-- `implementation/`: plans, audits, workflow notes, and execution logs
-- `wiki/`: source-of-truth long-form project documentation
+- `implementation/`: retained WDK and AVStream audit references
+- `wiki/`: current source-of-truth long-form project documentation
 
 ## Clone to first camera session
 
@@ -39,7 +39,7 @@ Requirements:
 3. Build the full staged package with the single build script:
 
 ```powershell
-.\build-all.ps1
+.\scripts\build-all.ps1
 ```
 
 This script is the only build entrypoint. It always stages the installable package into `.\output`.
@@ -47,9 +47,9 @@ This script is the only build entrypoint. It always stages the installable packa
 Useful variants stay on the same script:
 
 ```powershell
-.\build-all.ps1 -Clean
-.\build-all.ps1 -SkipDriver
-.\build-all.ps1 -SkipSoftware
+.\scripts\build-all.ps1 -Clean
+.\scripts\build-all.ps1 -SkipDriver
+.\scripts\build-all.ps1 -SkipSoftware
 ```
 
 4. If the installer later reports `TESTSIGNING is OFF`, enable it once and reboot:
@@ -61,7 +61,7 @@ bcdedit /set testsigning on
 5. Open an elevated PowerShell window in the repo root and install from the single install script:
 
 ```powershell
-.\install-all.ps1
+.\scripts\install-all.ps1
 ```
 
 This script is the only install entrypoint. It always installs from `.\output`.
@@ -76,16 +76,17 @@ This script is the only install entrypoint. It always installs from `.\output`.
 
 8. Open the target app and select `VirtuaCam` or `Virtual Camera Driver` as the camera.
 
-Staged artifact names are centralized in `tools/artifact-manifest.ps1`, which is shared by the root build and install scripts.
+Staged artifact names are centralized in `scripts/tools/artifact-manifest.ps1`, which is shared by the build and install scripts.
 
 ## Validation
 
-Use Hyper-V guest `driver-test` for crash repro, verifier, dump collection, and browser proof:
+Use Hyper-V guest `driver-test` for crash repro, verifier, dump collection, browser proof, and Windows Camera proof. Test artifacts are written under `test-reports\`; `output\` is reserved for staged build/install components.
 
 ```powershell
 .\scripts\hyperv-clean-checkpoint.ps1 -GuestPasswordPlaintext <password> -ForceRefresh -EnableSsh
 .\scripts\hyperv-clean-validate.ps1 -GuestPasswordPlaintext <password>
 .\scripts\hyperv-proof-chrome.ps1 -GuestPasswordPlaintext <password>
+.\scripts\hyperv-proof-windows-camera.ps1 -GuestPasswordPlaintext <password>
 ```
 
 Helper entry points:
@@ -106,10 +107,11 @@ Suggested bench order:
 1. refresh `clean` with `-EnableSsh`
 2. validate `clean` with `hyperv-clean-validate.ps1`
 3. rerun real proof with `hyperv-proof-chrome.ps1`
-4. install or confirm HLK client
-5. rerun `hyperv-clean-validate.ps1 -RequireHlkClient`
-6. run `hyperv-hlk-preflight.ps1`
-7. move `driver-test` into HLK Studio pool and start small batches first
+4. run Windows Camera proof with `hyperv-proof-windows-camera.ps1`
+5. install or confirm HLK client
+6. rerun `hyperv-clean-validate.ps1 -RequireHlkClient`
+7. run `hyperv-hlk-preflight.ps1`
+8. move `driver-test` into HLK Studio pool and start small batches first
 
 ## Runtime shape
 
@@ -138,9 +140,11 @@ Current staged runtime binaries:
 - `vcruntime140.dll`
 - `vcruntime140_1.dll`
 
+Default packaging does not stage legacy Media Foundation producer DLLs. Camera and window producers are built into `VirtuaCamProcess.exe`; `DirectPortConsumer.dll` is the dynamic producer module kept in the default package.
+
 ## Documentation
 
-Long-form docs live in wiki repo pages, not duplicated under `docs/`:
+Long-form current docs live in wiki repo pages, not duplicated under `docs/`:
 
 - [Wiki Home](wiki/Home.md)
 - [Getting Started](wiki/Getting-Started.md)
@@ -161,12 +165,13 @@ If published on GitHub, wiki URL is:
 
 ## Cleanup
 
-Generated build and proof artifacts collect under `output/`.
+Generated build artifacts collect under `output/`.
+Test reports and proof artifacts collect under `test-reports/`.
 
 For a full reset:
 
 ```powershell
-.\clean-output.ps1
+.\scripts\clean-output.ps1
 ```
 
 Root build and install scripts recreate the required package layout on the next run.

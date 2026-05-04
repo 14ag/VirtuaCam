@@ -1,7 +1,6 @@
 #include "pch.h"
 #include "App.h"
 #include "UI.h"
-#include "Menu.h"
 #include "Tools.h"
 #include "Formats.h"
 #include "Discovery.h"
@@ -9,6 +8,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <dwmapi.h>
+#include <uxtheme.h>
 #include <map>
 
 #pragma comment(lib, "d3d11.lib")
@@ -63,9 +63,11 @@ namespace
     }
 }
 
-struct EnumWindowsData { std::vector<CapturableWindow>* windows; };
 BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
-    EnumWindowsData* data = reinterpret_cast<EnumWindowsData*>(lParam);
+    auto* windows = reinterpret_cast<std::vector<CapturableWindow>*>(lParam);
+    if (!windows) {
+        return TRUE;
+    }
     if (!IsWindowVisible(hwnd) || GetWindowTextLength(hwnd) == 0 || (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) {
         return TRUE;
     }
@@ -75,15 +77,12 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
 
     wchar_t title[256];
     GetWindowTextW(hwnd, title, ARRAYSIZE(title));
-    data->windows->push_back({ hwnd, title });
+    windows->push_back({ hwnd, title });
     return TRUE;
 }
 std::vector<CapturableWindow> EnumerateWindows() {
-    EnumWindowsData data;
-    data.windows = new std::vector<CapturableWindow>();
-    EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&data));
-    std::vector<CapturableWindow> result = *data.windows;
-    delete data.windows;
+    std::vector<CapturableWindow> result;
+    EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(&result));
     return result;
 }
 
@@ -176,12 +175,60 @@ static std::map<UINT, HWND> g_pipTrWindowMap;
 static std::map<UINT, HWND> g_pipBlWindowMap;
 static std::map<UINT, HWND> g_pipWindowMap;
 
+enum class PreferredAppMode
+{
+    Default,
+    AllowDark,
+    ForceDark,
+    ForceLight,
+    Max
+};
+
+using AllowDarkModeForWindowFn = BOOL(WINAPI*)(HWND, BOOL);
+using SetPreferredAppModeFn = PreferredAppMode(WINAPI*)(PreferredAppMode);
+using FlushMenuThemesFn = void(WINAPI*)();
+using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+
+void EnableNativeDarkMenus(HWND hwnd)
+{
+    static bool initialized = false;
+    static AllowDarkModeForWindowFn allowDarkModeForWindow = nullptr;
+    static SetPreferredAppModeFn setPreferredAppMode = nullptr;
+    static FlushMenuThemesFn flushMenuThemes = nullptr;
+    static SetWindowThemeFn setWindowTheme = nullptr;
+
+    if (!initialized) {
+        initialized = true;
+        HMODULE uxtheme = LoadLibraryW(L"uxtheme.dll");
+        if (uxtheme) {
+            allowDarkModeForWindow = reinterpret_cast<AllowDarkModeForWindowFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(133)));
+            setPreferredAppMode = reinterpret_cast<SetPreferredAppModeFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(135)));
+            flushMenuThemes = reinterpret_cast<FlushMenuThemesFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(136)));
+            setWindowTheme = reinterpret_cast<SetWindowThemeFn>(GetProcAddress(uxtheme, "SetWindowTheme"));
+        }
+        if (setPreferredAppMode) {
+            setPreferredAppMode(PreferredAppMode::AllowDark);
+        }
+        if (flushMenuThemes) {
+            flushMenuThemes();
+        }
+    }
+
+    if (hwnd && allowDarkModeForWindow) {
+        allowDarkModeForWindow(hwnd, TRUE);
+    }
+    if (hwnd && setWindowTheme) {
+        setWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
+    }
+}
+
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK PreviewWndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 void AddTrayIcon(HWND hwnd, bool add);
 void UpdateTrayTooltip(BrokerState brokerState, bool driverConnected);
 void ShowContextMenu(HWND hwnd);
+void HandleMenuCommand(UINT id);
 ATOM MyRegisterClass(HINSTANCE instance);
 HRESULT InitD3D(HWND hwnd);
 void CleanupD3D();
@@ -366,49 +413,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_APP_MENU_COMMAND:
     {
         UINT id = (UINT)wParam;
-        
-        if (id != 0)
-        {
-            if (id == ID_SETTINGS_PIP_TL) TogglePipTl();
-            else if (id == ID_SETTINGS_PIP_TR) TogglePipTr();
-            else if (id == ID_SETTINGS_PIP_BL) TogglePipBl();
-            else if (id >= ID_PIP_OFF) HandlePipCommand(PipPosition::BR, id);
-            else if (id >= ID_PIP_BL_OFF) HandlePipCommand(PipPosition::BL, id);
-            else if (id >= ID_PIP_TR_OFF) HandlePipCommand(PipPosition::TR, id);
-            else if (id >= ID_PIP_TL_OFF) HandlePipCommand(PipPosition::TL, id);
-            else if (id >= ID_SOURCE_OFF) {
-                if (id == ID_SOURCE_OFF) SetSourceMode(SourceMode::Off, 0);
-                else if (id == ID_SOURCE_CONSUMER) SetSourceMode(SourceMode::Consumer, 0);
-                else if (id >= ID_SOURCE_CAMERA_FIRST && id < ID_SOURCE_WINDOW_FIRST) {
-                    SetSourceMode(SourceMode::Camera, id - ID_SOURCE_CAMERA_FIRST);
-                }
-                else if (id >= ID_SOURCE_WINDOW_FIRST && id < ID_SOURCE_DISCOVERED_FIRST) {
-                    if (g_mainSourceWindowMap.count(id)) {
-                        SetSourceMode(SourceMode::Window, reinterpret_cast<DWORD_PTR>(g_mainSourceWindowMap[id]));
-                    }
-                }
-                else if (id >= ID_SOURCE_DISCOVERED_FIRST) {
-                    const auto* discovery = GetGlobalDiscovery();
-                    if (discovery) {
-                        int index = id - ID_SOURCE_DISCOVERED_FIRST;
-                        const auto& streams = discovery->GetDiscoveredStreams();
-                        if (index >= 0 && (size_t)index < streams.size()) {
-                            SetSourceMode(SourceMode::Discovered, streams[index].processId);
-                        }
-                    }
-                }
-            }
-            else if (id >= ID_AUDIO_DEVICE_NONE) {
-                g_currentAudioDevice = id;
-                if (g_audioSelectionCallback) g_audioSelectionCallback(id);
-            }
-            else if (id == ID_TRAY_PREVIEW_WINDOW) CreatePreviewWindow();
-            else if (id == ID_TRAY_ABOUT) DialogBox(g_instance, MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, About);
-            else if (id == ID_TRAY_EXIT) {
-                RequestDriverDisconnect();
-                DestroyWindow(hwnd);
-            }
-        }
+        HandleMenuCommand(id);
         break;
     }
     case WM_QUERYENDSESSION:
@@ -428,12 +433,74 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
-void BuildSourceSubMenu(
-    CustomMenu* subMenu,
+void HandleMenuCommand(UINT id)
+{
+    if (id == 0) {
+        return;
+    }
+
+    if (id == ID_SETTINGS_PIP_TL) TogglePipTl();
+    else if (id == ID_SETTINGS_PIP_TR) TogglePipTr();
+    else if (id == ID_SETTINGS_PIP_BL) TogglePipBl();
+    else if (id >= ID_PIP_OFF) HandlePipCommand(PipPosition::BR, id);
+    else if (id >= ID_PIP_BL_OFF) HandlePipCommand(PipPosition::BL, id);
+    else if (id >= ID_PIP_TR_OFF) HandlePipCommand(PipPosition::TR, id);
+    else if (id >= ID_PIP_TL_OFF) HandlePipCommand(PipPosition::TL, id);
+    else if (id >= ID_SOURCE_OFF) {
+        if (id == ID_SOURCE_OFF) SetSourceMode(SourceMode::Off, 0);
+        else if (id == ID_SOURCE_CONSUMER) SetSourceMode(SourceMode::Consumer, 0);
+        else if (id >= ID_SOURCE_CAMERA_FIRST && id < ID_SOURCE_WINDOW_FIRST) {
+            SetSourceMode(SourceMode::Camera, id - ID_SOURCE_CAMERA_FIRST);
+        }
+        else if (id >= ID_SOURCE_WINDOW_FIRST && id < ID_SOURCE_DISCOVERED_FIRST) {
+            if (g_mainSourceWindowMap.count(id)) {
+                SetSourceMode(SourceMode::Window, reinterpret_cast<DWORD_PTR>(g_mainSourceWindowMap[id]));
+            }
+        }
+        else if (id >= ID_SOURCE_DISCOVERED_FIRST) {
+            const auto* discovery = GetGlobalDiscovery();
+            if (discovery) {
+                int index = id - ID_SOURCE_DISCOVERED_FIRST;
+                const auto& streams = discovery->GetDiscoveredStreams();
+                if (index >= 0 && (size_t)index < streams.size()) {
+                    SetSourceMode(SourceMode::Discovered, streams[index].processId);
+                }
+            }
+        }
+    }
+    else if (id >= ID_AUDIO_DEVICE_NONE) {
+        g_currentAudioDevice = id;
+        if (g_audioSelectionCallback) g_audioSelectionCallback(id);
+    }
+    else if (id == ID_TRAY_PREVIEW_WINDOW) CreatePreviewWindow();
+    else if (id == ID_TRAY_ABOUT) DialogBox(g_instance, MAKEINTRESOURCE(IDD_ABOUTBOX), nullptr, About);
+    else if (id == ID_TRAY_EXIT) {
+        RequestDriverDisconnect();
+        DestroyWindow(g_hMainWnd);
+    }
+}
+
+void AddNativeMenuItem(HMENU menu, const std::wstring& text, UINT id, bool checked = false, bool enabled = true)
+{
+    UINT flags = MF_STRING;
+    if (checked) flags |= MF_CHECKED;
+    if (!enabled) flags |= MF_GRAYED;
+    AppendMenuW(menu, flags, id, text.c_str());
+}
+
+void AddNativeSeparator(HMENU menu)
+{
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+}
+
+HMENU BuildSourceSubMenu(
     const std::vector<std::wstring>& cameras,
     const std::vector<CapturableWindow>& windows,
     bool isPip,
     PipPosition pos = PipPosition::BR) {
+    HMENU subMenu = CreatePopupMenu();
+    if (!subMenu) return nullptr;
+
     UINT id_off, id_consumer, id_camera_first, id_window_first, id_discovered_first;
     std::map<UINT, HWND>* windowMap = nullptr;
     const SourceState* state = nullptr;
@@ -470,17 +537,17 @@ void BuildSourceSubMenu(
 
     windowMap->clear();
 
-    subMenu->AddItem(L"Off", id_off, state->mode == SourceMode::Off);
-    subMenu->AddItem(isPip ? L"Discovery" : L"Auto-Discovery Grid", id_consumer, state->mode == SourceMode::Consumer);
-    subMenu->AddSeparator();
+    AddNativeMenuItem(subMenu, L"Off", id_off, state->mode == SourceMode::Off);
+    AddNativeMenuItem(subMenu, isPip ? L"Discovery" : L"Auto-Discovery Grid", id_consumer, state->mode == SourceMode::Consumer);
+    AddNativeSeparator(subMenu);
 
     if (!cameras.empty()) {
         for (size_t i = 0; i < cameras.size(); ++i) {
             std::wstring name = cameras[i];
             if (name.length() > 32) name = name.substr(0, 29) + L"...";
-            subMenu->AddItem(name, id_camera_first + (UINT)i, state->mode == SourceMode::Camera && state->cameraIndex == (int)i);
+            AddNativeMenuItem(subMenu, name, id_camera_first + (UINT)i, state->mode == SourceMode::Camera && state->cameraIndex == (int)i);
         }
-        subMenu->AddSeparator();
+        AddNativeSeparator(subMenu);
     }
 
     if (!windows.empty()) {
@@ -489,7 +556,7 @@ void BuildSourceSubMenu(
             (*windowMap)[menuId] = windows[i].hwnd;
             std::wstring title = windows[i].title;
             if (title.length() > 32) title = title.substr(0, 29) + L"...";
-            subMenu->AddItem(title, menuId, state->mode == SourceMode::Window && state->hwnd == windows[i].hwnd);
+            AddNativeMenuItem(subMenu, title, menuId, state->mode == SourceMode::Window && state->hwnd == windows[i].hwnd);
         }
     }
 
@@ -501,83 +568,92 @@ void BuildSourceSubMenu(
             const auto& stream = discovery->GetDiscoveredStreams()[i];
             if (stream.processName != L"VirtuaCamProcess.exe") {
                 if (!separatorAdded && (!windows.empty() || discoveredCount > 0)) {
-                    subMenu->AddSeparator();
+                    AddNativeSeparator(subMenu);
                     separatorAdded = true;
                 }
                 std::wstring label = stream.processName + L" (PID: " + std::to_wstring(stream.processId) + L")";
                 if (label.length() > 32) label = label.substr(0, 29) + L"...";
-                subMenu->AddItem(label, id_discovered_first + (UINT)i, state->mode == SourceMode::Discovered && state->pid == stream.processId);
+                AddNativeMenuItem(subMenu, label, id_discovered_first + (UINT)i, state->mode == SourceMode::Discovered && state->pid == stream.processId);
                 discoveredCount++;
             }
         }
     }
+
+    return subMenu;
 }
 
 void ShowContextMenu(HWND hwnd) {
-    CustomMenu::CloseAllMenus();
     POINT pt; GetCursorPos(&pt);
+    SetCursor(LoadCursor(nullptr, IDC_ARROW));
+    EnableNativeDarkMenus(hwnd);
+
     const auto cameras = EnumerateCameras();
     const auto windows = EnumerateWindows();
 
-    auto menu = new CustomMenu(hwnd, g_instance);
-    menu->AddItem(L"Show Preview", ID_TRAY_PREVIEW_WINDOW);
-    menu->AddSeparator();
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
 
-    BuildSourceSubMenu(menu->AddSubMenu(L"Source"), cameras, windows, false);
+    AddNativeMenuItem(menu, L"Show Preview", ID_TRAY_PREVIEW_WINDOW);
+    AddNativeSeparator(menu);
+
+    HMENU sourceMenu = BuildSourceSubMenu(cameras, windows, false);
+    if (sourceMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sourceMenu), L"Source");
 
     if (GetPipTlEnabled()) {
-        BuildSourceSubMenu(menu->AddSubMenu(L"PIP (Top Left)"), cameras, windows, true, PipPosition::TL);
+        HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::TL);
+        if (pipMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"PIP (Top Left)");
     }
     if (GetPipTrEnabled()) {
-        BuildSourceSubMenu(menu->AddSubMenu(L"PIP (Top Right)"), cameras, windows, true, PipPosition::TR);
+        HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::TR);
+        if (pipMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"PIP (Top Right)");
     }
     if (GetPipBlEnabled()) {
-        BuildSourceSubMenu(menu->AddSubMenu(L"PIP (Bottom Left)"), cameras, windows, true, PipPosition::BL);
+        HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::BL);
+        if (pipMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"PIP (Bottom Left)");
     }
 
-    BuildSourceSubMenu(menu->AddSubMenu(L"Picture-in-Picture"), cameras, windows, true, PipPosition::BR);
+    HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::BR);
+    if (pipMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"Picture-in-Picture");
 
-    CustomMenu* audioSubMenu = menu->AddSubMenu(L"Audio Source");
+    HMENU audioSubMenu = CreatePopupMenu();
     if (audioSubMenu) {
-        audioSubMenu->AddItem(L"None", ID_AUDIO_DEVICE_NONE, g_currentAudioDevice == ID_AUDIO_DEVICE_NONE);
+        AddNativeMenuItem(audioSubMenu, L"None", ID_AUDIO_DEVICE_NONE, g_currentAudioDevice == ID_AUDIO_DEVICE_NONE);
         if (!g_captureDeviceNames.empty()) {
-            audioSubMenu->AddSeparator();
+            AddNativeSeparator(audioSubMenu);
             for (size_t i = 0; i < g_captureDeviceNames.size(); ++i) {
                 UINT id = ID_AUDIO_CAPTURE_FIRST + (UINT)i;
-                audioSubMenu->AddItem(g_captureDeviceNames[i], id, g_currentAudioDevice == id);
+                AddNativeMenuItem(audioSubMenu, g_captureDeviceNames[i], id, g_currentAudioDevice == id);
             }
         }
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(audioSubMenu), L"Audio Source");
     }
 
-    menu->AddSeparator();
+    AddNativeSeparator(menu);
 
-    CustomMenu* settingsMenu = menu->AddSubMenu(L"Settings");
+    HMENU settingsMenu = CreatePopupMenu();
     if (settingsMenu) {
-        settingsMenu->AddItem(L"PIP Top Left", ID_SETTINGS_PIP_TL, GetPipTlEnabled());
-        settingsMenu->AddItem(L"PIP Top Right", ID_SETTINGS_PIP_TR, GetPipTrEnabled());
-        settingsMenu->AddItem(L"PIP Bottom Left", ID_SETTINGS_PIP_BL, GetPipBlEnabled());
+        AddNativeMenuItem(settingsMenu, L"PIP Top Left", ID_SETTINGS_PIP_TL, GetPipTlEnabled());
+        AddNativeMenuItem(settingsMenu, L"PIP Top Right", ID_SETTINGS_PIP_TR, GetPipTrEnabled());
+        AddNativeMenuItem(settingsMenu, L"PIP Bottom Left", ID_SETTINGS_PIP_BL, GetPipBlEnabled());
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(settingsMenu), L"Settings");
     }
 
-    menu->AddItem(L"About", ID_TRAY_ABOUT);
-    menu->AddItem(L"Exit", ID_TRAY_EXIT);
+    AddNativeMenuItem(menu, L"About", ID_TRAY_ABOUT);
+    AddNativeMenuItem(menu, L"Exit", ID_TRAY_EXIT);
 
-    int menuWidth = menu->GetCalculatedWidth();
-    int menuHeight = menu->GetCalculatedHeight();
-
-    HMONITOR hMonitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi = { sizeof(mi) };
-    GetMonitorInfo(hMonitor, &mi);
-
-    int x = pt.x;
-    int y = pt.y;
-    if (x + menuWidth > mi.rcWork.right) {
-        x = pt.x - menuWidth;
+    SetForegroundWindow(hwnd);
+    const UINT command = TrackPopupMenuEx(
+        menu,
+        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        pt.x,
+        pt.y,
+        hwnd,
+        nullptr);
+    if (command != 0) {
+        HandleMenuCommand(command);
     }
-    if (y + menuHeight > mi.rcWork.bottom) {
-        y = pt.y - menuHeight;
-    }
-
-    menu->Show(x, y);
+    PostMessage(hwnd, WM_NULL, 0, 0);
+    DestroyMenu(menu);
 }
 
 LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -621,7 +697,15 @@ LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
     UNREFERENCED_PARAMETER(lParam);
     switch (message) {
-    case WM_INITDIALOG: CenterWindow(hDlg, true); return (INT_PTR)TRUE;
+    case WM_INITDIALOG: {
+        LONG_PTR exStyle = GetWindowLongPtr(hDlg, GWL_EXSTYLE);
+        exStyle &= ~WS_EX_TOOLWINDOW;
+        exStyle |= WS_EX_APPWINDOW;
+        SetWindowLongPtr(hDlg, GWL_EXSTYLE, exStyle);
+        EnableNativeDarkMenus(hDlg);
+        CenterWindow(hDlg, true);
+        return (INT_PTR)TRUE;
+    }
     case WM_COMMAND: if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) { EndDialog(hDlg, LOWORD(wParam)); return (INT_PTR)TRUE; } break;
     }
     return (INT_PTR)FALSE;

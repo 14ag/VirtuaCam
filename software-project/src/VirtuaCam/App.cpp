@@ -340,6 +340,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     } else if (HasArg(cmdLine, L"--source-consumer")) {
         VirtuaCamLog::LogLine(L"Startup source: consumer");
         SetSourceMode(SourceMode::Consumer, 0);
+    } else {
+        VirtuaCamLog::LogLine(L"Startup source: default auto-discovery grid");
+        SetSourceMode(SourceMode::Consumer, 0);
     }
     InformBroker();
 

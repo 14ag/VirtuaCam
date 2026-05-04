@@ -18,11 +18,11 @@ $ErrorActionPreference = "Stop"
 Assert-HvAdministrator
 
 if ([string]::IsNullOrWhiteSpace($LogPath)) {
-    $LogPath = Resolve-HvPath -Path "output\hyperv-enable-ssh.log"
+    $LogPath = Resolve-HvPath -Path "test-reports\hyperv-enable-ssh.log"
 }
 
 if ([string]::IsNullOrWhiteSpace($ResultPath)) {
-    $ResultPath = Resolve-HvPath -Path "output\hyperv-enable-ssh.json"
+    $ResultPath = Resolve-HvPath -Path "test-reports\hyperv-enable-ssh.json"
 }
 
 $keyRequested = ($AuthMode -eq "PasswordAndKey")

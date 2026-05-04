@@ -12,3 +12,4 @@ Format follows Keep a Changelog and this repository currently tracks changes fro
 - GitHub wiki source pages under `wiki/`
 - issue templates and pull request template
 - repository metadata and writing checklist artifacts
+- current architecture, packaging, testing, and driver-interface details from implementation notes into project docs

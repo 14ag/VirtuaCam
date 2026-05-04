@@ -21,7 +21,7 @@ $ErrorActionPreference = "Stop"
 
 Assert-HvAdministrator
 
-$artifactDir = if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) { Get-HvArtifactDirectory -ArtifactRoot "output\hyperv-clean" } else { Resolve-HvPath -Path $ArtifactRoot }
+$artifactDir = if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) { Get-HvArtifactDirectory -ArtifactRoot "test-reports\hyperv-clean" } else { Resolve-HvPath -Path $ArtifactRoot }
 $null = New-Item -ItemType Directory -Force -Path $artifactDir
 
 if ([string]::IsNullOrWhiteSpace($LogPath)) {

@@ -212,15 +212,14 @@ function Get-OrCreateTestCodeSigningCertificate {
 }
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
-$repoRoot = [System.IO.Path]::GetFullPath($scriptDir)
-. (Join-Path $repoRoot "tools\artifact-manifest.ps1")
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
+. (Join-Path $repoRoot "scripts\tools\artifact-manifest.ps1")
 $softwareDir = Join-Path $repoRoot "software-project"
 $softwareSrcDir = Join-Path $softwareDir "src"
 $softwareBuildDir = Join-Path $softwareDir "build"
-$driverRoot = Join-Path $repoRoot "driver-project\Driver\avshws"
+$driverRoot = Join-Path $repoRoot "driver-project"
 $driverSolutionPath = Join-Path $driverRoot "avshws.sln"
 $OutputRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "output"))
-$logsDir = Join-Path $OutputRoot "logs"
 $driverPackageTmp = Join-Path $repoRoot ".driver-package-work"
 
 Write-Host "============================================================" -ForegroundColor Green
@@ -231,12 +230,14 @@ Write-Step "Pre-flight checks"
 $msbuild = Get-MSBuildPath
 if (-not $msbuild) { Fail "MSBuild not found. Install Visual Studio Build Tools 2022." }
 Write-Success "MSBuild: $msbuild"
-Assert-WdkPresent
+if (-not $SkipDriver) {
+    Assert-WdkPresent
+}
 
-if (-not (Test-Path -LiteralPath (Join-Path $softwareSrcDir "CMakeLists.txt"))) {
+if (-not $SkipSoftware -and -not (Test-Path -LiteralPath (Join-Path $softwareSrcDir "CMakeLists.txt"))) {
     Fail "Software CMakeLists.txt missing: $softwareSrcDir"
 }
-if (-not (Test-Path -LiteralPath $driverSolutionPath)) {
+if (-not $SkipDriver -and -not (Test-Path -LiteralPath $driverSolutionPath)) {
     Fail "Driver solution missing: $driverSolutionPath"
 }
 
@@ -256,7 +257,7 @@ Write-Step "Prepare output layout"
 if ($Clean -and (Test-Path -LiteralPath $OutputRoot)) {
     Remove-Item -LiteralPath $OutputRoot -Recurse -Force
 }
-$null = New-Item -ItemType Directory -Force -Path $OutputRoot, $logsDir, $driverPackageTmp
+$null = New-Item -ItemType Directory -Force -Path $OutputRoot, $driverPackageTmp
 Write-Info "OutputRoot: $OutputRoot"
 
 foreach ($legacyDir in @(
@@ -280,7 +281,11 @@ if (-not $SkipSoftware) {
         Fail "vcpkg toolchain file missing: $toolchainFile"
     }
 
-    Get-Process -Name "VirtuaCam" -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force }
+    foreach ($processName in @("VirtuaCam", "VirtuaCamProcess", "DirectPortBroker")) {
+        Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
+            Stop-Process -Id $_.Id -Force
+        }
+    }
 
     if ($Clean -and (Test-Path -LiteralPath $softwareBuildDir)) {
         Remove-Item -LiteralPath $softwareBuildDir -Recurse -Force

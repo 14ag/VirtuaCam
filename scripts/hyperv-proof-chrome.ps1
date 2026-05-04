@@ -4,7 +4,7 @@ param(
     [string]$CheckpointName = "clean",
     [string]$GuestUser = "Administrator",
     [string]$GuestPasswordPlaintext = "",
-    [string]$ArtifactRoot = "output\playwright",
+    [string]$ArtifactRoot = "test-reports\playwright",
     [ValidateSet("Chrome", "Edge")][string]$Browser = "Chrome",
     [ValidateSet("Notepad", "Settings", "Explorer")][string]$SourceWindowMode = "Notepad",
     [ValidateSet("auto", "printwindow", "wgc", "bitblt")][string]$CaptureBackend = "auto",
@@ -615,15 +615,16 @@ $priorAttemptState = Read-JsonFile -Path $attemptStatePath
 $nextAttemptId = if ($priorAttemptState) { [int]$priorAttemptState.attempt + 1 } else { 1 }
 
 $driverPackageRootPath = Resolve-HvPath -Path "output" -BasePath $repoRoot
-$installAllScript = Resolve-HvPath -Path "install-all.ps1" -BasePath $repoRoot
-$artifactManifestScript = Resolve-HvPath -Path "tools\artifact-manifest.ps1" -BasePath $repoRoot
+$installAllScript = Resolve-HvPath -Path "scripts\install-all.ps1" -BasePath $repoRoot
+$artifactManifestScript = Resolve-HvPath -Path "scripts\tools\artifact-manifest.ps1" -BasePath $repoRoot
 $webcamHtml = Resolve-HvPath -Path "software-project\webcam.html" -BasePath $repoRoot
 $holdScript = Resolve-HvPath -Path "scripts\hyperv-hold-webcam-session.ps1" -BasePath $repoRoot
 $proofScript = Resolve-HvPath -Path "scripts\playwright-vm-webcam-proof.ps1" -BasePath $repoRoot
 $guestRoot = "C:\Temp\VirtuaCamHyperV\proof-$nextAttemptId"
 $guestPackageRoot = Join-Path $guestRoot (Split-Path -Path $driverPackageRootPath -Leaf)
-$guestToolsRoot = Join-Path $guestRoot "tools"
-$guestInstallAll = Join-Path $guestRoot "install-all.ps1"
+$guestScriptsRoot = Join-Path $guestRoot "scripts"
+$guestToolsRoot = Join-Path $guestScriptsRoot "tools"
+$guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
 $guestWebcamHtml = Join-Path $guestRoot "webcam.html"
 $session = $null
 $holdProc = $null
@@ -739,16 +740,16 @@ try {
 
     Write-HvLog -Message "Preparing guest staging folders." -LogPath $LogPath -Level STEP
     Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
-        param($Root, $ToolsRoot)
+        param($Root, $ScriptsRoot, $ToolsRoot)
         if (Test-Path -LiteralPath $Root) {
             Remove-Item -LiteralPath $Root -Recurse -Force
         }
-        $null = New-Item -ItemType Directory -Force -Path $Root, $ToolsRoot
-    } -ArgumentList $guestRoot, $guestToolsRoot | Out-Null
+        $null = New-Item -ItemType Directory -Force -Path $Root, $ScriptsRoot, $ToolsRoot
+    } -ArgumentList $guestRoot, $guestScriptsRoot, $guestToolsRoot | Out-Null
 
     $driverPackageStage = New-DriverPackageStage -SourceRoot $driverPackageRootPath -ArtifactDirectory $artifactDir -AttemptId "$nextAttemptId" -LogFile $LogPath
     Copy-HvToGuest -Session $session -LocalPath $driverPackageStage.StagedSourceRoot -GuestPath $guestRoot -Recurse -LogPath $LogPath
-    Copy-HvToGuest -Session $session -LocalPath $installAllScript -GuestPath $guestRoot -LogPath $LogPath
+    Copy-HvToGuest -Session $session -LocalPath $installAllScript -GuestPath $guestScriptsRoot -LogPath $LogPath
     Copy-HvToGuest -Session $session -LocalPath $artifactManifestScript -GuestPath $guestToolsRoot -LogPath $LogPath
     Copy-HvToGuest -Session $session -LocalPath $webcamHtml -GuestPath $guestRoot -LogPath $LogPath
 
