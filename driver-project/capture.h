@@ -286,7 +286,7 @@ public:
     // This is the processing dispatch for the capture pin.  The routine 
     // bridges to Process() in the context of the CCapturePin.
     //
-    static 
+    static
     NTSTATUS
     DispatchProcess (
         IN PKSPIN Pin
@@ -297,6 +297,43 @@ public:
                Process ();
             
     }
+
+    //
+    // GetDroppedFrames():
+    //
+    // Standard capture-pin property required by video capture clients.
+    //
+    static
+    NTSTATUS
+    GetDroppedFrames (
+        _In_ PIRP Irp,
+        _In_ PKSIDENTIFIER Request,
+        _Inout_ PVOID Data
+        );
+
+    static
+    NTSTATUS
+    GetPreferredCaptureSurface (
+        _In_ PIRP Irp,
+        _In_ PKSIDENTIFIER Request,
+        _Inout_ PVOID Data
+        );
+
+    static
+    NTSTATUS
+    GetCurrentCaptureSurface (
+        _In_ PIRP Irp,
+        _In_ PKSIDENTIFIER Request,
+        _Inout_ PVOID Data
+        );
+
+    static
+    NTSTATUS
+    SetCurrentCaptureSurface (
+        _In_ PIRP Irp,
+        _In_ PKSIDENTIFIER Request,
+        _Inout_ PVOID Data
+        );
 
     //
     // IntersectHandler():

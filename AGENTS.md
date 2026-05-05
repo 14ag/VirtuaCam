@@ -12,3 +12,4 @@
 - When a required command or dependency is missing use PowerShell to verify installation using `powershell Get-Command <tool> -ErrorAction SilentlyContinue` or `powershell where.exe <tool>`
 - Before making any change under `driver-project`, validate intended driver change against the PDFs under `pdfs/`: first read the relevant PDF table of contents, then read the relevant section, and record/cite the section used in the work log or final summary.
 - driver tests are to be done strictly in the vm named `driver-test` and all credentials are stored in the `.env` file
+- the wiki/ has its own repo. i do not want its files in this repo thats why its in this repo's gitignore

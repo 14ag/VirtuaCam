@@ -84,6 +84,7 @@ const ULONG DebugLevel = DEBUGLVL_TERSE;
 #endif
 
 #define FOURCC_YUY2         mmioFOURCC('Y', 'U', 'Y', '2')
+#define FOURCC_NV12         mmioFOURCC('N', 'V', '1', '2')
 #define VIRTUACAM_FRAME_WIDTH 1280
 #define VIRTUACAM_FRAME_HEIGHT 720
 #define VIRTUACAM_FRAME_BYTES_PER_PIXEL 3
@@ -100,7 +101,7 @@ const ULONG DebugLevel = DEBUGLVL_TERSE;
 //
 // The number of pins on the capture filter.
 //
-#define CAPTURE_FILTER_PIN_COUNT 1
+#define CAPTURE_FILTER_PIN_COUNT 2
 
 //
 // CAPTURE_FILTER_CATEGORIES_COUNT:
@@ -151,6 +152,11 @@ extern
 const
 KSPIN_DISPATCH
 CapturePinDispatch;
+
+extern
+const
+KSAUTOMATION_TABLE
+CapturePinAutomationTable;
 
 extern
 const

@@ -262,6 +262,107 @@ namespace
         }
     }
 
+    BOOLEAN IsCompactNv12Geometry(
+        ULONG width,
+        ULONG height,
+        ULONG imageSize,
+        ULONG bytesPerPixel)
+    {
+        if (bytesPerPixel != 1 || width == 0 || height == 0 || (height & 1) != 0) {
+            return FALSE;
+        }
+
+        const ULONGLONG expectedSize =
+            (static_cast<ULONGLONG>(width) * static_cast<ULONGLONG>(height) * 3ull) / 2ull;
+        return expectedSize <= MAXULONG && imageSize == static_cast<ULONG>(expectedSize);
+    }
+
+    void FillPlaceholderFrameNv12(
+        _Out_writes_bytes_(imageSize) PUCHAR buffer,
+        ULONG width,
+        ULONG height,
+        ULONG imageSize)
+    {
+        if (!buffer || !IsCompactNv12Geometry(width, height, imageSize, 1)) {
+            return;
+        }
+
+        PUCHAR yPlane = buffer;
+        PUCHAR uvPlane = buffer + (width * height);
+
+        for (ULONG y = 0; y < height; ++y) {
+            PUCHAR row = yPlane + (y * width);
+            for (ULONG x = 0; x < width; ++x) {
+                row[x] = static_cast<UCHAR>(32 + ((x + y) & 0x7F));
+            }
+        }
+
+        RtlFillMemory(uvPlane, (width * height) / 2, 0x80);
+    }
+
+    void ConvertRgb24ToNv12Frame(
+        _Out_writes_bytes_(destinationLength) PUCHAR destination,
+        ULONG destinationLength,
+        _In_reads_bytes_(sourceLength) const UCHAR* source,
+        ULONG sourceLength,
+        ULONG width,
+        ULONG height)
+    {
+        UNREFERENCED_PARAMETER(destinationLength);
+        UNREFERENCED_PARAMETER(sourceLength);
+
+        PUCHAR yPlane = destination;
+        PUCHAR uvPlane = destination + (width * height);
+        const ULONG srcStride = width * 3;
+
+        for (ULONG y = 0; y < height; ++y) {
+            const UCHAR* srcRow = source + (srcStride * y);
+            PUCHAR yRow = yPlane + (width * y);
+
+            for (ULONG x = 0; x < width; ++x) {
+                const UCHAR* srcPixel = srcRow + (x * 3);
+                UCHAR yValue = 16;
+                UCHAR uValue = 128;
+                UCHAR vValue = 128;
+                Rgb24ToYuv(srcPixel[2], srcPixel[1], srcPixel[0], &yValue, &uValue, &vValue);
+                yRow[x] = yValue;
+            }
+        }
+
+        for (ULONG y = 0; y < height; y += 2) {
+            PUCHAR uvRow = uvPlane + ((y / 2) * width);
+
+            for (ULONG x = 0; x < width; x += 2) {
+                ULONG uSum = 0;
+                ULONG vSum = 0;
+                ULONG samples = 0;
+
+                for (ULONG dy = 0; dy < 2 && (y + dy) < height; ++dy) {
+                    const UCHAR* srcRow = source + (srcStride * (y + dy));
+                    for (ULONG dx = 0; dx < 2 && (x + dx) < width; ++dx) {
+                        const UCHAR* srcPixel = srcRow + ((x + dx) * 3);
+                        UCHAR yValue = 16;
+                        UCHAR uValue = 128;
+                        UCHAR vValue = 128;
+                        Rgb24ToYuv(srcPixel[2], srcPixel[1], srcPixel[0], &yValue, &uValue, &vValue);
+                        uSum += uValue;
+                        vSum += vValue;
+                        samples++;
+                    }
+                }
+
+                if (samples == 0) {
+                    samples = 1;
+                }
+
+                uvRow[x] = static_cast<UCHAR>(uSum / samples);
+                if ((x + 1) < width) {
+                    uvRow[x + 1] = static_cast<UCHAR>(vSum / samples);
+                }
+            }
+        }
+    }
+
     void ConvertRgb24ToYuy2Frame(
         _Out_writes_bytes_(destinationLength) PUCHAR destination,
         ULONG destinationLength,
@@ -848,6 +949,8 @@ Return Value:
             FillPlaceholderFrameRgb32(m_DefaultFrameBuffer, m_Width, m_Height, m_ImageSize);
         } else if (m_BytesPerPixel == 2) {
             FillPlaceholderFrameYuy2(m_DefaultFrameBuffer, m_Width, m_Height, m_ImageSize);
+        } else if (IsCompactNv12Geometry(m_Width, m_Height, m_ImageSize, m_BytesPerPixel)) {
+            FillPlaceholderFrameNv12(m_DefaultFrameBuffer, m_Width, m_Height, m_ImageSize);
         }
     }
 
@@ -1316,6 +1419,7 @@ CopyImageToStreamHeader (
         goto Exit;
     }
 
+    const BOOLEAN isNv12 = IsCompactNv12Geometry(width, height, imageSize, bytesPerPixel);
     LONG widthBytes = static_cast<LONG>(width * bytesPerPixel);
     LONG stride = widthBytes;
     BOOLEAN bottomUp = FALSE;
@@ -1337,6 +1441,52 @@ CopyImageToStreamHeader (
     m_LastFillStride = static_cast<ULONG>(stride);
     m_LastFillWidthBytes = (widthBytes > 0) ? static_cast<ULONG>(widthBytes) : 0;
     m_LastFillByteCount = imageSize;
+
+    if (isNv12) {
+        if (stride <= 0 || static_cast<ULONG>(stride) < width) {
+            m_LastFillRequiredBytes = 0;
+            m_LastFillBufferRemaining = StreamHeader->FrameExtent;
+            m_LastFillStatus = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
+            status = STATUS_INVALID_PARAMETER;
+            goto Exit;
+        }
+
+        const ULONGLONG requiredBytes =
+            (static_cast<ULONGLONG>(stride) * height) +
+            ((static_cast<ULONGLONG>(stride) * height) / 2ull);
+        m_LastFillRequiredBytes = static_cast<ULONG>(requiredBytes <= MAXULONG ? requiredBytes : MAXULONG);
+        if (requiredBytes > StreamHeader->FrameExtent) {
+            m_LastFillBufferRemaining = StreamHeader->FrameExtent;
+            m_LastFillStatus = static_cast<ULONG>(STATUS_INSUFFICIENT_RESOURCES);
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Exit;
+        }
+
+        if (static_cast<ULONG>(stride) == width) {
+            RtlCopyMemory(buffer, sourceFrame, imageSize);
+        } else {
+            PUCHAR destination = buffer;
+            const UCHAR* source = sourceFrame;
+            for (ULONG y = 0; y < height; ++y) {
+                RtlCopyMemory(destination, source, width);
+                destination += stride;
+                source += width;
+            }
+            for (ULONG y = 0; y < height / 2; ++y) {
+                RtlCopyMemory(destination, source, width);
+                destination += stride;
+                source += width;
+            }
+        }
+
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_NumMappingsCompleted));
+        m_LastCompletedDelta = 1;
+        m_LastFillBufferRemaining = 0;
+        m_LastFillStatus = static_cast<ULONG>(STATUS_SUCCESS);
+        *BytesWritten = imageSize;
+        status = STATUS_SUCCESS;
+        goto Exit;
+    }
 
     if (widthBytes <= 0 || stride < widthBytes) {
         m_LastFillRequiredBytes = 0;
@@ -1748,7 +1898,15 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     static volatile LONG s_hwFrameSequence = 0;
     LONG seq = _InterlockedIncrement(&s_hwFrameSequence);
 
-    if (outputBytesPerPixel == 2) {
+    if (IsCompactNv12Geometry(width, height, imageSize, outputBytesPerPixel)) {
+        ConvertRgb24ToNv12Frame(
+            stagingBuffer,
+            imageSize,
+            reinterpret_cast<const UCHAR*>(data),
+            dataLength,
+            width,
+            height);
+    } else if (outputBytesPerPixel == 2) {
         ConvertRgb24ToYuy2Frame(
             stagingBuffer,
             imageSize,
@@ -1764,11 +1922,11 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
             dataLength,
             width,
             height,
-            TRUE);
+            FALSE);
     } else {
 	    for (ULONG y = 0; y < height; y++)
 	    {
-		    PUCHAR buffer = stagingBuffer + ((width * 3) * (height - 1 - y));
+		    PUCHAR buffer = stagingBuffer + ((width * 3) * y);
 		    PUCHAR dataLine = (PUCHAR)(data) + ((width * 3) * y);
 
 		    RtlCopyMemory(buffer, dataLine, width * 3);
