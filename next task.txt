@@ -1,27 +1,28 @@
 #improvements
 the footage needs to be on a fixed size canvas so that when the window being captured changes dimentions a constant aspect ratio is being sent to the driver. the footage inside the canvas maintains the same aspect ratio of the window being captured. when the original window size changes, in the footage it is scaled by zooming to fit on the canvas. see how obs studio implements this
-
+add a testing proceedure for windows camera. same way as the testing goes for webcam.html, do the same for the windows camera app. capture a screenshot of the camera app open, displaying footage of a captures window
 set default to auto-discovery grid
 
 
 #issues
 the webcam output received by apps accessing the webcam is a still image of the window instead of a live one
 windows uwp camera does not display any footage 
-preview option of virtuacam is not working
+preview is not working
 when i click off the virtuacam, tray menu stays open
-the about window of virtuacam should appear on taskbar
+the about window should appear on taskbar
 on resizing window a BSOD is thrown with IRQL error
 
 
 #tasks
 update docs
-
+whql tests
 read docs
-
+monkey test
 update all scripts and tasks to comply with offline_actions #2, #3
 
 #research
 scan the OBS studio software capture side and collect info on what it does better and use that to make improvements
+guidelines for vHLK tests. what is the driver being tested against?
 
 #offline_actions(things i did)
 1. moved contents of ./driver-project/Driver/avshws to ./driver-project

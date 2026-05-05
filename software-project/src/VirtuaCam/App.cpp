@@ -394,6 +394,7 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
     static bool s_loggedNullTexture = false;
     static bool s_loggedFirstTexture = false;
     static bool s_loggedDefaultFeed = false;
+    static UINT s_driverWarmupRetryLogCount = 0;
 
     if (!brokerFrameRendered || !g_driverBridge || !g_driverBridge->IsActive() || !g_pfnGetSharedTexture) {
         return;
@@ -428,10 +429,15 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
     HRESULT hr = g_driverBridge->SendFrame(sharedTexture.get());
     if (FAILED(hr)) {
         if (hr == HRESULT_FROM_WIN32(ERROR_RETRY)) {
-            VirtuaCamLog::LogLine(L"DriverBridge::SendFrame requested retry after reinitialize");
+            ++s_driverWarmupRetryLogCount;
+            if (s_driverWarmupRetryLogCount == 1 || (s_driverWarmupRetryLogCount % 120) == 0) {
+                VirtuaCamLog::LogLine(L"DriverBridge::SendFrame waiting for driver stream to start");
+            }
         } else {
             VirtuaCamLog::LogHr(L"DriverBridge::SendFrame failed", hr);
         }
+    } else {
+        s_driverWarmupRetryLogCount = 0;
     }
 }
 
