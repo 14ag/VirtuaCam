@@ -314,6 +314,18 @@ const UCHAR CRGB24Synthesizer::Colors [MAX_COLOR][3] = {
     {128, 128, 128}     // GREY
 };
 
+const UCHAR CRGB32Synthesizer::Colors [MAX_COLOR][3] = {
+    {0, 0, 0},          // BLACK
+    {255, 255, 255},    // WHITE
+    {0, 255, 255},      // YELLOW
+    {255, 255, 0},      // CYAN
+    {0, 255, 0},        // GREEN
+    {255, 0, 255},      // MAGENTA
+    {0, 0, 255},        // RED
+    {255, 0, 0},        // BLUE
+    {128, 128, 128}     // GREY
+};
+
 const UCHAR CYUVSynthesizer::Colors [MAX_COLOR][3] = {
     {128, 16, 128},     // BLACK
     {128, 235, 128},    // WHITE

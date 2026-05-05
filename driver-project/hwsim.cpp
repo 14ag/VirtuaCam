@@ -230,6 +230,38 @@ namespace
         *v = ClampToByte((((112 * red) - (94 * green) - (18 * blue) + 128) >> 8) + 128);
     }
 
+    void ConvertRgb24ToRgb32Frame(
+        _Out_writes_bytes_(destinationLength) PUCHAR destination,
+        ULONG destinationLength,
+        _In_reads_bytes_(sourceLength) const UCHAR* source,
+        ULONG sourceLength,
+        ULONG width,
+        ULONG height,
+        BOOLEAN flipVertical)
+    {
+        UNREFERENCED_PARAMETER(destinationLength);
+        UNREFERENCED_PARAMETER(sourceLength);
+
+        const ULONG srcStride = width * 3;
+        const ULONG dstStride = width * 4;
+
+        for (ULONG y = 0; y < height; ++y) {
+            const UCHAR* srcRow = source + (srcStride * y);
+            UCHAR* dstRow = flipVertical
+                ? (destination + (dstStride * (height - 1 - y)))
+                : (destination + (dstStride * y));
+
+            for (ULONG x = 0; x < width; ++x) {
+                const UCHAR* srcPixel = srcRow + (x * 3);
+                UCHAR* dstPixel = dstRow + (x * 4);
+                dstPixel[0] = srcPixel[0];
+                dstPixel[1] = srcPixel[1];
+                dstPixel[2] = srcPixel[2];
+                dstPixel[3] = 0xFF;
+            }
+        }
+    }
+
     void ConvertRgb24ToYuy2Frame(
         _Out_writes_bytes_(destinationLength) PUCHAR destination,
         ULONG destinationLength,
@@ -269,6 +301,48 @@ namespace
                 dstRow[dst + 3] = static_cast<UCHAR>(((ULONG)v0 + (ULONG)v1) / 2);
             }
         }
+    }
+
+    void FillPlaceholderFrameRgb32(
+        _Out_writes_bytes_(bufferLength) PUCHAR buffer,
+        ULONG width,
+        ULONG height,
+        ULONG bufferLength)
+    {
+        if (!buffer || width == 0 || height == 0 || bufferLength == 0) {
+            return;
+        }
+
+        const ULONGLONG rgbLength64 =
+            static_cast<ULONGLONG>(width) *
+            static_cast<ULONGLONG>(height) *
+            3ull;
+        if (rgbLength64 > MAXULONG) {
+            RtlZeroMemory(buffer, bufferLength);
+            return;
+        }
+
+        const ULONG rgbLength = static_cast<ULONG>(rgbLength64);
+        PUCHAR rgbBuffer = reinterpret_cast<PUCHAR>(
+            ExAllocatePool2(
+                POOL_FLAG_NON_PAGED,
+                rgbLength,
+                AVSHWS_POOLTAG));
+        if (!rgbBuffer) {
+            RtlZeroMemory(buffer, bufferLength);
+            return;
+        }
+
+        FillPlaceholderFrameRgb24(rgbBuffer, width, height, rgbLength);
+        ConvertRgb24ToRgb32Frame(
+            buffer,
+            bufferLength,
+            rgbBuffer,
+            rgbLength,
+            width,
+            height,
+            TRUE);
+        ExFreePoolWithTag(rgbBuffer, AVSHWS_POOLTAG);
     }
 
     void FillPlaceholderFrameYuy2(
@@ -346,6 +420,41 @@ CHardwareSimulation::
 CHardwareSimulation (
     IN IHardwareSink *HardwareSink
     ) :
+    m_ImageSynth (NULL),
+    m_SynthesisBuffer (NULL),
+    m_TemporaryBuffer (NULL),
+    m_StagingBuffer (NULL),
+    m_DefaultFrameBuffer (NULL),
+    m_TimePerFrame (0),
+    m_Width (0),
+    m_Height (0),
+    m_ImageSize (0),
+    m_BytesPerPixel (0),
+    m_HardwareState (HardwareStopped),
+    m_StopHardware (FALSE),
+    m_NumMappingsCompleted (0),
+    m_ScatterGatherMappingsQueued (0),
+    m_ScatterGatherBytesQueued (0),
+    m_NumFramesSkipped (0),
+    m_InterruptTime (0),
+    m_DpcActive (0),
+    m_FrameWriteActive (0),
+    m_FrameReadActive (0),
+    m_ClientConnected (FALSE),
+    m_NamedClientRequestEvent (NULL),
+    m_NamedClientRequestEventObject (NULL),
+    m_RegisteredClientRequestEventObject (NULL),
+    m_LastFillStatus (0),
+    m_LastFillStride (0),
+    m_LastFillWidthBytes (0),
+    m_LastFillRequiredBytes (0),
+    m_LastFillByteCount (0),
+    m_LastFillBufferRemaining (0),
+    m_LastCompletedDelta (0),
+    m_LastSetDataLength (0),
+    m_SetDataAcceptedCount (0),
+    m_SetDataRejectedCount (0),
+    m_LastSetDataReason (0),
     m_HardwareSink (HardwareSink),
     m_ScatterGatherMappingsMax (SCATTER_GATHER_MAPPINGS_MAX),
     m_ScatterGatherLookasideInitialized (FALSE)
@@ -371,6 +480,8 @@ Return Value:
 {
 
     PAGED_CODE();
+    m_StartTime.QuadPart = 0;
+    m_LastFrameTime.QuadPart = 0;
 
     //
     // Initialize the DPC's, timer's, and locks necessary to simulate
@@ -491,8 +602,12 @@ CHardwareSimulation::
 ReleaseFrameBuffers (
     )
 {
-    if (m_ImageSynth) {
-        m_ImageSynth->SetBuffer(NULL);
+    CImageSynthesizer* imageSynth = m_ImageSynth;
+    m_ImageSynth = NULL;
+    m_BytesPerPixel = 0;
+
+    if (imageSynth) {
+        imageSynth->SetBuffer(NULL);
     }
 
     if (m_SynthesisBuffer) {
@@ -656,6 +771,7 @@ Return Value:
     m_ImageSize = ImageSize;
     m_Height = Height;
     m_Width = Width;
+    m_BytesPerPixel = ImageSynth ? static_cast<ULONG>(ImageSynth->GetBytesPerPixel()) : 0;
 
     InitializeListHead (&m_ScatterGatherMappings);
     m_NumMappingsCompleted = 0;
@@ -726,11 +842,17 @@ Return Value:
     if (!m_DefaultFrameBuffer) {
         Status = STATUS_INSUFFICIENT_RESOURCES;
     } else {
-        if (m_ImageSynth && m_ImageSynth->GetBytesPerPixel() == 3) {
+        if (m_BytesPerPixel == 3) {
             FillPlaceholderFrameRgb24(m_DefaultFrameBuffer, m_Width, m_Height, m_ImageSize);
-        } else if (m_ImageSynth && m_ImageSynth->GetBytesPerPixel() == 2) {
+        } else if (m_BytesPerPixel == 4) {
+            FillPlaceholderFrameRgb32(m_DefaultFrameBuffer, m_Width, m_Height, m_ImageSize);
+        } else if (m_BytesPerPixel == 2) {
             FillPlaceholderFrameYuy2(m_DefaultFrameBuffer, m_Width, m_Height, m_ImageSize);
         }
+    }
+
+    if (m_BytesPerPixel == 0) {
+        Status = STATUS_INVALID_PARAMETER;
     }
 
     if (NT_SUCCESS(Status) && !m_NamedClientRequestEventObject) {
@@ -898,6 +1020,7 @@ Return Value:
     PUCHAR temporaryBuffer = NULL;
     PUCHAR stagingBuffer = NULL;
     PUCHAR defaultFrameBuffer = NULL;
+    CImageSynthesizer* imageSynth = NULL;
     DbgPrint("[avshws] HwSim::Stop begin sim=%p state=%lu queued=%lu irql=%lu\n", this, (ULONG)m_HardwareState, m_ScatterGatherMappingsQueued, (ULONG)KeGetCurrentIrql());
 
     KeCancelTimer (&m_IsrTimer);
@@ -911,10 +1034,13 @@ Return Value:
     temporaryBuffer = m_TemporaryBuffer;
     stagingBuffer = m_StagingBuffer;
     defaultFrameBuffer = m_DefaultFrameBuffer;
+    imageSynth = m_ImageSynth;
     m_SynthesisBuffer = NULL;
     m_TemporaryBuffer = NULL;
     m_StagingBuffer = NULL;
     m_DefaultFrameBuffer = NULL;
+    m_ImageSynth = NULL;
+    m_BytesPerPixel = 0;
     KeReleaseSpinLock(&m_FrameLock, Irql);
 
     while (InterlockedCompareExchange(&m_DpcActive, 0, 0) != 0 ||
@@ -923,8 +1049,8 @@ Return Value:
         KeStallExecutionProcessor(50);
     }
 
-    if (m_ImageSynth) {
-        m_ImageSynth->SetBuffer(NULL);
+    if (imageSynth) {
+        imageSynth->SetBuffer(NULL);
     }
 
     if (synthesisBuffer) {
@@ -1139,7 +1265,7 @@ CopyImageToStreamHeader (
     *BytesWritten = 0;
 
     PUCHAR buffer = reinterpret_cast<PUCHAR>(StreamHeader->Data);
-    if (!buffer || StreamHeader->FrameExtent == 0 || !m_ImageSynth) {
+    if (!buffer || StreamHeader->FrameExtent == 0) {
         m_LastFillStatus = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
         return STATUS_INVALID_PARAMETER;
     }
@@ -1161,7 +1287,7 @@ CopyImageToStreamHeader (
     width = m_Width;
     height = m_Height;
     imageSize = m_ImageSize;
-    bytesPerPixel = m_ImageSynth ? static_cast<ULONG>(m_ImageSynth->GetBytesPerPixel()) : 0;
+    bytesPerPixel = m_BytesPerPixel;
     interruptTime = m_InterruptTime;
     acceptedFrameCount = m_SetDataAcceptedCount;
     if (hardwareState == HardwareRunning) {
@@ -1331,7 +1457,7 @@ Return Value:
         //
         // Since we're software, we'll be accessing this by virtual address...
         //
-        if (!SGEntry -> Virtual || !m_ImageSynth) {
+        if (!SGEntry -> Virtual || m_BytesPerPixel == 0) {
             if (m_ScatterGatherLookasideInitialized) {
                 ExFreeToLookasideListEx(&m_ScatterGatherLookaside, SGEntry);
             } else {
@@ -1349,7 +1475,7 @@ Return Value:
             return STATUS_INVALID_PARAMETER;
         }
 
-        LONG Width = m_Width * (m_ImageSynth -> GetBytesPerPixel());
+        LONG Width = m_Width * m_BytesPerPixel;
         LONG Stride = Width;
         BOOLEAN BottomUp = FALSE;
         if (SGEntry -> CloneEntry -> StreamHeader -> Size >=
@@ -1576,7 +1702,7 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         rejectReason = kSetDataRejectNoBuffer;
     } else if (!m_ClientConnected) {
         rejectReason = kSetDataRejectNotConnected;
-    } else if (!m_ImageSynth) {
+    } else if (m_BytesPerPixel == 0) {
         rejectReason = kSetDataRejectNoSynth;
     } else if (m_FrameWriteActive != 0) {
         rejectReason = kSetDataRejectBusy;
@@ -1587,7 +1713,7 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         width = m_Width;
         height = m_Height;
         imageSize = m_ImageSize;
-        outputBytesPerPixel = static_cast<ULONG>(m_ImageSynth->GetBytesPerPixel());
+        outputBytesPerPixel = m_BytesPerPixel;
         InterlockedIncrement(&m_FrameWriteActive);
     }
     m_LastSetDataLength = dataLength;
@@ -1630,6 +1756,15 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
             dataLength,
             width,
             height);
+    } else if (outputBytesPerPixel == 4) {
+        ConvertRgb24ToRgb32Frame(
+            stagingBuffer,
+            imageSize,
+            reinterpret_cast<const UCHAR*>(data),
+            dataLength,
+            width,
+            height,
+            TRUE);
     } else {
 	    for (ULONG y = 0; y < height; y++)
 	    {

@@ -675,6 +675,16 @@ Return Value:
     
         } else
         if (NT_SUCCESS(Status) &&
+            m_VideoInfoHeader -> bmiHeader.biBitCount == 32 &&
+            m_VideoInfoHeader -> bmiHeader.biCompression == KS_BI_RGB) {
+
+            m_ImageSynth = new (NonPagedPoolNx, 'XysI')
+                CRGB32Synthesizer (
+                    m_VideoInfoHeader -> bmiHeader.biHeight >= 0
+                    );
+
+        } else
+        if (NT_SUCCESS(Status) &&
             m_VideoInfoHeader -> bmiHeader.biBitCount == 16 &&
            (m_VideoInfoHeader -> bmiHeader.biCompression == FOURCC_YUY2)) {
     
@@ -686,7 +696,7 @@ Return Value:
         }
         else if (NT_SUCCESS(Status))
             //
-            // We don't synthesize anything but RGB 24 and UYVY.
+            // We don't synthesize anything but RGB24, RGB32, and YUY2.
             //
             Status = STATUS_INVALID_PARAMETER;
     
