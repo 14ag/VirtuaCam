@@ -70,6 +70,16 @@ $guestRunnerLocalPath = Resolve-HvPath -Path "scripts\guest-held-webcam-session.
 if (-not (Test-Path -LiteralPath $guestRunnerLocalPath)) {
     throw "Guest held-session runner not found: $guestRunnerLocalPath"
 }
+$guestHelperLocalPaths = @(
+    $guestRunnerLocalPath,
+    (Resolve-HvPath -Path "scripts\show-proof-panel.ps1"),
+    (Resolve-HvPath -Path "scripts\serve-webcam.ps1")
+)
+foreach ($helperPath in $guestHelperLocalPaths) {
+    if (-not (Test-Path -LiteralPath $helperPath)) {
+        throw "Guest helper script not found: $helperPath"
+    }
+}
 
 $guestCred = Get-HvGuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
 $session = $null
@@ -102,7 +112,9 @@ try {
         }
     } -ArgumentList $GuestPackageRoot, $AttemptId
 
-    Copy-HvToGuest -Session $session -LocalPath $guestRunnerLocalPath -GuestPath $guestLaunch.ScriptsRoot -LogPath $LogPath
+    foreach ($helperPath in $guestHelperLocalPaths) {
+        Copy-HvToGuest -Session $session -LocalPath $helperPath -GuestPath $guestLaunch.ScriptsRoot -LogPath $LogPath
+    }
 
     $launchResult = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
         param(
