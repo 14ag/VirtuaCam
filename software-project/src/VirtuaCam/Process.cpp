@@ -264,29 +264,31 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
         return S_OK;
     }
 
-    CanvasBlitConstants GetCoverUvConstants(UINT sourceWidth, UINT sourceHeight)
+    CanvasBlitConstants GetFullSourceUvConstants()
+    {
+        CanvasBlitConstants constants = {};
+        constants.uvScaleX = 1.0f;
+        constants.uvScaleY = 1.0f;
+        constants.uvOffsetX = 0.0f;
+        constants.uvOffsetY = 0.0f;
+        return constants;
+    }
+
+    D3D11_VIEWPORT GetContainCanvasViewport(UINT sourceWidth, UINT sourceHeight)
     {
         const float sourceW = static_cast<float>(std::max<UINT>(1, sourceWidth));
         const float sourceH = static_cast<float>(std::max<UINT>(1, sourceHeight));
         const float canvasW = static_cast<float>(kProducerCanvasWidth);
         const float canvasH = static_cast<float>(kProducerCanvasHeight);
-        const float scale = (std::max)(canvasW / sourceW, canvasH / sourceH);
+        const float scale = (std::min)(canvasW / sourceW, canvasH / sourceH);
+        const float fittedW = sourceW * scale;
+        const float fittedH = sourceH * scale;
 
-        CanvasBlitConstants constants = {};
-        constants.uvScaleX = canvasW / (sourceW * scale);
-        constants.uvScaleY = canvasH / (sourceH * scale);
-        constants.uvOffsetX = (1.0f - constants.uvScaleX) * 0.5f;
-        constants.uvOffsetY = (1.0f - constants.uvScaleY) * 0.5f;
-        return constants;
-    }
-
-    D3D11_VIEWPORT GetCanvasViewport()
-    {
         D3D11_VIEWPORT viewport = {};
-        viewport.TopLeftX = 0.0f;
-        viewport.TopLeftY = 0.0f;
-        viewport.Width = static_cast<float>(kProducerCanvasWidth);
-        viewport.Height = static_cast<float>(kProducerCanvasHeight);
+        viewport.TopLeftX = (canvasW - fittedW) * 0.5f;
+        viewport.TopLeftY = (canvasH - fittedH) * 0.5f;
+        viewport.Width = fittedW;
+        viewport.Height = fittedH;
         viewport.MinDepth = 0.0f;
         viewport.MaxDepth = 1.0f;
         return viewport;
@@ -567,8 +569,8 @@ namespace BuiltInCaptureProducer
         }
 
         const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-        const CanvasBlitConstants constants = GetCoverUvConstants(sourceWidth, sourceHeight);
-        D3D11_VIEWPORT viewport = GetCanvasViewport();
+        const CanvasBlitConstants constants = GetFullSourceUvConstants();
+        D3D11_VIEWPORT viewport = GetContainCanvasViewport(sourceWidth, sourceHeight);
         ID3D11RenderTargetView* rtvs[] = { g_canvasRTV.Get() };
         ID3D11ShaderResourceView* srvs[] = { sourceSRV.Get() };
         ID3D11SamplerState* samplers[] = { g_canvasSampler.Get() };
@@ -1771,8 +1773,8 @@ namespace BuiltInCameraProducer
         }
 
         const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-        const CanvasBlitConstants constants = GetCoverUvConstants(sourceWidth, sourceHeight);
-        D3D11_VIEWPORT viewport = GetCanvasViewport();
+        const CanvasBlitConstants constants = GetFullSourceUvConstants();
+        D3D11_VIEWPORT viewport = GetContainCanvasViewport(sourceWidth, sourceHeight);
         ID3D11RenderTargetView* rtvs[] = { g_canvasRTV.Get() };
         ID3D11ShaderResourceView* srvs[] = { sourceSRV.Get() };
         ID3D11SamplerState* samplers[] = { g_canvasSampler.Get() };
