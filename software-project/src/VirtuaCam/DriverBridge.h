@@ -31,6 +31,7 @@ private:
     HRESULT GetDriverProperty(ULONG propertyId, void* data, ULONG dataLength, ULONG* bytesReturned = nullptr);
     HRESULT EnsureGpuResources(ID3D11Texture2D* sourceTexture);
     HRESULT EnsureSourceTextureView(ID3D11Texture2D* sourceTexture);
+    HRESULT RefreshDriverGeometry();
     HRESULT CreateShaders();
     HRESULT UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped);
     void LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequence);
@@ -59,4 +60,6 @@ private:
     wil::com_ptr_nothrow<ID3D11SamplerState> m_samplerState;
 
     std::vector<BYTE> m_rgbBuffer;
+    UINT m_outputWidth = 1280;
+    UINT m_outputHeight = 720;
 };

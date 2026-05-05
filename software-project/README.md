@@ -27,6 +27,7 @@ This design avoids the Media Foundation virtual camera output path. The broker c
 * **External producer support:** `DirectPortConsumer.dll` remains the default dynamic producer module.
 * **Tray controller:** source selection, grid/PIP composition, aspect-ratio selection, and driver status telemetry.
 * **Persisted settings:** PIP toggles and aspect ratio are saved in `%LOCALAPPDATA%\VirtuaCam\settings.ini`.
+* **Driver geometry sync:** frames are scaled to the active driver format, including `1280x720`, `640x480`, `720x1280`, and `480x640`.
 
 ## Build and Run
 

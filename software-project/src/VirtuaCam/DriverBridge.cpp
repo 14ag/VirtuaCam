@@ -17,7 +17,7 @@ namespace
     constexpr UINT kDriverWidth = 1280;
     constexpr UINT kDriverHeight = 720;
     constexpr UINT kDriverBytesPerPixel = 3;
-    constexpr UINT kDriverFrameSize = kDriverWidth * kDriverHeight * kDriverBytesPerPixel;
+    constexpr UINT kMaxDriverDimension = 1920;
 
     const GUID kDriverPropertySet = { 0xcb043957, 0x7b35, 0x456e, { 0x9b, 0x61, 0x55, 0x13, 0x93, 0x0f, 0x4d, 0x8e } };
     constexpr ULONG kDriverPropertyIdFrame = 0;
@@ -218,7 +218,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
 
 DriverBridge::DriverBridge()
 {
-    m_rgbBuffer.resize(kDriverFrameSize);
+    m_rgbBuffer.resize(static_cast<size_t>(m_outputWidth) * m_outputHeight * kDriverBytesPerPixel);
 }
 DriverBridge::~DriverBridge()
 {
@@ -406,10 +406,23 @@ HRESULT DriverBridge::EnsureGpuResources(ID3D11Texture2D* sourceTexture)
         RETURN_IF_FAILED(CreateShaders());
     }
 
-    if (!m_scaledTexture || !m_stagingTexture) {
+    bool recreateTextures = !m_scaledTexture || !m_stagingTexture || !m_scaledRtv;
+    if (!recreateTextures && m_scaledTexture) {
+        D3D11_TEXTURE2D_DESC currentDesc = {};
+        m_scaledTexture->GetDesc(&currentDesc);
+        recreateTextures =
+            currentDesc.Width != m_outputWidth ||
+            currentDesc.Height != m_outputHeight;
+    }
+
+    if (recreateTextures) {
+        m_scaledRtv.reset();
+        m_scaledTexture.reset();
+        m_stagingTexture.reset();
+
         D3D11_TEXTURE2D_DESC scaledDesc = {};
-        scaledDesc.Width = kDriverWidth;
-        scaledDesc.Height = kDriverHeight;
+        scaledDesc.Width = m_outputWidth;
+        scaledDesc.Height = m_outputHeight;
         scaledDesc.MipLevels = 1;
         scaledDesc.ArraySize = 1;
         scaledDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -424,8 +437,49 @@ HRESULT DriverBridge::EnsureGpuResources(ID3D11Texture2D* sourceTexture)
         stagingDesc.BindFlags = 0;
         stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         RETURN_IF_FAILED(m_device->CreateTexture2D(&stagingDesc, nullptr, m_stagingTexture.put()));
+        m_rgbBuffer.resize(static_cast<size_t>(m_outputWidth) * m_outputHeight * kDriverBytesPerPixel);
+        VirtuaCamLog::LogLine(std::format(
+            L"DriverBridge output geometry {}x{}",
+            m_outputWidth,
+            m_outputHeight));
     }
 
+    return S_OK;
+}
+
+HRESULT DriverBridge::RefreshDriverGeometry()
+{
+    DriverStatusSnapshot status = {};
+    DWORD returned = 0;
+    const HRESULT hr = GetDriverProperty(
+        kDriverPropertyIdStatus,
+        &status,
+        static_cast<DWORD>(sizeof(status)),
+        &returned);
+
+    if (FAILED(hr) || returned < sizeof(ULONG) * 6) {
+        return S_OK;
+    }
+
+    if (status.Width == 0 || status.Height == 0 ||
+        status.Width > kMaxDriverDimension ||
+        status.Height > kMaxDriverDimension ||
+        status.ImageSize == 0) {
+        return S_OK;
+    }
+
+    const UINT newWidth = status.Width;
+    const UINT newHeight = status.Height;
+    if (newWidth == m_outputWidth && newHeight == m_outputHeight) {
+        return S_OK;
+    }
+
+    m_outputWidth = newWidth;
+    m_outputHeight = newHeight;
+    m_scaledRtv.reset();
+    m_scaledTexture.reset();
+    m_stagingTexture.reset();
+    m_rgbBuffer.resize(static_cast<size_t>(m_outputWidth) * m_outputHeight * kDriverBytesPerPixel);
     return S_OK;
 }
 
@@ -451,11 +505,11 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
         VirtuaCamLog::LogLine(std::format(L"[1.2] SendFrame #{} calling IKsPropertySet::Set()", n));
     }
 
-    for (UINT y = 0; y < kDriverHeight; ++y) {
+    for (UINT y = 0; y < m_outputHeight; ++y) {
         const BYTE* src = static_cast<const BYTE*>(mapped.pData) + (mapped.RowPitch * y);
-        BYTE* dst = m_rgbBuffer.data() + (kDriverWidth * kDriverBytesPerPixel * y);
+        BYTE* dst = m_rgbBuffer.data() + (m_outputWidth * kDriverBytesPerPixel * y);
 
-        for (UINT x = 0; x < kDriverWidth; ++x) {
+        for (UINT x = 0; x < m_outputWidth; ++x) {
             const BYTE* srcPixel = src + (x * 4);
             BYTE* dstPixel = dst + (x * 3);
 
@@ -470,7 +524,7 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
     if ((n == 1 || n == 90) && !m_rgbBuffer.empty()) {
         const BYTE* topLeft = m_rgbBuffer.data();
         const size_t centerOffset =
-            ((static_cast<size_t>(kDriverHeight / 2) * kDriverWidth) + (kDriverWidth / 2)) * kDriverBytesPerPixel;
+            ((static_cast<size_t>(m_outputHeight / 2) * m_outputWidth) + (m_outputWidth / 2)) * kDriverBytesPerPixel;
         const BYTE* center = (centerOffset + 2 < m_rgbBuffer.size()) ? (m_rgbBuffer.data() + centerOffset) : topLeft;
         size_t nonBlackPixels = 0;
         for (size_t i = 0; i + 2 < m_rgbBuffer.size(); i += kDriverBytesPerPixel) {
@@ -484,15 +538,15 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
             framePath.c_str(),
             m_rgbBuffer.data(),
             m_rgbBuffer.size(),
-            kDriverWidth,
-            kDriverHeight);
+            m_outputWidth,
+            m_outputHeight);
         if (n == 1) {
             DumpBgr24FrameAsPpm(
                 L"logs\\driverbridge-first-frame.ppm",
                 m_rgbBuffer.data(),
                 m_rgbBuffer.size(),
-                kDriverWidth,
-                kDriverHeight);
+                m_outputWidth,
+                m_outputHeight);
         }
         VirtuaCamLog::LogLine(std::format(
             L"DriverBridge frame {}: rowPitch={} bytes={} nonBlackPixels={} topLeftBgr={},{},{} centerBgr={},{},{}",
@@ -509,7 +563,6 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
     }
 
     RETURN_IF_FAILED(EnsurePropertySetReady());
-    RETURN_HR_IF(E_UNEXPECTED, m_rgbBuffer.size() != kDriverFrameSize);
 
     HRESULT hr = SetDriverProperty(kDriverPropertyIdFrame, m_rgbBuffer.data(), static_cast<ULONG>(m_rgbBuffer.size()));
     if (FAILED(hr)) {
@@ -894,10 +947,11 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
 {
     RETURN_HR_IF(E_UNEXPECTED, !m_active);
     RETURN_IF_FAILED(Connect());
+    RETURN_IF_FAILED(RefreshDriverGeometry());
     RETURN_IF_FAILED(EnsureGpuResources(sourceTexture));
     RETURN_IF_FAILED(EnsureSourceTextureView(sourceTexture));
 
-    D3D11_VIEWPORT viewport = { 0.f, 0.f, static_cast<float>(kDriverWidth), static_cast<float>(kDriverHeight), 0.f, 1.f };
+    D3D11_VIEWPORT viewport = { 0.f, 0.f, static_cast<float>(m_outputWidth), static_cast<float>(m_outputHeight), 0.f, 1.f };
     ID3D11RenderTargetView* rtvs[] = { m_scaledRtv.get() };
 
     m_context->OMSetRenderTargets(1, rtvs, nullptr);
