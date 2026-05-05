@@ -185,6 +185,7 @@ $browser = [string]$config.Browser
 $attemptId = [string]$config.AttemptId
 $requestedSourceWindowMode = [string]$config.SourceWindowMode
 $captureBackend = if ($config.PSObject.Properties["CaptureBackend"] -and $config.CaptureBackend) { [string]$config.CaptureBackend } else { "auto" }
+$launchBrowser = if ($config.PSObject.Properties["LaunchBrowser"] -and $null -ne $config.LaunchBrowser) { [bool]$config.LaunchBrowser } else { $true }
 $httpPort = [int]$config.HttpPort
 $guestStatusPath = [string]$config.GuestStatusPath
 $serveHttp = [bool]$config.ServeHttp
@@ -507,6 +508,7 @@ try {
             }
         }
         "ProofPanel" {
+            $panelMarkerText = $sourceMarker -replace '\s+', '_'
             $panel = Start-Process powershell.exe -ArgumentList @(
                 "-NoProfile",
                 "-ExecutionPolicy", "Bypass",
@@ -515,7 +517,7 @@ try {
                 "-HwndPath", $sourceHwndFile,
                 "-PidPath", $sourcePidFile,
                 "-AttemptId", $attemptId,
-                "-MarkerText", $sourceMarker
+                "-MarkerText", $panelMarkerText
             ) -RedirectStandardOutput $panelStdOut -RedirectStandardError $panelStdErr -PassThru
 
             $deadline = (Get-Date).AddSeconds(20)
@@ -578,7 +580,22 @@ try {
     netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=9223 | Out-Null
     netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=9223 connectaddress=127.0.0.1 connectport=9222 | Out-Null
 
-    if (Test-Path -LiteralPath $processExe) {
+    if (-not (Test-Path -LiteralPath $runtimeExe)) {
+        throw "VirtuaCam.exe missing: $runtimeExe"
+    }
+
+    if (-not $launchBrowser) {
+        $virtuaCamRuntime = Invoke-WithAttemptEnvironment -AttemptValue $attemptId -Action {
+            Start-Process -FilePath $runtimeExe -WorkingDirectory $packageRoot -ArgumentList @(
+                "/startup",
+                "-debug",
+                "--source-window-hwnd", $sourceWindowHwndText
+            ) -WindowStyle Hidden -PassThru
+        } -AdditionalEnvironment @{
+            VIRTUACAM_CAPTURE_BACKEND = $captureBackend
+        }
+    }
+    elseif (Test-Path -LiteralPath $processExe) {
         $virtuaCamProcess = Invoke-WithAttemptEnvironment -AttemptValue $attemptId -Action {
             Start-Process -FilePath $processExe -WorkingDirectory $packageRoot -ArgumentList @("-debug") -WindowStyle Hidden -PassThru
         } -AdditionalEnvironment @{
@@ -587,11 +604,7 @@ try {
         }
     }
 
-    if (-not (Test-Path -LiteralPath $runtimeExe)) {
-        throw "VirtuaCam.exe missing: $runtimeExe"
-    }
-
-    if ($serveHttp) {
+    if ($launchBrowser -and $serveHttp) {
         Start-Process powershell.exe -ArgumentList @(
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
@@ -602,36 +615,38 @@ try {
         $browserUrl = "http://127.0.0.1:$httpPort/" + [System.IO.Path]::GetFileName($htmlPath)
     }
 
-    $defaultBrowserArgs = @(
-        "--user-data-dir=$browserProfile",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-sync",
-        "--disable-background-networking",
-        "--disable-component-update",
-        "--remote-debugging-address=0.0.0.0",
-        "--remote-debugging-port=9222",
-        "--use-fake-ui-for-media-stream",
-        "--enable-logging",
-        "--v=1",
-        "--log-file=$browserDebugLog",
-        "--force-directshow",
-        "--new-window"
-    )
-    if ($browserExtraArgs) {
-        $defaultBrowserArgs += $browserExtraArgs
-    }
-    $defaultBrowserArgs += $browserUrl
+    if ($launchBrowser) {
+        $defaultBrowserArgs = @(
+            "--user-data-dir=$browserProfile",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-sync",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--remote-debugging-address=0.0.0.0",
+            "--remote-debugging-port=9222",
+            "--use-fake-ui-for-media-stream",
+            "--enable-logging",
+            "--v=1",
+            "--log-file=$browserDebugLog",
+            "--force-directshow",
+            "--new-window"
+        )
+        if ($browserExtraArgs) {
+            $defaultBrowserArgs += $browserExtraArgs
+        }
+        $defaultBrowserArgs += $browserUrl
 
-    $browserProc = Invoke-WithAttemptEnvironment -AttemptValue $attemptId -Action {
-        Start-Process -FilePath $browserExe -ArgumentList $defaultBrowserArgs -PassThru
-    }
+        $browserProc = Invoke-WithAttemptEnvironment -AttemptValue $attemptId -Action {
+            Start-Process -FilePath $browserExe -ArgumentList $defaultBrowserArgs -PassThru
+        }
 
-    $browserWindow = Wait-ForProcessMainWindow -ProcessId $browserProc.Id -TimeoutSeconds 20
-    if ($browserWindow -and $browserWindow.Hwnd) {
-        [void][NativeWindowOps]::ShowWindowAsync(([IntPtr][int64]$browserWindow.Hwnd), 3)
-        Start-Sleep -Milliseconds 250
-        [void][NativeWindowOps]::SetForegroundWindow(([IntPtr][int64]$browserWindow.Hwnd))
+        $browserWindow = Wait-ForProcessMainWindow -ProcessId $browserProc.Id -TimeoutSeconds 20
+        if ($browserWindow -and $browserWindow.Hwnd) {
+            [void][NativeWindowOps]::ShowWindowAsync(([IntPtr][int64]$browserWindow.Hwnd), 3)
+            Start-Sleep -Milliseconds 250
+            [void][NativeWindowOps]::SetForegroundWindow(([IntPtr][int64]$browserWindow.Hwnd))
+        }
     }
 
     $runtimeDeadline = (Get-Date).AddSeconds(15)
@@ -652,18 +667,20 @@ try {
         Sort-Object InterfaceMetric |
         Select-Object -First 1 -ExpandProperty IPAddress)
 
-    try {
-        $versionResponse = Invoke-WebRequest -UseBasicParsing -Uri $browserReadyProbe.JsonVersionUrl -TimeoutSec 5
-        $browserReadyProbe.StatusCode = [int]$versionResponse.StatusCode
-        $browserReadyProbe.Body = $versionResponse.Content
-        $versionJson = $versionResponse.Content | ConvertFrom-Json
-        if ($versionJson.webSocketDebuggerUrl) {
-            $browserReadyProbe.WebSocketDebuggerUrl = [string]$versionJson.webSocketDebuggerUrl
+    if ($launchBrowser) {
+        try {
+            $versionResponse = Invoke-WebRequest -UseBasicParsing -Uri $browserReadyProbe.JsonVersionUrl -TimeoutSec 5
+            $browserReadyProbe.StatusCode = [int]$versionResponse.StatusCode
+            $browserReadyProbe.Body = $versionResponse.Content
+            $versionJson = $versionResponse.Content | ConvertFrom-Json
+            if ($versionJson.webSocketDebuggerUrl) {
+                $browserReadyProbe.WebSocketDebuggerUrl = [string]$versionJson.webSocketDebuggerUrl
+            }
+            $browserReady = ($versionResponse.StatusCode -eq 200)
         }
-        $browserReady = ($versionResponse.StatusCode -eq 200)
-    }
-    catch {
-        $browserReadyProbe.Error = $_.Exception.Message
+        catch {
+            $browserReadyProbe.Error = $_.Exception.Message
+        }
     }
 
     if ($browserProc) {
