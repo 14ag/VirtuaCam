@@ -1,4 +1,4 @@
-# Virtual Webcam v2
+# Virtual Webcam
 
 Windows virtual camera stack for Windows built from:
 
