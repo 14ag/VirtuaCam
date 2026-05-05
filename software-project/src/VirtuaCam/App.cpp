@@ -47,10 +47,7 @@ static std::map<std::wstring, PROCESS_INFORMATION> g_producerProcesses;
 static bool g_showPipTL = false;
 static bool g_showPipTR = false;
 static bool g_showPipBL = false;
-const WCHAR* REG_SUBKEY = L"Software\\VirtuaCam";
-const WCHAR* REG_VAL_PIPTL = L"ShowPipTopLeft";
-const WCHAR* REG_VAL_PIPTR = L"ShowPipTopRight";
-const WCHAR* REG_VAL_PIPBL = L"ShowPipBottomLeft";
+static AspectRatioMode g_aspectRatioMode = AspectRatioMode::R16_9;
 
 const wchar_t* SourceModeToString(SourceMode mode)
 {
@@ -94,6 +91,20 @@ bool GetPipBlEnabled() { return g_showPipBL; }
 void TogglePipTl() { g_showPipTL = !g_showPipTL; SaveSettings(); }
 void TogglePipTr() { g_showPipTR = !g_showPipTR; SaveSettings(); }
 void TogglePipBl() { g_showPipBL = !g_showPipBL; SaveSettings(); }
+AspectRatioMode GetAspectRatioMode() { return g_aspectRatioMode; }
+void SetAspectRatioMode(AspectRatioMode mode)
+{
+    if (g_aspectRatioMode == mode) {
+        return;
+    }
+
+    g_aspectRatioMode = mode;
+    SaveSettings();
+    VirtuaCamLog::LogLine(std::format(
+        L"Aspect ratio changed: {} config={}",
+        VirtuaCamConfig::AspectRatioName(g_aspectRatioMode),
+        VirtuaCamConfig::GetConfigPath().wstring()));
+}
 
 const VirtuaCam::Discovery* GetGlobalDiscovery() { return g_discovery.get(); }
 bool GetDriverBridgeStatus() { return g_driverBridge && g_driverBridge->IsActive(); }
@@ -572,34 +583,25 @@ bool IsRunningAsAdmin() {
 }
 
 void LoadSettings() {
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_SUBKEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        DWORD dwValue = 0;
-        DWORD dwSize = sizeof(dwValue);
-        if (RegQueryValueExW(hKey, REG_VAL_PIPTL, NULL, NULL, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) {
-            g_showPipTL = (dwValue != 0);
-        }
-        if (RegQueryValueExW(hKey, REG_VAL_PIPTR, NULL, NULL, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) {
-            g_showPipTR = (dwValue != 0);
-        }
-        if (RegQueryValueExW(hKey, REG_VAL_PIPBL, NULL, NULL, (LPBYTE)&dwValue, &dwSize) == ERROR_SUCCESS) {
-            g_showPipBL = (dwValue != 0);
-        }
-        RegCloseKey(hKey);
-    }
+    const VirtuaCamConfig::AppSettings settings = VirtuaCamConfig::LoadSettings();
+    g_showPipTL = settings.showPipTopLeft;
+    g_showPipTR = settings.showPipTopRight;
+    g_showPipBL = settings.showPipBottomLeft;
+    g_aspectRatioMode = settings.aspectRatio;
+
+    VirtuaCamLog::LogLine(std::format(
+        L"Settings loaded: config={} aspect={}",
+        VirtuaCamConfig::GetConfigPath().wstring(),
+        VirtuaCamConfig::AspectRatioName(g_aspectRatioMode)));
 }
 
 void SaveSettings() {
-    HKEY hKey;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_SUBKEY, 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        DWORD dwValueTL = g_showPipTL ? 1 : 0;
-        DWORD dwValueTR = g_showPipTR ? 1 : 0;
-        DWORD dwValueBL = g_showPipBL ? 1 : 0;
-        RegSetValueExW(hKey, REG_VAL_PIPTL, 0, REG_DWORD, (const BYTE*)&dwValueTL, sizeof(dwValueTL));
-        RegSetValueExW(hKey, REG_VAL_PIPTR, 0, REG_DWORD, (const BYTE*)&dwValueTR, sizeof(dwValueTR));
-        RegSetValueExW(hKey, REG_VAL_PIPBL, 0, REG_DWORD, (const BYTE*)&dwValueBL, sizeof(dwValueBL));
-        RegCloseKey(hKey);
-    }
+    VirtuaCamConfig::AppSettings settings = {};
+    settings.showPipTopLeft = g_showPipTL;
+    settings.showPipTopRight = g_showPipTR;
+    settings.showPipBottomLeft = g_showPipBL;
+    settings.aspectRatio = g_aspectRatioMode;
+    (void)VirtuaCamConfig::SaveSettings(settings);
 }
 
 bool TryGetArgU64(const std::wstring& cmdLine, const wchar_t* arg, UINT64& outValue)

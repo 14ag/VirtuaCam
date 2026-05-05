@@ -22,6 +22,7 @@ add_library(VirtuaCamCommon STATIC
     VirtuaCam/Guids.cpp
     VirtuaCam/Enumerator.cpp
     VirtuaCam/Formats.cpp
+    VirtuaCam/Config.cpp
     VirtuaCam/Discovery.cpp
     VirtuaCam/ShaderModule.cpp
     VirtuaCam/RuntimeLog.cpp

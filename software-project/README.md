@@ -25,7 +25,8 @@ This design avoids the Media Foundation virtual camera output path. The broker c
 * **Direct AVStream output:** frames reach Windows camera clients through `avshws.sys`.
 * **Built-in producers:** camera passthrough and window capture run inside `VirtuaCamProcess.exe`.
 * **External producer support:** `DirectPortConsumer.dll` remains the default dynamic producer module.
-* **Tray controller:** source selection, grid/PIP composition, and driver status telemetry.
+* **Tray controller:** source selection, grid/PIP composition, aspect-ratio selection, and driver status telemetry.
+* **Persisted settings:** PIP toggles and aspect ratio are saved in `%LOCALAPPDATA%\VirtuaCam\settings.ini`.
 
 ## Build and Run
 
@@ -38,6 +39,8 @@ Use the repository root scripts. This subproject does not have a separate public
 5. Open the target app and select `VirtuaCam` or `Virtual Camera Driver` as the camera.
 
 Default staged user-mode artifacts are `VirtuaCam.exe`, `VirtuaCamProcess.exe`, `DirectPortBroker.dll`, `DirectPortClient.dll`, and `DirectPortConsumer.dll`.
+
+Aspect ratio is available from `Settings > Aspect Ratio` with `16:9`, `9:16`, `4:3`, and `3:4`. The selected ratio changes how the producer fits content into the fixed driver frame; it preserves source shape and uses black padding instead of stretching.
 
 ## License
 

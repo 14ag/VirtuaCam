@@ -2,6 +2,7 @@
 #include "Process.h"
 #include "DriverBridge.h"
 #include "Resource.h"
+#include "Config.h"
 #include "RuntimeLog.h"
 #include "Tools.h"
 #include <string>
@@ -274,19 +275,42 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
         return constants;
     }
 
+    AspectRatioMode GetProducerAspectRatioMode()
+    {
+        static AspectRatioMode cached = VirtuaCamConfig::LoadSettings().aspectRatio;
+        static ULONGLONG lastReloadTick = 0;
+
+        const ULONGLONG now = GetTickCount64();
+        if (now - lastReloadTick > 500) {
+            cached = VirtuaCamConfig::LoadSettings().aspectRatio;
+            lastReloadTick = now;
+        }
+        return cached;
+    }
+
     D3D11_VIEWPORT GetContainCanvasViewport(UINT sourceWidth, UINT sourceHeight)
     {
         const float sourceW = static_cast<float>(std::max<UINT>(1, sourceWidth));
         const float sourceH = static_cast<float>(std::max<UINT>(1, sourceHeight));
         const float canvasW = static_cast<float>(kProducerCanvasWidth);
         const float canvasH = static_cast<float>(kProducerCanvasHeight);
-        const float scale = (std::min)(canvasW / sourceW, canvasH / sourceH);
+
+        const float targetAspect = VirtuaCamConfig::AspectRatioValue(GetProducerAspectRatioMode());
+        float targetW = canvasW;
+        float targetH = canvasH;
+        if ((canvasW / canvasH) > targetAspect) {
+            targetW = targetH * targetAspect;
+        } else {
+            targetH = targetW / targetAspect;
+        }
+
+        const float scale = (std::min)(targetW / sourceW, targetH / sourceH);
         const float fittedW = sourceW * scale;
         const float fittedH = sourceH * scale;
 
         D3D11_VIEWPORT viewport = {};
-        viewport.TopLeftX = (canvasW - fittedW) * 0.5f;
-        viewport.TopLeftY = (canvasH - fittedH) * 0.5f;
+        viewport.TopLeftX = (canvasW - targetW) * 0.5f + (targetW - fittedW) * 0.5f;
+        viewport.TopLeftY = (canvasH - targetH) * 0.5f + (targetH - fittedH) * 0.5f;
         viewport.Width = fittedW;
         viewport.Height = fittedH;
         viewport.MinDepth = 0.0f;
