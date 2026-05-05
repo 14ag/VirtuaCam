@@ -4,6 +4,7 @@
 #include "Tools.h"
 #include "Formats.h"
 #include "Discovery.h"
+#include "RuntimeLog.h"
 #include <dshow.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
@@ -439,7 +440,13 @@ void HandleMenuCommand(UINT id)
         return;
     }
 
-    if (id == ID_SETTINGS_PIP_TL) TogglePipTl();
+    if (id == ID_TRAY_PREVIEW_WINDOW) CreatePreviewWindow();
+    else if (id == ID_TRAY_ABOUT) DialogBox(g_instance, MAKEINTRESOURCE(IDD_ABOUTBOX), nullptr, About);
+    else if (id == ID_TRAY_EXIT) {
+        RequestDriverDisconnect();
+        DestroyWindow(g_hMainWnd);
+    }
+    else if (id == ID_SETTINGS_PIP_TL) TogglePipTl();
     else if (id == ID_SETTINGS_PIP_TR) TogglePipTr();
     else if (id == ID_SETTINGS_PIP_BL) TogglePipBl();
     else if (id >= ID_PIP_OFF) HandlePipCommand(PipPosition::BR, id);
@@ -471,12 +478,6 @@ void HandleMenuCommand(UINT id)
     else if (id >= ID_AUDIO_DEVICE_NONE) {
         g_currentAudioDevice = id;
         if (g_audioSelectionCallback) g_audioSelectionCallback(id);
-    }
-    else if (id == ID_TRAY_PREVIEW_WINDOW) CreatePreviewWindow();
-    else if (id == ID_TRAY_ABOUT) DialogBox(g_instance, MAKEINTRESOURCE(IDD_ABOUTBOX), nullptr, About);
-    else if (id == ID_TRAY_EXIT) {
-        RequestDriverDisconnect();
-        DestroyWindow(g_hMainWnd);
     }
 }
 
@@ -726,12 +727,37 @@ void AddTrayIcon(HWND hwnd, bool add) {
 
 void CreatePreviewWindow() {
     if (g_hPreviewWnd && IsWindow(g_hPreviewWnd)) {
-        ShowWindow(g_hPreviewWnd, SW_SHOW); SetForegroundWindow(g_hPreviewWnd); return;
+        ShowWindow(g_hPreviewWnd, IsIconic(g_hPreviewWnd) ? SW_RESTORE : SW_SHOWNORMAL);
+        SetForegroundWindow(g_hPreviewWnd);
+        return;
     }
     RECT rc = { 0, 0, 640, 360 };
-    AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX, FALSE);
-    g_hPreviewWnd = CreateWindowW(PREVIEW_WINDOW_CLASS, L"VirtuaCam Preview", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, NULL, NULL, g_instance, NULL);
-    if (g_hPreviewWnd) { CenterWindow(g_hPreviewWnd, true); ShowWindow(g_hPreviewWnd, SW_SHOW); UpdateWindow(g_hPreviewWnd); }
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+    AdjustWindowRectEx(&rc, style, FALSE, WS_EX_APPWINDOW);
+    g_hPreviewWnd = CreateWindowExW(
+        WS_EX_APPWINDOW,
+        PREVIEW_WINDOW_CLASS,
+        L"VirtuaCam Preview",
+        style,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        rc.right - rc.left,
+        rc.bottom - rc.top,
+        nullptr,
+        nullptr,
+        g_instance,
+        nullptr);
+    if (!g_hPreviewWnd) {
+        DWORD error = GetLastError();
+        VirtuaCamLog::LogWin32(L"CreatePreviewWindow failed", error);
+        MessageBoxW(g_hMainWnd, L"Failed to open VirtuaCam preview window.", L"VirtuaCam", MB_OK | MB_ICONERROR);
+        return;
+    }
+    CenterWindow(g_hPreviewWnd, true);
+    ShowWindow(g_hPreviewWnd, SW_SHOWNORMAL);
+    ShowWindow(g_hPreviewWnd, SW_SHOW);
+    SetForegroundWindow(g_hPreviewWnd);
+    UpdateWindow(g_hPreviewWnd);
 }
 
 void UpdateTelemetry(BrokerState currentState, bool driverConnected) {
@@ -791,7 +817,12 @@ HRESULT InitD3D(HWND hwnd) {
     scd.BufferCount = 2; scd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; scd.OutputWindow = hwnd;
     scd.SampleDesc.Count = 1; scd.Windowed = TRUE; scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &scd, &g_swapChain, &g_device, nullptr, &g_context);
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &scd, &g_swapChain, &g_device, nullptr, &g_context);
+    if (FAILED(hr)) {
+        VirtuaCamLog::LogHr(L"Preview D3D hardware init failed; retrying WARP", hr);
+        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &scd, &g_swapChain, &g_device, nullptr, &g_context);
+    }
     if (SUCCEEDED(hr)) {
         ComPtr<ID3D11Texture2D> pBuffer; g_swapChain->GetBuffer(0, IID_PPV_ARGS(&pBuffer));
         g_device->CreateRenderTargetView(pBuffer.Get(), NULL, &g_rtv);
@@ -827,12 +858,17 @@ void RenderPreviewFrame(HWND hwnd) {
         ComPtr<ID3D11Device1> device1;
         if (SUCCEEDED(g_device.As(&device1)))
         {
-            wil::unique_handle sharedHandle(GetHandleFromName(GetBrokerTextureName().c_str(), GENERIC_READ));
-            if (sharedHandle)
+            const HRESULT openHr = device1->OpenSharedResourceByName(
+                GetBrokerTextureName().c_str(),
+                DXGI_SHARED_RESOURCE_READ,
+                __uuidof(ID3D11Texture2D),
+                reinterpret_cast<void**>(g_uiSideTexture.GetAddressOf()));
+            if (SUCCEEDED(openHr) && g_uiSideTexture)
             {
-                if (SUCCEEDED(device1->OpenSharedResource1(sharedHandle.get(), IID_PPV_ARGS(&g_uiSideTexture))))
+                const HRESULT srvHr = g_device->CreateShaderResourceView(g_uiSideTexture.Get(), nullptr, &g_previewSRV);
+                if (FAILED(srvHr))
                 {
-                    g_device->CreateShaderResourceView(g_uiSideTexture.Get(), nullptr, &g_previewSRV);
+                    VirtuaCamLog::LogHr(L"Preview CreateShaderResourceView failed", srvHr);
                 }
             }
         }

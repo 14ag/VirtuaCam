@@ -42,7 +42,7 @@ What happened instead?
 
 ## Logs and evidence
 
-Include command output, screenshots, and relevant files from `output\logs\` when available.
+Include command output, screenshots, and relevant files from `test-reports\` when available.
 
 ## Additional context
 

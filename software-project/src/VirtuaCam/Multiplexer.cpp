@@ -264,7 +264,42 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
 
     // 4. Render Overlays (PiP sources or Grid)
     if (isGridMode) {
-        // --- THIS LOGIC REMAINS THE SAME ---
+        std::vector<ProducerGpuResources*> gridResources;
+        gridResources.reserve(activeProducers.size());
+        for (const auto& producer : activeProducers) {
+            if (ProducerGpuResources* res = find_resource(producer.processId); res && res->privateSRV) {
+                gridResources.push_back(res);
+            }
+        }
+
+        if (!gridResources.empty()) {
+            m_context->VSSetShader(m_blitVS.Get(), nullptr, 0);
+            m_context->PSSetShader(m_blitPS.Get(), nullptr, 0);
+            m_context->PSSetSamplers(0, 1, m_blitSampler.GetAddressOf());
+            m_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+            const UINT count = static_cast<UINT>(gridResources.size());
+            const UINT columns = std::max<UINT>(1, static_cast<UINT>(std::ceil(std::sqrt(static_cast<float>(count)))));
+            const UINT rows = std::max<UINT>(1, static_cast<UINT>(std::ceil(static_cast<float>(count) / static_cast<float>(columns))));
+            const float tileW = static_cast<float>(MUX_WIDTH) / static_cast<float>(columns);
+            const float tileH = static_cast<float>(MUX_HEIGHT) / static_cast<float>(rows);
+
+            for (UINT i = 0; i < count; ++i) {
+                const UINT col = i % columns;
+                const UINT row = i / columns;
+                D3D11_VIEWPORT tileVp = {
+                    tileW * static_cast<float>(col),
+                    tileH * static_cast<float>(row),
+                    tileW,
+                    tileH,
+                    0.0f,
+                    1.0f
+                };
+                m_context->RSSetViewports(1, &tileVp);
+                m_context->PSSetShaderResources(0, 1, gridResources[i]->privateSRV.GetAddressOf());
+                m_context->Draw(3, 0);
+            }
+        }
     }
     else {
         // --- START OF MODIFIED SECTION ---
