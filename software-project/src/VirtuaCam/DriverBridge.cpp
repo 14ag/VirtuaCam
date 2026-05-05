@@ -463,22 +463,39 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
         }
     }
 
-    if (n == 1 && !m_rgbBuffer.empty()) {
+    if ((n == 1 || n == 90) && !m_rgbBuffer.empty()) {
         const BYTE* topLeft = m_rgbBuffer.data();
         const size_t centerOffset =
             ((static_cast<size_t>(kDriverHeight / 2) * kDriverWidth) + (kDriverWidth / 2)) * kDriverBytesPerPixel;
         const BYTE* center = (centerOffset + 2 < m_rgbBuffer.size()) ? (m_rgbBuffer.data() + centerOffset) : topLeft;
+        size_t nonBlackPixels = 0;
+        for (size_t i = 0; i + 2 < m_rgbBuffer.size(); i += kDriverBytesPerPixel) {
+            if ((m_rgbBuffer[i] | m_rgbBuffer[i + 1] | m_rgbBuffer[i + 2]) != 0) {
+                ++nonBlackPixels;
+            }
+        }
         CreateDirectoryW(L"logs", nullptr);
+        const std::wstring framePath = std::format(L"logs\\driverbridge-frame-{:06}.ppm", n);
         DumpBgr24FrameAsPpm(
-            L"logs\\driverbridge-first-frame.ppm",
+            framePath.c_str(),
             m_rgbBuffer.data(),
             m_rgbBuffer.size(),
             kDriverWidth,
             kDriverHeight);
+        if (n == 1) {
+            DumpBgr24FrameAsPpm(
+                L"logs\\driverbridge-first-frame.ppm",
+                m_rgbBuffer.data(),
+                m_rgbBuffer.size(),
+                kDriverWidth,
+                kDriverHeight);
+        }
         VirtuaCamLog::LogLine(std::format(
-            L"DriverBridge first frame: rowPitch={} bytes={} topLeftBgr={},{},{} centerBgr={},{},{}",
+            L"DriverBridge frame {}: rowPitch={} bytes={} nonBlackPixels={} topLeftBgr={},{},{} centerBgr={},{},{}",
+            n,
             mapped.RowPitch,
             m_rgbBuffer.size(),
+            nonBlackPixels,
             static_cast<unsigned>(topLeft[0]),
             static_cast<unsigned>(topLeft[1]),
             static_cast<unsigned>(topLeft[2]),

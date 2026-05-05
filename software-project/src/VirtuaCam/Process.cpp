@@ -176,6 +176,14 @@ namespace
     constexpr UINT kProducerCanvasWidth = 1920;
     constexpr UINT kProducerCanvasHeight = 1080;
 
+    struct CanvasBlitConstants
+    {
+        float uvScaleX;
+        float uvScaleY;
+        float uvOffsetX;
+        float uvOffsetY;
+    };
+
     const char* kCanvasBlitVertexShader = R"(
 struct VS_OUTPUT { float4 Pos : SV_POSITION; float2 Tex : TEXCOORD; };
 VS_OUTPUT main(uint id : SV_VertexID) {
@@ -185,23 +193,29 @@ VS_OUTPUT main(uint id : SV_VertexID) {
     return output;
 })";
 
-    const char* kCanvasBlitPixelShader = R"(
+const char* kCanvasBlitPixelShader = R"(
 Texture2D inputTexture : register(t0);
 SamplerState inputSampler : register(s0);
+cbuffer CanvasBlitConstants : register(b0) {
+    float2 uvScale;
+    float2 uvOffset;
+};
 float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
-    return inputTexture.Sample(inputSampler, uv);
+    return inputTexture.Sample(inputSampler, uv * uvScale + uvOffset);
 })";
 
     HRESULT CreateCanvasBlitResources(
         ID3D11Device* device,
         ID3D11VertexShader** vertexShader,
         ID3D11PixelShader** pixelShader,
-        ID3D11SamplerState** samplerState)
+        ID3D11SamplerState** samplerState,
+        ID3D11Buffer** constantBuffer)
     {
         RETURN_HR_IF_NULL(E_POINTER, device);
         RETURN_HR_IF_NULL(E_POINTER, vertexShader);
         RETURN_HR_IF_NULL(E_POINTER, pixelShader);
         RETURN_HR_IF_NULL(E_POINTER, samplerState);
+        RETURN_HR_IF_NULL(E_POINTER, constantBuffer);
 
         ComPtr<ID3DBlob> vsBlob;
         ComPtr<ID3DBlob> psBlob;
@@ -241,24 +255,38 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
         samplerDesc.MinLOD = 0;
         samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
         RETURN_IF_FAILED(device->CreateSamplerState(&samplerDesc, samplerState));
+
+        D3D11_BUFFER_DESC constantDesc = {};
+        constantDesc.ByteWidth = sizeof(CanvasBlitConstants);
+        constantDesc.Usage = D3D11_USAGE_DEFAULT;
+        constantDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        RETURN_IF_FAILED(device->CreateBuffer(&constantDesc, nullptr, constantBuffer));
         return S_OK;
     }
 
-    D3D11_VIEWPORT GetCoverViewport(UINT sourceWidth, UINT sourceHeight)
+    CanvasBlitConstants GetCoverUvConstants(UINT sourceWidth, UINT sourceHeight)
     {
         const float sourceW = static_cast<float>(std::max<UINT>(1, sourceWidth));
         const float sourceH = static_cast<float>(std::max<UINT>(1, sourceHeight));
         const float canvasW = static_cast<float>(kProducerCanvasWidth);
         const float canvasH = static_cast<float>(kProducerCanvasHeight);
         const float scale = (std::max)(canvasW / sourceW, canvasH / sourceH);
-        const float scaledW = sourceW * scale;
-        const float scaledH = sourceH * scale;
 
+        CanvasBlitConstants constants = {};
+        constants.uvScaleX = canvasW / (sourceW * scale);
+        constants.uvScaleY = canvasH / (sourceH * scale);
+        constants.uvOffsetX = (1.0f - constants.uvScaleX) * 0.5f;
+        constants.uvOffsetY = (1.0f - constants.uvScaleY) * 0.5f;
+        return constants;
+    }
+
+    D3D11_VIEWPORT GetCanvasViewport()
+    {
         D3D11_VIEWPORT viewport = {};
-        viewport.TopLeftX = (canvasW - scaledW) * 0.5f;
-        viewport.TopLeftY = (canvasH - scaledH) * 0.5f;
-        viewport.Width = scaledW;
-        viewport.Height = scaledH;
+        viewport.TopLeftX = 0.0f;
+        viewport.TopLeftY = 0.0f;
+        viewport.Width = static_cast<float>(kProducerCanvasWidth);
+        viewport.Height = static_cast<float>(kProducerCanvasHeight);
         viewport.MinDepth = 0.0f;
         viewport.MaxDepth = 1.0f;
         return viewport;
@@ -332,6 +360,7 @@ namespace BuiltInCaptureProducer
     static ComPtr<ID3D11VertexShader> g_canvasVS;
     static ComPtr<ID3D11PixelShader> g_canvasPS;
     static ComPtr<ID3D11SamplerState> g_canvasSampler;
+    static ComPtr<ID3D11Buffer> g_canvasConstants;
     static HANDLE g_hSharedTextureHandle = nullptr;
     static HANDLE g_hSharedFenceHandle = nullptr;
     static HANDLE g_hManifest = nullptr;
@@ -445,12 +474,14 @@ namespace BuiltInCaptureProducer
         g_canvasVS.Reset();
         g_canvasPS.Reset();
         g_canvasSampler.Reset();
+        g_canvasConstants.Reset();
         g_canvasRTV.Reset();
         g_sourceSRV.Reset();
         g_sourceD3D11Texture.Reset();
         g_canvasVS.Reset();
         g_canvasPS.Reset();
         g_canvasSampler.Reset();
+        g_canvasConstants.Reset();
         g_captureWidth = 0;
         g_captureHeight = 0;
         g_gdiFrame.clear();
@@ -526,6 +557,7 @@ namespace BuiltInCaptureProducer
         RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasVS.Get());
         RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasPS.Get());
         RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasSampler.Get());
+        RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasConstants.Get());
 
         ComPtr<ID3D11ShaderResourceView> sourceSRV;
         if (sourceTexture == g_sourceD3D11Texture.Get() && g_sourceSRV) {
@@ -535,16 +567,20 @@ namespace BuiltInCaptureProducer
         }
 
         const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-        D3D11_VIEWPORT viewport = GetCoverViewport(sourceWidth, sourceHeight);
+        const CanvasBlitConstants constants = GetCoverUvConstants(sourceWidth, sourceHeight);
+        D3D11_VIEWPORT viewport = GetCanvasViewport();
         ID3D11RenderTargetView* rtvs[] = { g_canvasRTV.Get() };
         ID3D11ShaderResourceView* srvs[] = { sourceSRV.Get() };
         ID3D11SamplerState* samplers[] = { g_canvasSampler.Get() };
+        ID3D11Buffer* constantBuffers[] = { g_canvasConstants.Get() };
 
         g_d3d11Context->OMSetRenderTargets(1, rtvs, nullptr);
         g_d3d11Context->ClearRenderTargetView(g_canvasRTV.Get(), clearColor);
+        g_d3d11Context->UpdateSubresource(g_canvasConstants.Get(), 0, nullptr, &constants, 0, 0);
         g_d3d11Context->RSSetViewports(1, &viewport);
         g_d3d11Context->VSSetShader(g_canvasVS.Get(), nullptr, 0);
         g_d3d11Context->PSSetShader(g_canvasPS.Get(), nullptr, 0);
+        g_d3d11Context->PSSetConstantBuffers(0, 1, constantBuffers);
         g_d3d11Context->PSSetShaderResources(0, 1, srvs);
         g_d3d11Context->PSSetSamplers(0, 1, samplers);
         g_d3d11Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -694,7 +730,8 @@ namespace BuiltInCaptureProducer
             g_d3d11Device.Get(),
             g_canvasVS.ReleaseAndGetAddressOf(),
             g_canvasPS.ReleaseAndGetAddressOf(),
-            g_canvasSampler.ReleaseAndGetAddressOf()));
+            g_canvasSampler.ReleaseAndGetAddressOf(),
+            g_canvasConstants.ReleaseAndGetAddressOf()));
         RETURN_IF_FAILED(g_d3d11Device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&g_sharedD3D11Fence)));
 
         DWORD pid = GetCurrentProcessId();
@@ -1663,6 +1700,7 @@ namespace BuiltInCameraProducer
     static ComPtr<ID3D11VertexShader> g_canvasVS;
     static ComPtr<ID3D11PixelShader> g_canvasPS;
     static ComPtr<ID3D11SamplerState> g_canvasSampler;
+    static ComPtr<ID3D11Buffer> g_canvasConstants;
     static HANDLE g_hSharedTextureHandle = nullptr;
     static HANDLE g_hSharedFenceHandle = nullptr;
     static HANDLE g_hManifest = nullptr;
@@ -1723,6 +1761,7 @@ namespace BuiltInCameraProducer
         RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasVS.Get());
         RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasPS.Get());
         RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasSampler.Get());
+        RETURN_HR_IF_NULL(E_UNEXPECTED, g_canvasConstants.Get());
 
         ComPtr<ID3D11ShaderResourceView> sourceSRV;
         if (sourceTexture == g_sourceD3D11Texture.Get() && g_sourceSRV) {
@@ -1732,16 +1771,20 @@ namespace BuiltInCameraProducer
         }
 
         const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
-        D3D11_VIEWPORT viewport = GetCoverViewport(sourceWidth, sourceHeight);
+        const CanvasBlitConstants constants = GetCoverUvConstants(sourceWidth, sourceHeight);
+        D3D11_VIEWPORT viewport = GetCanvasViewport();
         ID3D11RenderTargetView* rtvs[] = { g_canvasRTV.Get() };
         ID3D11ShaderResourceView* srvs[] = { sourceSRV.Get() };
         ID3D11SamplerState* samplers[] = { g_canvasSampler.Get() };
+        ID3D11Buffer* constantBuffers[] = { g_canvasConstants.Get() };
 
         g_d3d11Context->OMSetRenderTargets(1, rtvs, nullptr);
         g_d3d11Context->ClearRenderTargetView(g_canvasRTV.Get(), clearColor);
+        g_d3d11Context->UpdateSubresource(g_canvasConstants.Get(), 0, nullptr, &constants, 0, 0);
         g_d3d11Context->RSSetViewports(1, &viewport);
         g_d3d11Context->VSSetShader(g_canvasVS.Get(), nullptr, 0);
         g_d3d11Context->PSSetShader(g_canvasPS.Get(), nullptr, 0);
+        g_d3d11Context->PSSetConstantBuffers(0, 1, constantBuffers);
         g_d3d11Context->PSSetShaderResources(0, 1, srvs);
         g_d3d11Context->PSSetSamplers(0, 1, samplers);
         g_d3d11Context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1773,7 +1816,8 @@ namespace BuiltInCameraProducer
             g_d3d11Device.Get(),
             g_canvasVS.ReleaseAndGetAddressOf(),
             g_canvasPS.ReleaseAndGetAddressOf(),
-            g_canvasSampler.ReleaseAndGetAddressOf()));
+            g_canvasSampler.ReleaseAndGetAddressOf(),
+            g_canvasConstants.ReleaseAndGetAddressOf()));
         RETURN_IF_FAILED(g_d3d11Device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&g_sharedD3D11Fence)));
 
         DWORD pid = GetCurrentProcessId();
@@ -2004,6 +2048,13 @@ namespace BuiltInCameraProducer
 
         g_sharedD3D11Fence.Reset();
         g_sharedD3D11Texture.Reset();
+        g_canvasRTV.Reset();
+        g_sourceSRV.Reset();
+        g_sourceD3D11Texture.Reset();
+        g_canvasVS.Reset();
+        g_canvasPS.Reset();
+        g_canvasSampler.Reset();
+        g_canvasConstants.Reset();
 
         if (g_d3d11Context) g_d3d11Context->ClearState();
         g_d3d11Context.Reset();
