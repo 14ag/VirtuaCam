@@ -36,6 +36,8 @@ extern bool GetPipBlEnabled();
 extern void TogglePipTl();
 extern void TogglePipTr();
 extern void TogglePipBl();
+extern AspectRatioMode GetAspectRatioMode();
+extern void SetAspectRatioMode(AspectRatioMode mode);
 
 namespace
 {
@@ -449,6 +451,10 @@ void HandleMenuCommand(UINT id)
     else if (id == ID_SETTINGS_PIP_TL) TogglePipTl();
     else if (id == ID_SETTINGS_PIP_TR) TogglePipTr();
     else if (id == ID_SETTINGS_PIP_BL) TogglePipBl();
+    else if (id == ID_ASPECT_RATIO_16_9) SetAspectRatioMode(AspectRatioMode::R16_9);
+    else if (id == ID_ASPECT_RATIO_9_16) SetAspectRatioMode(AspectRatioMode::R9_16);
+    else if (id == ID_ASPECT_RATIO_4_3) SetAspectRatioMode(AspectRatioMode::R4_3);
+    else if (id == ID_ASPECT_RATIO_3_4) SetAspectRatioMode(AspectRatioMode::R3_4);
     else if (id >= ID_PIP_OFF) HandlePipCommand(PipPosition::BR, id);
     else if (id >= ID_PIP_BL_OFF) HandlePipCommand(PipPosition::BL, id);
     else if (id >= ID_PIP_TR_OFF) HandlePipCommand(PipPosition::TR, id);
@@ -636,6 +642,16 @@ void ShowContextMenu(HWND hwnd) {
         AddNativeMenuItem(settingsMenu, L"PIP Top Left", ID_SETTINGS_PIP_TL, GetPipTlEnabled());
         AddNativeMenuItem(settingsMenu, L"PIP Top Right", ID_SETTINGS_PIP_TR, GetPipTrEnabled());
         AddNativeMenuItem(settingsMenu, L"PIP Bottom Left", ID_SETTINGS_PIP_BL, GetPipBlEnabled());
+        AddNativeSeparator(settingsMenu);
+        HMENU aspectMenu = CreatePopupMenu();
+        if (aspectMenu) {
+            const AspectRatioMode currentAspect = GetAspectRatioMode();
+            AddNativeMenuItem(aspectMenu, L"16:9", ID_ASPECT_RATIO_16_9, currentAspect == AspectRatioMode::R16_9);
+            AddNativeMenuItem(aspectMenu, L"9:16", ID_ASPECT_RATIO_9_16, currentAspect == AspectRatioMode::R9_16);
+            AddNativeMenuItem(aspectMenu, L"4:3", ID_ASPECT_RATIO_4_3, currentAspect == AspectRatioMode::R4_3);
+            AddNativeMenuItem(aspectMenu, L"3:4", ID_ASPECT_RATIO_3_4, currentAspect == AspectRatioMode::R3_4);
+            AppendMenuW(settingsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(aspectMenu), L"Aspect Ratio");
+        }
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(settingsMenu), L"Settings");
     }
 

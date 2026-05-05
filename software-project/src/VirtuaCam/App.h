@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Formats.h"
+#include "Config.h"
 
 #define WM_APP_TRAY_MSG (WM_APP + 1)
 #define WM_APP_MENU_COMMAND (WM_APP + 2)
@@ -44,6 +45,10 @@
 #define ID_SETTINGS_PIP_TL              18001
 #define ID_SETTINGS_PIP_TR              18002
 #define ID_SETTINGS_PIP_BL              18003
+#define ID_ASPECT_RATIO_16_9            18100
+#define ID_ASPECT_RATIO_9_16            18101
+#define ID_ASPECT_RATIO_4_3             18102
+#define ID_ASPECT_RATIO_3_4             18103
 
 enum class BrokerState { Searching, Connected, Failed };
 enum class VCamCommand { None = 0 };
