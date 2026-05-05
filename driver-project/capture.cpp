@@ -123,6 +123,12 @@ namespace
 #define DMAX_Y 720
 #define D_X 1280
 #define D_Y 720
+#define D_480P_X 640
+#define D_480P_Y 480
+#define D_9X16_X 720
+#define D_9X16_Y 1280
+#define D_3X4_X 480
+#define D_3X4_Y 640
 
 CCapturePin::
 CCapturePin (
@@ -1777,6 +1783,131 @@ FormatNV12_Capture = {
 };
 
 //
+// 480p capture formats required by HLK record scenarios.  Keep the
+// 1280x720 ranges as the default formats, but advertise explicit 640x480
+// types so Media Foundation can select the requested record pin resolution.
+//
+const
+KS_DATARANGE_VIDEO
+FormatYUY2_480p_Capture = {
+    {
+        sizeof (KS_DATARANGE_VIDEO),
+        0,
+        D_480P_X * D_480P_Y * 2,
+        0,
+        STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO),
+        0x32595559, 0x0000, 0x0010, 0x80, 0x00,
+        0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+        STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO)
+    },
+    TRUE,
+    FALSE,
+    0,
+    0,
+    {
+        STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO ),
+        KS_AnalogVideo_None,
+        D_480P_X, D_480P_Y,
+        D_480P_X, D_480P_Y,
+        D_480P_X, D_480P_Y,
+        8,
+        1,
+        8,
+        1,
+        D_480P_X, D_480P_Y,
+        D_480P_X, D_480P_Y,
+        8,
+        1,
+        0,
+        0,
+        0,
+        0,
+        333667,
+        640000000,
+        8 * 2 * 30 * D_480P_X * D_480P_Y,
+        8 * 2 * 30 * D_480P_X * D_480P_Y
+    },
+    {
+        0,0,0,0,
+        0,0,0,0,
+        D_480P_X * D_480P_Y * 2 * 8 * 30,
+        0L,
+        333667,
+        sizeof (KS_BITMAPINFOHEADER),
+        D_480P_X,
+        D_480P_Y,
+        1,
+        16,
+        FOURCC_YUY2,
+        D_480P_X * D_480P_Y * 2,
+        0,
+        0,
+        0,
+        0
+    }
+};
+
+const
+KS_DATARANGE_VIDEO
+FormatNV12_480p_Capture = {
+    {
+        sizeof (KS_DATARANGE_VIDEO),
+        0,
+        (D_480P_X * D_480P_Y * 3) / 2,
+        0,
+        STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO),
+        0x3231564e, 0x0000, 0x0010, 0x80, 0x00,
+        0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+        STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO)
+    },
+    TRUE,
+    FALSE,
+    0,
+    0,
+    {
+        STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO ),
+        KS_AnalogVideo_None,
+        D_480P_X, D_480P_Y,
+        D_480P_X, D_480P_Y,
+        D_480P_X, D_480P_Y,
+        8,
+        2,
+        8,
+        2,
+        D_480P_X, D_480P_Y,
+        D_480P_X, D_480P_Y,
+        8,
+        2,
+        0,
+        0,
+        0,
+        0,
+        333667,
+        640000000,
+        12 * 30 * D_480P_X * D_480P_Y,
+        12 * 30 * D_480P_X * D_480P_Y
+    },
+    {
+        0,0,0,0,
+        0,0,0,0,
+        12 * 30 * D_480P_X * D_480P_Y,
+        0L,
+        333667,
+        sizeof (KS_BITMAPINFOHEADER),
+        D_480P_X,
+        D_480P_Y,
+        1,
+        12,
+        FOURCC_NV12,
+        (D_480P_X * D_480P_Y * 3) / 2,
+        0,
+        0,
+        0,
+        0
+    }
+};
+
+//
 // CapturePinDispatch:
 //
 // This is the dispatch table for the capture pin.  It provides notifications
@@ -1891,6 +2022,129 @@ FormatRGB32Bpp_Capture = {
     }
 };
 
+const
+KS_DATARANGE_VIDEO
+FormatRGB32Bpp_480p_Capture = {
+    {
+        sizeof (KS_DATARANGE_VIDEO),
+        0,
+        D_480P_X * D_480P_Y * 4,
+        0,
+        STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO),
+        0xe436eb7e, 0x524f, 0x11ce, 0x9f, 0x53, 0x00, 0x20,
+            0xaf, 0x0b, 0xa7, 0x70,
+        STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO)
+    },
+    TRUE,
+    FALSE,
+    0,
+    0,
+    {
+        STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO ),
+        KS_AnalogVideo_None,
+        D_480P_X, D_480P_Y,
+        D_480P_X, D_480P_Y,
+        D_480P_X, D_480P_Y,
+        8,
+        1,
+        8,
+        1,
+        D_480P_X, D_480P_Y,
+        D_480P_X, D_480P_Y,
+        8,
+        1,
+        0,
+        0,
+        0,
+        0,
+        333667,
+        640000000,
+        8 * 4 * 30 * D_480P_X * D_480P_Y,
+        8 * 4 * 30 * D_480P_X * D_480P_Y
+    },
+    {
+        0,0,0,0,
+        0,0,0,0,
+        D_480P_X * D_480P_Y * 4 * 8 * 30,
+        0L,
+        333667,
+        sizeof (KS_BITMAPINFOHEADER),
+        D_480P_X,
+        -D_480P_Y,
+        1,
+        32,
+        KS_BI_RGB,
+        D_480P_X * D_480P_Y * 4,
+        0,
+        0,
+        0,
+        0
+    }
+};
+
+#define DEFINE_YUY2_CAPTURE_RANGE(Name, WidthValue, HeightValue) \
+const KS_DATARANGE_VIDEO Name = { \
+    { sizeof (KS_DATARANGE_VIDEO), 0, (WidthValue) * (HeightValue) * 2, 0, \
+      STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO), \
+      0x32595559, 0x0000, 0x0010, 0x80, 0x00, \
+      0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71, \
+      STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO) }, \
+    TRUE, FALSE, 0, 0, \
+    { STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO ), KS_AnalogVideo_None, \
+      (WidthValue), (HeightValue), (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 1, 8, 1, (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 1, 0, 0, 0, 0, 333667, 640000000, \
+      8 * 2 * 30 * (WidthValue) * (HeightValue), \
+      8 * 2 * 30 * (WidthValue) * (HeightValue) }, \
+    { 0,0,0,0, 0,0,0,0, (WidthValue) * (HeightValue) * 2 * 8 * 30, 0L, 333667, \
+      sizeof (KS_BITMAPINFOHEADER), (WidthValue), (HeightValue), 1, 16, FOURCC_YUY2, \
+      (WidthValue) * (HeightValue) * 2, 0, 0, 0, 0 } \
+}
+
+#define DEFINE_NV12_CAPTURE_RANGE(Name, WidthValue, HeightValue) \
+const KS_DATARANGE_VIDEO Name = { \
+    { sizeof (KS_DATARANGE_VIDEO), 0, ((WidthValue) * (HeightValue) * 3) / 2, 0, \
+      STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO), \
+      0x3231564e, 0x0000, 0x0010, 0x80, 0x00, \
+      0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71, \
+      STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO) }, \
+    TRUE, FALSE, 0, 0, \
+    { STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO ), KS_AnalogVideo_None, \
+      (WidthValue), (HeightValue), (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 2, 8, 2, (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 2, 0, 0, 0, 0, 333667, 640000000, \
+      12 * 30 * (WidthValue) * (HeightValue), \
+      12 * 30 * (WidthValue) * (HeightValue) }, \
+    { 0,0,0,0, 0,0,0,0, 12 * 30 * (WidthValue) * (HeightValue), 0L, 333667, \
+      sizeof (KS_BITMAPINFOHEADER), (WidthValue), (HeightValue), 1, 12, FOURCC_NV12, \
+      ((WidthValue) * (HeightValue) * 3) / 2, 0, 0, 0, 0 } \
+}
+
+#define DEFINE_RGB32_CAPTURE_RANGE(Name, WidthValue, HeightValue) \
+const KS_DATARANGE_VIDEO Name = { \
+    { sizeof (KS_DATARANGE_VIDEO), 0, (WidthValue) * (HeightValue) * 4, 0, \
+      STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO), \
+      0xe436eb7e, 0x524f, 0x11ce, 0x9f, 0x53, 0x00, 0x20, \
+      0xaf, 0x0b, 0xa7, 0x70, STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO) }, \
+    TRUE, FALSE, 0, 0, \
+    { STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO ), KS_AnalogVideo_None, \
+      (WidthValue), (HeightValue), (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 1, 8, 1, (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 1, 0, 0, 0, 0, 333667, 640000000, \
+      8 * 4 * 30 * (WidthValue) * (HeightValue), \
+      8 * 4 * 30 * (WidthValue) * (HeightValue) }, \
+    { 0,0,0,0, 0,0,0,0, (WidthValue) * (HeightValue) * 4 * 8 * 30, 0L, 333667, \
+      sizeof (KS_BITMAPINFOHEADER), (WidthValue), -(HeightValue), 1, 32, KS_BI_RGB, \
+      (WidthValue) * (HeightValue) * 4, 0, 0, 0, 0 } \
+}
+
+DEFINE_YUY2_CAPTURE_RANGE(FormatYUY2_9x16_Capture, D_9X16_X, D_9X16_Y);
+DEFINE_NV12_CAPTURE_RANGE(FormatNV12_9x16_Capture, D_9X16_X, D_9X16_Y);
+DEFINE_RGB32_CAPTURE_RANGE(FormatRGB32Bpp_9x16_Capture, D_9X16_X, D_9X16_Y);
+DEFINE_YUY2_CAPTURE_RANGE(FormatYUY2_3x4_Capture, D_3X4_X, D_3X4_Y);
+DEFINE_NV12_CAPTURE_RANGE(FormatNV12_3x4_Capture, D_3X4_X, D_3X4_Y);
+DEFINE_RGB32_CAPTURE_RANGE(FormatRGB32Bpp_3x4_Capture, D_3X4_X, D_3X4_Y);
+
 //
 // CapturePinDataRanges:
 //
@@ -1902,5 +2156,14 @@ PKSDATARANGE
 CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
     (PKSDATARANGE) &FormatYUY2_Capture,
     (PKSDATARANGE) &FormatNV12_Capture,
-    (PKSDATARANGE) &FormatRGB32Bpp_Capture
+    (PKSDATARANGE) &FormatRGB32Bpp_Capture,
+    (PKSDATARANGE) &FormatYUY2_480p_Capture,
+    (PKSDATARANGE) &FormatNV12_480p_Capture,
+    (PKSDATARANGE) &FormatRGB32Bpp_480p_Capture,
+    (PKSDATARANGE) &FormatYUY2_9x16_Capture,
+    (PKSDATARANGE) &FormatNV12_9x16_Capture,
+    (PKSDATARANGE) &FormatRGB32Bpp_9x16_Capture,
+    (PKSDATARANGE) &FormatYUY2_3x4_Capture,
+    (PKSDATARANGE) &FormatNV12_3x4_Capture,
+    (PKSDATARANGE) &FormatRGB32Bpp_3x4_Capture
 };
