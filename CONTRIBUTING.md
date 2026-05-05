@@ -7,9 +7,9 @@ Thanks for contributing to Virtual Webcam v2.
 Read:
 
 - `README.md`
-- `wiki/Getting-Started.md`
-- `wiki/Architecture.md`
-- `wiki/Development-Guide.md`
+- `https://github.com/14ag/VirtuaCam/wiki/Getting-Started`
+- `https://github.com/14ag/VirtuaCam/wiki/Architecture`
+- `https://github.com/14ag/VirtuaCam/wiki/Development-Guide`
 
 Use current docs and source first when you work on startup flow, producer flow, packaging, or AVStream behavior. `implementation/` is reserved for retained WDK and AVStream audit references.
 
@@ -83,7 +83,7 @@ If you add, remove, or rename staged binaries, update `scripts/tools/artifact-ma
 - preserve user changes outside your task scope
 - test manually when you touch build, install, startup, producer selection, or driver bridge behavior
 - before changing anything under `driver-project`, check the relevant local PDF table of contents, read the relevant section, and cite the section in your work notes or PR summary
-- keep current docs in `README.md`, `software-project/README.md`, `driver-project/README.md`, and `wiki/`; do not treat implementation scratch notes as user-facing project docs
+- keep current docs in `README.md`, `software-project/README.md`, `driver-project/README.md`, and the separate GitHub wiki; do not treat implementation scratch notes as user-facing project docs
 
 ## Validation expectations
 
@@ -127,7 +127,7 @@ PRs should include:
 If change updates public behavior, also update:
 
 - `README.md` for quick-start impact
-- `wiki/` pages for long-form behavior
+- GitHub wiki pages for long-form behavior
 - `CHANGELOG.md` when user-visible
 
 ## Commit messages
@@ -150,6 +150,6 @@ Examples:
 
 ## Questions and support
 
-- use existing wiki pages first
+- use existing GitHub wiki pages first
 - use public issues for non-sensitive questions
 - use `SECURITY.md` path for vulnerabilities or sensitive findings
