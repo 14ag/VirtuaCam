@@ -15,7 +15,7 @@ Repository goal: build and install a virtual camera that appears to Windows came
 - `software-project/`: CMake-based user-mode code
 - `driver-project/`: Visual Studio / WDK driver code
 - `implementation/`: retained WDK and AVStream audit references
-- `wiki/`: current source-of-truth long-form project documentation
+- `wiki/`: optional local checkout of the GitHub wiki; ignored by this repository
 
 ## Clone to first camera session
 
@@ -78,6 +78,27 @@ This script is the only install entrypoint. It always installs from `.\output`.
 
 Staged artifact names are centralized in `scripts/tools/artifact-manifest.ps1`, which is shared by the build and install scripts.
 
+## Tray settings
+
+The tray menu has two source modes that can look similar when no producers are active:
+
+- `Source > Off`: deliberately sends the generated off/default feed and ignores discovered producer streams.
+- `Source > Auto-Discovery Grid`: scans for available DirectPort producer streams and tiles them into a grid. If no producers are found, it falls back to the generated off/default feed.
+
+Aspect ratio is controlled from:
+
+```text
+Settings > Aspect Ratio > 16:9 | 9:16 | 4:3 | 3:4
+```
+
+VirtuaCam stores these settings in:
+
+```text
+%LOCALAPPDATA%\VirtuaCam\settings.ini
+```
+
+The producer keeps the driver output at `1280x720`; the selected aspect ratio defines the fitted content area inside that frame, with black padding when needed.
+
 ## Validation
 
 Use Hyper-V guest `driver-test` for crash repro, verifier, dump collection, browser proof, and Windows Camera proof. Test artifacts are written under `test-reports\`; `output\` is reserved for staged build/install components.
@@ -101,6 +122,17 @@ HLK client helper:
 
 - `.\scripts\hyperv-hlk-client.ps1`
 - `.\scripts\hyperv-hlk-preflight.ps1`
+
+Host-side proof helpers:
+
+```powershell
+.\scripts\host-preview-menu-proof.ps1
+.\scripts\host-windows-camera-proof.ps1
+.\scripts\host-media-capture-auto-proof.ps1
+.\scripts\host-media-capture-auto-proof.ps1 -IncludeAutoSurfaceProbe
+```
+
+`host-media-capture-auto-proof.ps1` runs the CPU-backed frame-reader path by default. Use `-IncludeAutoSurfaceProbe` when you also want to probe the WinRT `Auto` memory preference path.
 
 Suggested bench order:
 
@@ -144,17 +176,13 @@ Default packaging does not stage legacy Media Foundation producer DLLs. Camera a
 
 ## Documentation
 
-Long-form current docs live in wiki repo pages, not duplicated under `docs/`:
+Long-form current docs live in the separate GitHub wiki repo, not duplicated under `docs/`. When `wiki/` exists locally, it is an ignored wiki checkout.
 
-- [Wiki Home](wiki/Home.md)
-- [Getting Started](wiki/Getting-Started.md)
-- [Architecture](wiki/Architecture.md)
-- [Development Guide](wiki/Development-Guide.md)
-- [Troubleshooting](wiki/Troubleshooting.md)
-
-If published on GitHub, wiki URL is:
-
-- `https://github.com/14ag/VirtuaCam/wiki`
+- [Wiki Home](https://github.com/14ag/VirtuaCam/wiki)
+- [Getting Started](https://github.com/14ag/VirtuaCam/wiki/Getting-Started)
+- [Architecture](https://github.com/14ag/VirtuaCam/wiki/Architecture)
+- [Development Guide](https://github.com/14ag/VirtuaCam/wiki/Development-Guide)
+- [Troubleshooting](https://github.com/14ag/VirtuaCam/wiki/Troubleshooting)
 
 ## Contributing and project policies
 
