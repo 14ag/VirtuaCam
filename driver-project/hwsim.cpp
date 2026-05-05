@@ -277,6 +277,14 @@ namespace
         return expectedSize <= MAXULONG && imageSize == static_cast<ULONG>(expectedSize);
     }
 
+    void ConvertRgb24ToNv12Frame(
+        _Out_writes_bytes_(destinationLength) PUCHAR destination,
+        ULONG destinationLength,
+        _In_reads_bytes_(sourceLength) const UCHAR* source,
+        ULONG sourceLength,
+        ULONG width,
+        ULONG height);
+
     void FillPlaceholderFrameNv12(
         _Out_writes_bytes_(imageSize) PUCHAR buffer,
         ULONG width,
@@ -287,17 +295,35 @@ namespace
             return;
         }
 
-        PUCHAR yPlane = buffer;
-        PUCHAR uvPlane = buffer + (width * height);
-
-        for (ULONG y = 0; y < height; ++y) {
-            PUCHAR row = yPlane + (y * width);
-            for (ULONG x = 0; x < width; ++x) {
-                row[x] = static_cast<UCHAR>(32 + ((x + y) & 0x7F));
-            }
+        const ULONGLONG rgbLength64 =
+            static_cast<ULONGLONG>(width) *
+            static_cast<ULONGLONG>(height) *
+            3ull;
+        if (rgbLength64 > MAXULONG) {
+            RtlZeroMemory(buffer, imageSize);
+            return;
         }
 
-        RtlFillMemory(uvPlane, (width * height) / 2, 0x80);
+        const ULONG rgbLength = static_cast<ULONG>(rgbLength64);
+        PUCHAR rgbBuffer = reinterpret_cast<PUCHAR>(
+            ExAllocatePool2(
+                POOL_FLAG_NON_PAGED,
+                rgbLength,
+                AVSHWS_POOLTAG));
+        if (!rgbBuffer) {
+            RtlZeroMemory(buffer, imageSize);
+            return;
+        }
+
+        FillPlaceholderFrameRgb24(rgbBuffer, width, height, rgbLength);
+        ConvertRgb24ToNv12Frame(
+            buffer,
+            imageSize,
+            rgbBuffer,
+            rgbLength,
+            width,
+            height);
+        ExFreePoolWithTag(rgbBuffer, AVSHWS_POOLTAG);
     }
 
     void ConvertRgb24ToNv12Frame(
