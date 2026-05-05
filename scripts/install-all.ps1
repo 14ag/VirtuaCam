@@ -114,7 +114,7 @@ function Remove-ExistingDriverPackageIfRequested {
 
     foreach ($inf in $infNames) {
         if ($inf -match '^oem\d+\.inf$') {
-            Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/delete-driver", $inf, "/uninstall", "/force") -AllowedExitCodes @(0, 259, 3010)
+            Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/delete-driver", $inf, "/uninstall", "/force") -AllowedExitCodes @(0, 259, 3010, -536870340)
         }
     }
 }

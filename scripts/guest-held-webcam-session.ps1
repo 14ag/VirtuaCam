@@ -202,10 +202,10 @@ if ($config.PSObject.Properties["BrowserExtraArgs"] -and $null -ne $config.Brows
 $root = Split-Path -Parent $packageRoot
 $sourceHwndFile = Join-Path $root "source-window.hwnd.txt"
 $sourcePidFile = Join-Path $root "source-window.pid.txt"
-$panelScript = Join-Path $root "show-proof-panel.ps1"
+$panelScript = Join-Path $PSScriptRoot "show-proof-panel.ps1"
 $panelStdOut = Join-Path $root "show-proof-panel.stdout.log"
 $panelStdErr = Join-Path $root "show-proof-panel.stderr.log"
-$serverScript = Join-Path $root "serve-webcam.ps1"
+$serverScript = Join-Path $PSScriptRoot "serve-webcam.ps1"
 $browserDebugLog = Join-Path $root ("chrome_debug_{0}.log" -f $attemptId)
 $browserProfile = Join-Path $root (($browser.ToLowerInvariant()) + "-profile-" + $attemptId)
 $runtimeLog = Join-Path $packageRoot "logs\virtuacam-runtime.log"
@@ -306,128 +306,13 @@ function Write-GuestState {
     return [pscustomobject]$state
 }
 
-$panelScriptText = @"
-param(
-    [Parameter(Mandatory=`$true)][string]`$HwndPath,
-    [Parameter(Mandatory=`$true)][string]`$PidPath,
-    [string]`$AttemptId = "",
-    [string]`$MarkerText = ""
-)
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
-`$attemptText = if (`$AttemptId) { `$AttemptId } else { 'n/a' }
-`$markerText = if (`$MarkerText) { `$MarkerText } else { 'marker-missing' }
-`$form = New-Object System.Windows.Forms.Form
-`$form.Text = 'Proof Window'
-`$form.StartPosition = 'CenterScreen'
-`$form.Size = New-Object System.Drawing.Size(900, 620)
-`$form.BackColor = [System.Drawing.Color]::FromArgb(24, 28, 34)
-`$header = New-Object System.Windows.Forms.Label
-`$header.Text = 'Virtual Camera Proof Window'
-`$header.ForeColor = [System.Drawing.Color]::White
-`$header.Font = New-Object System.Drawing.Font('Segoe UI', 18, [System.Drawing.FontStyle]::Bold)
-`$header.AutoSize = `$true
-`$header.Location = New-Object System.Drawing.Point(24, 20)
-`$form.Controls.Add(`$header)
-`$group = New-Object System.Windows.Forms.GroupBox
-`$group.Text = 'Feed'
-`$group.ForeColor = [System.Drawing.Color]::White
-`$group.Size = New-Object System.Drawing.Size(840, 500)
-`$group.Location = New-Object System.Drawing.Point(24, 70)
-`$form.Controls.Add(`$group)
-`$preview = New-Object System.Windows.Forms.Panel
-`$preview.BackColor = [System.Drawing.Color]::White
-`$preview.Size = New-Object System.Drawing.Size(520, 360)
-`$preview.Location = New-Object System.Drawing.Point(24, 40)
-`$group.Controls.Add(`$preview)
-`$pc = New-Object System.Windows.Forms.Label
-`$pc.Text = "SYNTHETIC DEBUG WINDOW`r`n`r`nAttempt: `$attemptText`r`n`r`nMarker:`r`n`$markerText"
-`$pc.ForeColor = [System.Drawing.Color]::Black
-`$pc.Font = New-Object System.Drawing.Font('Consolas', 16, [System.Drawing.FontStyle]::Bold)
-`$pc.AutoSize = `$true
-`$pc.BackColor = [System.Drawing.Color]::Transparent
-`$pc.Location = New-Object System.Drawing.Point(28, 46)
-`$preview.Controls.Add(`$pc)
-`$btn = New-Object System.Windows.Forms.Button
-`$btn.Text = 'Synthetic Debug Mode'
-`$btn.Size = New-Object System.Drawing.Size(180, 36)
-`$btn.Location = New-Object System.Drawing.Point(580, 60)
-`$group.Controls.Add(`$btn)
-`$list = New-Object System.Windows.Forms.ListBox
-`$list.Size = New-Object System.Drawing.Size(220, 160)
-`$list.Location = New-Object System.Drawing.Point(580, 120)
-`$list.Items.AddRange(@('Synthetic only', 'Do not count as proof', 'Use Notepad or Explorer instead'))
-`$group.Controls.Add(`$list)
-`$status = New-Object System.Windows.Forms.Label
-`$status.Text = 'Status: Synthetic debug source'
-`$status.ForeColor = [System.Drawing.Color]::White
-`$status.AutoSize = `$true
-`$status.Location = New-Object System.Drawing.Point(580, 310)
-`$group.Controls.Add(`$status)
-`$form.Add_Shown({
-    param(`$sender, `$eventArgs)
-    [System.IO.File]::WriteAllText(`$HwndPath, (`$sender.Handle.ToInt64()).ToString())
-    [System.IO.File]::WriteAllText(`$PidPath, `$PID.ToString())
-})
-[System.Windows.Forms.Application]::Run(`$form)
-"@
-
-$serverScriptText = @"
-param(
-    [Parameter(Mandatory=`$true)][string]`$Root,
-    [int]`$Port = 8000
-)
-`$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Web
-`$listener = [System.Net.HttpListener]::new()
-`$listener.Prefixes.Add("http://127.0.0.1:`$Port/")
-`$listener.Start()
-try {
-    while (`$listener.IsListening) {
-        `$ctx = `$listener.GetContext()
-        try {
-            `$reqPath = [System.Web.HttpUtility]::UrlDecode(`$ctx.Request.Url.AbsolutePath.TrimStart('/'))
-            if ([string]::IsNullOrWhiteSpace(`$reqPath)) {
-                `$reqPath = 'webcam.html'
-            }
-            `$filePath = Join-Path `$Root `$reqPath
-            if ((Test-Path -LiteralPath `$filePath) -and -not (Get-Item -LiteralPath `$filePath).PSIsContainer) {
-                `$ext = [System.IO.Path]::GetExtension(`$filePath).ToLowerInvariant()
-                `$contentType = switch (`$ext) {
-                    '.html' { 'text/html; charset=utf-8' }
-                    '.js'   { 'application/javascript; charset=utf-8' }
-                    '.css'  { 'text/css; charset=utf-8' }
-                    '.json' { 'application/json; charset=utf-8' }
-                    '.png'  { 'image/png' }
-                    '.jpg'  { 'image/jpeg' }
-                    '.jpeg' { 'image/jpeg' }
-                    default { 'application/octet-stream' }
-                }
-                `$bytes = [System.IO.File]::ReadAllBytes(`$filePath)
-                `$ctx.Response.StatusCode = 200
-                `$ctx.Response.ContentType = `$contentType
-                `$ctx.Response.OutputStream.Write(`$bytes, 0, `$bytes.Length)
-            }
-            else {
-                `$ctx.Response.StatusCode = 404
-            }
-        }
-        finally {
-            `$ctx.Response.OutputStream.Close()
-        }
-    }
-}
-finally {
-    `$listener.Stop()
-    `$listener.Close()
-}
-"@
-
 try {
     $null = New-Item -ItemType Directory -Force -Path $root, (Join-Path $packageRoot "logs")
-    $panelScriptText | Set-Content -LiteralPath $panelScript -Encoding ASCII
-    $serverScriptText | Set-Content -LiteralPath $serverScript -Encoding ASCII
+    foreach ($helperScript in @($panelScript, $serverScript)) {
+        if (-not (Test-Path -LiteralPath $helperScript)) {
+            throw "Missing proof helper script: $helperScript"
+        }
+    }
 
     $cleanupNames = @("chrome", "msedge", "VirtuaCam", "VirtuaCamProcess")
     if ($sourceWindowMode -eq "Notepad") {
