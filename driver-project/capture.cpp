@@ -49,6 +49,19 @@ namespace
         }
     }
 
+    LONGLONG QueryPerformanceTimestamp100ns()
+    {
+        LARGE_INTEGER frequency = { 0 };
+        LARGE_INTEGER counter = KeQueryPerformanceCounter(&frequency);
+
+        if (frequency.QuadPart <= 0) {
+            return 0;
+        }
+
+        return static_cast<LONGLONG>(
+            KSCONVERT_PERFORMANCE_TIME(frequency.QuadPart, counter));
+    }
+
     void FinalizeCapturedFrame(
         _In_ PKSSTREAM_HEADER streamHeader,
         _In_ PKS_VIDEOINFOHEADER videoInfoHeader,
@@ -66,8 +79,12 @@ namespace
         if (clock) {
             samplePresentationTime = clock->GetTime();
         } else {
-            samplePresentationTime = *presentationTime;
-            *presentationTime += videoInfoHeader->AvgTimePerFrame;
+            samplePresentationTime = QueryPerformanceTimestamp100ns();
+            if (samplePresentationTime <= *presentationTime) {
+                samplePresentationTime =
+                    *presentationTime + videoInfoHeader->AvgTimePerFrame;
+            }
+            *presentationTime = samplePresentationTime;
         }
 
         streamHeader->PresentationTime.Time = samplePresentationTime;
