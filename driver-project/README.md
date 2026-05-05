@@ -6,7 +6,7 @@ Windows virtual camera driver using the AVStream `avshws` minidriver. It is the 
 - **Type**: Kernel-mode driver (AVStream).
 - **Path**: Direct driver communication (bypasses Media Foundation).
 - **Communication**: Custom `IKsPropertySet` on AVStream filter.
-- **Buffer**: RGB24, 1280x720, 30fps.
+- **Buffer**: RGB24 input side channel sized to the active capture format. Default is 1280x720 at 30fps; the KS capture pin also advertises 640x480, 720x1280, and 480x640 formats for HLK and portrait clients.
 - **Device class**: `Camera`.
 - **Hardware ID**: `AVSHWS`.
 - **Service name**: `avshws`.
@@ -19,7 +19,7 @@ Windows virtual camera driver using the AVStream `avshws` minidriver. It is the 
   - `2`: disconnect
   - `3`: status
   - `4`: register event
-- **Logic**: user-mode app connects, pushes packed BGR24 frame buffers with `Set`, polls status as needed, and disconnects on shutdown.
+- **Logic**: user-mode app connects, queries driver status, pushes packed BGR24 frame buffers matching the active stream geometry with `Set`, polls status as needed, and disconnects on shutdown.
 - **Client-request event**: driver signals `VirtuaCamClientRequest` when camera capture starts without a connected user-mode client.
 - **Fallback**: driver can serve a default blue BGR24 frame until live user-mode frames arrive.
 
