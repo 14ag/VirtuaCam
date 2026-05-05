@@ -93,7 +93,7 @@ const ULONG DebugLevel = DEBUGLVL_TERSE;
 //
 // The number of ranges supported on the capture pin.
 //
-#define CAPTURE_PIN_DATA_RANGE_COUNT 2
+#define CAPTURE_PIN_DATA_RANGE_COUNT 3
 
 //
 // CAPTURE_FILTER_PIN_COUNT:

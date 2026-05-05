@@ -1223,6 +1223,9 @@ Return Value:
 
             (ConnectionFormat -> VideoInfoHeader.bmiHeader.biCompression !=
                 VIRange -> VideoInfoHeader.bmiHeader.biCompression) 
+            ||
+            (ConnectionFormat -> VideoInfoHeader.bmiHeader.biBitCount !=
+                VIRange -> VideoInfoHeader.bmiHeader.biBitCount)
 
             ) {
 
@@ -1256,7 +1259,7 @@ Return Value:
             }
 
             //
-            // We only support KS_BI_RGB (24) and KS_BI_YUV422 (16), so
+            // We only support fixed-size packed RGB/YUY2 formats here, so
             // this is valid for those formats.
             //
             else if (!MultiplyCheckOverflow (
@@ -1570,14 +1573,93 @@ DECLARE_SIMPLE_FRAMING_EX (
     );
 
 //
+// FormatRGB32Bpp_Capture:
+//
+// This is the data range description of the RGB32 capture format we support.
+//
+const
+KS_DATARANGE_VIDEO
+FormatRGB32Bpp_Capture = {
+
+    //
+    // KSDATARANGE
+    //
+    {
+        sizeof (KS_DATARANGE_VIDEO),                // FormatSize
+        0,                                          // Flags
+        D_X * D_Y * 4,                              // SampleSize
+        0,                                          // Reserved
+
+        STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO),     // aka. MEDIATYPE_Video
+        0xe436eb7e, 0x524f, 0x11ce, 0x9f, 0x53, 0x00, 0x20,
+            0xaf, 0x0b, 0xa7, 0x70,                 // aka. MEDIASUBTYPE_RGB32
+        STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO) // aka. FORMAT_VideoInfo
+    },
+
+    TRUE,               // BOOL,  bFixedSizeSamples (all samples same size?)
+    FALSE,              // BOOL,  bTemporalCompression (all I frames?)
+    0,                  // Reserved (was StreamDescriptionFlags)
+    0,                  // Reserved (was MemoryAllocationFlags)
+    //
+    // _KS_VIDEO_STREAM_CONFIG_CAPS
+    //
+    {
+        STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO ), // GUID
+        KS_AnalogVideo_None,                            // AnalogVideoStandard
+        D_X,D_Y,        // InputSize
+        D_X,D_Y,        // MinCroppingSize
+        D_X,D_Y,        // MaxCroppingSize
+        8,              // CropGranularityX
+        1,              // CropGranularityY
+        8,              // CropAlignX
+        1,              // CropAlignY
+        D_X, D_Y,       // MinOutputSize
+        D_X, D_Y,       // MaxOutputSize
+        8,              // OutputGranularityX
+        1,              // OutputGranularityY
+        0,              // StretchTapsX
+        0,              // StretchTapsY
+        0,              // ShrinkTapsX
+        0,              // ShrinkTapsY
+        333667,         // MinFrameInterval
+        640000000,      // MaxFrameInterval
+        8 * 4 * 30 * D_X * D_Y,  // MinBitsPerSecond
+        8 * 4 * 30 * D_X * D_Y   // MaxBitsPerSecond
+    },
+
+    //
+    // KS_VIDEOINFOHEADER (default format)
+    //
+    {
+        0,0,0,0,                            // RECT  rcSource
+        0,0,0,0,                            // RECT  rcTarget
+        D_X * D_Y * 4 * 8 * 30,             // DWORD dwBitRate
+        0L,                                 // DWORD dwBitErrorRate
+        333667,                             // REFERENCE_TIME AvgTimePerFrame
+        sizeof (KS_BITMAPINFOHEADER),       // DWORD biSize
+        D_X,                                // LONG  biWidth
+        D_Y,                                // LONG  biHeight
+        1,                                  // WORD  biPlanes
+        32,                                 // WORD  biBitCount
+        KS_BI_RGB,                          // DWORD biCompression
+        D_X * D_Y * 4,                      // DWORD biSizeImage
+        0,                                  // LONG  biXPelsPerMeter
+        0,                                  // LONG  biYPelsPerMeter
+        0,                                  // DWORD biClrUsed
+        0                                   // DWORD biClrImportant
+    }
+};
+
+//
 // CapturePinDataRanges:
 //
 // This is the list of data ranges supported on the capture pin.  We support
-// two: one RGB24, and one YUY2.
+// three: RGB32, RGB24, and YUY2.
 //
 const
 PKSDATARANGE
 CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
+    (PKSDATARANGE) &FormatRGB32Bpp_Capture,
     (PKSDATARANGE) &FormatYUY2_Capture,
     (PKSDATARANGE) &FormatRGB24Bpp_Capture
 };

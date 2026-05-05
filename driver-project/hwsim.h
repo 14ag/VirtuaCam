@@ -88,6 +88,7 @@ private:
     ULONG m_Width;
     ULONG m_Height;
     ULONG m_ImageSize;
+    ULONG m_BytesPerPixel;
 
     //
     // Scatter gather mappings for the simulated hardware.

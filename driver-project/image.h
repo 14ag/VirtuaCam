@@ -346,6 +346,104 @@ public:
 
 /*************************************************
 
+    CRGB32Synthesizer
+
+    Image synthesizer for RGB32 format.
+
+*************************************************/
+
+class CRGB32Synthesizer : public CImageSynthesizer {
+
+private:
+
+    const static UCHAR Colors [MAX_COLOR][3];
+
+    BOOLEAN m_FlipVertical;
+
+public:
+
+    virtual void
+    PutPixel (
+        PUCHAR *ImageLocation,
+        COLOR Color
+        )
+    {
+        if (Color != TRANSPARENT) {
+            *(*ImageLocation)++ = Colors [(ULONG)Color][0];
+            *(*ImageLocation)++ = Colors [(ULONG)Color][1];
+            *(*ImageLocation)++ = Colors [(ULONG)Color][2];
+            *(*ImageLocation)++ = 0xFF;
+        } else {
+            *ImageLocation += 4;
+        }
+    }
+
+    virtual void
+    PutPixel (
+        COLOR Color
+        )
+    {
+        if (Color != TRANSPARENT) {
+            *m_Cursor++ = Colors [(ULONG)Color][0];
+            *m_Cursor++ = Colors [(ULONG)Color][1];
+            *m_Cursor++ = Colors [(ULONG)Color][2];
+            *m_Cursor++ = 0xFF;
+        } else {
+            m_Cursor += 4;
+        }
+    }
+
+    virtual long
+    GetBytesPerPixel ()
+    {
+        return 4;
+    }
+
+    virtual PUCHAR
+    GetImageLocation (
+        ULONG LocX,
+        ULONG LocY
+        )
+    {
+        if (m_FlipVertical) {
+            return (m_Cursor =
+                (m_SynthesisBuffer + 4 *
+                    (LocX + (m_Height - 1 - LocY) * m_Width))
+                );
+        } else {
+            return (m_Cursor =
+                (m_SynthesisBuffer + 4 * (LocX + LocY * m_Width))
+                );
+        }
+    }
+
+    CRGB32Synthesizer (
+        BOOLEAN FlipVertical
+        ) :
+        m_FlipVertical (FlipVertical)
+    {
+    }
+
+    CRGB32Synthesizer (
+        BOOLEAN FlipVertical,
+        ULONG Width,
+        ULONG Height
+        ) :
+        CImageSynthesizer (Width, Height),
+        m_FlipVertical (FlipVertical)
+    {
+    }
+
+    virtual
+    ~CRGB32Synthesizer (
+        )
+    {
+    }
+
+};
+
+/*************************************************
+
     CYUVSynthesizer
 
     Image synthesizer for YUV format.
