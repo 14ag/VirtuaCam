@@ -444,6 +444,101 @@ public:
 
 /*************************************************
 
+    CNV12Synthesizer
+
+    Minimal synthesizer marker for NV12 format.
+
+*************************************************/
+
+class CNV12Synthesizer : public CImageSynthesizer {
+
+private:
+
+    static UCHAR
+    ColorToLuma(
+        COLOR Color
+        )
+    {
+        switch (Color) {
+        case WHITE: return 235;
+        case YELLOW: return 210;
+        case CYAN: return 170;
+        case GREEN: return 145;
+        case MAGENTA: return 106;
+        case RED: return 81;
+        case BLUE: return 41;
+        case GREY: return 128;
+        case BLACK:
+        default:
+            return 16;
+        }
+    }
+
+public:
+
+    virtual void
+    PutPixel (
+        PUCHAR *ImageLocation,
+        COLOR Color
+        )
+    {
+        if (Color != TRANSPARENT) {
+            *(*ImageLocation)++ = ColorToLuma(Color);
+        } else {
+            (*ImageLocation)++;
+        }
+    }
+
+    virtual void
+    PutPixel (
+        COLOR Color
+        )
+    {
+        if (Color != TRANSPARENT) {
+            *m_Cursor++ = ColorToLuma(Color);
+        } else {
+            m_Cursor++;
+        }
+    }
+
+    virtual long
+    GetBytesPerPixel ()
+    {
+        return 1;
+    }
+
+    virtual PUCHAR
+    GetImageLocation (
+        ULONG LocX,
+        ULONG LocY
+        )
+    {
+        return (m_Cursor = m_SynthesisBuffer + LocX + (LocY * m_Width));
+    }
+
+    CNV12Synthesizer (
+        )
+    {
+    }
+
+    CNV12Synthesizer (
+        ULONG Width,
+        ULONG Height
+        ) :
+        CImageSynthesizer (Width, Height)
+    {
+    }
+
+    virtual
+    ~CNV12Synthesizer (
+        )
+    {
+    }
+
+};
+
+/*************************************************
+
     CYUVSynthesizer
 
     Image synthesizer for YUV format.

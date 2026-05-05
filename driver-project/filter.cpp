@@ -292,6 +292,86 @@ GetStatus(
     return STATUS_SUCCESS;
 }
 
+NTSTATUS
+CCaptureFilter::
+GetVideoControlMode(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    PAGED_CODE();
+    UNREFERENCED_PARAMETER(Request);
+
+    PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG bufferLength = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    if (!Data || bufferLength < sizeof(KSPROPERTY_VIDEOCONTROL_MODE_S)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    PKSPROPERTY_VIDEOCONTROL_MODE_S mode =
+        reinterpret_cast<PKSPROPERTY_VIDEOCONTROL_MODE_S>(Data);
+    mode->Mode = 0;
+
+    Irp->IoStatus.Information = sizeof(*mode);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+CCaptureFilter::
+SetVideoControlMode(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    PAGED_CODE();
+    UNREFERENCED_PARAMETER(Request);
+
+    PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG bufferLength = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    if (!Data || bufferLength < sizeof(KSPROPERTY_VIDEOCONTROL_MODE_S)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    PKSPROPERTY_VIDEOCONTROL_MODE_S mode =
+        reinterpret_cast<PKSPROPERTY_VIDEOCONTROL_MODE_S>(Data);
+    if (mode->StreamIndex >= CAPTURE_FILTER_PIN_COUNT) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Irp->IoStatus.Information = sizeof(*mode);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+CCaptureFilter::
+GetVideoControlCaps(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    PAGED_CODE();
+    UNREFERENCED_PARAMETER(Request);
+
+    PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG bufferLength = irpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    if (!Data || bufferLength < sizeof(KSPROPERTY_VIDEOCONTROL_CAPS_S)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    PKSPROPERTY_VIDEOCONTROL_CAPS_S caps =
+        reinterpret_cast<PKSPROPERTY_VIDEOCONTROL_CAPS_S>(Data);
+    if (caps->StreamIndex >= CAPTURE_FILTER_PIN_COUNT) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    caps->VideoControlCaps = 0;
+    Irp->IoStatus.Information = sizeof(*caps);
+    return STATUS_SUCCESS;
+}
+
 /**************************************************************************
 
 	PROPERTY TABLE STUFF
@@ -362,8 +442,37 @@ DEFINE_KSPROPERTY_TABLE(CustomPropertyTable)
     }
 };
 
+DEFINE_KSPROPERTY_TABLE(FilterVidcapPropertyTable)
+{
+    DEFINE_KSPROPERTY_ITEM(
+        KSPROPERTY_VIDEOCONTROL_MODE,
+        CCaptureFilter::GetVideoControlMode,
+        sizeof(KSPROPERTY),
+        sizeof(KSPROPERTY_VIDEOCONTROL_MODE_S),
+        CCaptureFilter::SetVideoControlMode,
+        NULL,
+        0,
+        NULL,
+        NULL,
+        0
+    ),
+    DEFINE_KSPROPERTY_ITEM(
+        KSPROPERTY_VIDEOCONTROL_CAPS,
+        CCaptureFilter::GetVideoControlCaps,
+        sizeof(KSPROPERTY),
+        sizeof(KSPROPERTY_VIDEOCONTROL_CAPS_S),
+        NULL,
+        NULL,
+        0,
+        NULL,
+        NULL,
+        0
+    )
+};
+
 DEFINE_KSPROPERTY_SET_TABLE(PropertySetTable)
 {
+    DEFINE_STD_PROPERTY_SET(PROPSETID_VIDCAP_VIDEOCONTROL, FilterVidcapPropertyTable),
 	DEFINE_STD_PROPERTY_SET(PROPSETID_VIDCAP_CUSTOMCONTROL, CustomPropertyTable)
 };
 
@@ -381,6 +490,7 @@ DEFINE_KSAUTOMATION_TABLE(AvsFilterAutomationTable)
 
 **************************************************************************/
 
+GUID g_PINNAME_VIDEO_PREVIEW = {STATIC_PINNAME_VIDEO_PREVIEW};
 GUID g_PINNAME_VIDEO_CAPTURE = {STATIC_PINNAME_VIDEO_CAPTURE};
 
 //
@@ -405,11 +515,39 @@ const
 KSPIN_DESCRIPTOR_EX
 CaptureFilterPinDescriptors [CAPTURE_FILTER_PIN_COUNT] = {
     //
+    // Video Preview Pin. Keep this first because Windows camera clients prefer
+    // a VideoPreview color stream before falling back to VideoRecord/Capture.
+    //
+    {
+        &CapturePinDispatch,
+        &CapturePinAutomationTable,
+        {
+            0,                              // Interfaces (NULL, 0 == default)
+            NULL,
+            0,                              // Mediums (NULL, 0 == default)
+            NULL,
+            SIZEOF_ARRAY(CapturePinDataRanges),// Range Count
+            CapturePinDataRanges,           // Ranges
+            KSPIN_DATAFLOW_OUT,             // Dataflow
+            KSPIN_COMMUNICATION_BOTH,       // Communication
+            &PIN_CATEGORY_PREVIEW,          // Category
+            &g_PINNAME_VIDEO_PREVIEW,       // Name
+            0                               // Reserved
+        },
+        KSPIN_FLAG_PROCESS_IN_RUN_STATE_ONLY |
+            KSPIN_FLAG_DO_NOT_INITIATE_PROCESSING,// Pin Flags
+        1,                                  // Instances Possible
+        0,                                  // Instances Necessary
+        &CapturePinAllocatorFraming,        // Allocator Framing
+        reinterpret_cast <PFNKSINTERSECTHANDLEREX>
+            (CCapturePin::IntersectHandler)
+    },
+    //
     // Video Capture Pin
     //
     {
         &CapturePinDispatch,
-        NULL,             
+        &CapturePinAutomationTable,
         {
             0,                              // Interfaces (NULL, 0 == default)
             NULL,
@@ -426,7 +564,7 @@ CaptureFilterPinDescriptors [CAPTURE_FILTER_PIN_COUNT] = {
         KSPIN_FLAG_PROCESS_IN_RUN_STATE_ONLY |
             KSPIN_FLAG_DO_NOT_INITIATE_PROCESSING,// Pin Flags
         1,                                  // Instances Possible
-        1,                                  // Instances Necessary
+        0,                                  // Instances Necessary
         &CapturePinAllocatorFraming,        // Allocator Framing
         reinterpret_cast <PFNKSINTERSECTHANDLEREX> 
             (CCapturePin::IntersectHandler)

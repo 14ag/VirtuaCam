@@ -694,9 +694,17 @@ Return Value:
             m_ImageSynth = new(NonPagedPoolNx, 'YysI') CYUVSynthesizer;
     
         }
+        else
+        if (NT_SUCCESS(Status) &&
+            m_VideoInfoHeader -> bmiHeader.biBitCount == 12 &&
+           (m_VideoInfoHeader -> bmiHeader.biCompression == FOURCC_NV12)) {
+
+            m_ImageSynth = new(NonPagedPoolNx, 'NysI') CNV12Synthesizer;
+
+        }
         else if (NT_SUCCESS(Status))
             //
-            // We don't synthesize anything but RGB24, RGB32, and YUY2.
+            // We don't synthesize anything but RGB24, RGB32, YUY2, and NV12.
             //
             Status = STATUS_INVALID_PARAMETER;
     

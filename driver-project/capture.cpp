@@ -72,6 +72,7 @@ namespace
 
         streamHeader->PresentationTime.Time = samplePresentationTime;
         streamHeader->OptionsFlags |=
+            KSSTREAM_HEADER_OPTIONSF_SPLICEPOINT |
             KSSTREAM_HEADER_OPTIONSF_TIMEVALID |
             KSSTREAM_HEADER_OPTIONSF_DURATIONVALID;
 
@@ -80,13 +81,10 @@ namespace
         if (streamHeader->Size >= sizeof(KSSTREAM_HEADER) + sizeof(KS_FRAME_INFO)) {
             streamHeader->OptionsFlags |= KSSTREAM_HEADER_OPTIONSF_FRAMEINFO;
             PKS_FRAME_INFO frameInfo = reinterpret_cast<PKS_FRAME_INFO>(streamHeader + 1);
-            LONG surfacePitch = frameInfo->lSurfacePitch;
-            RtlZeroMemory(frameInfo, sizeof(*frameInfo));
             frameInfo->ExtendedHeaderSize = sizeof(KS_FRAME_INFO);
             frameInfo->dwFrameFlags = KS_VIDEO_FLAG_FRAME;
             frameInfo->PictureNumber = *frameNumber;
             frameInfo->DropCount = droppedFrames;
-            frameInfo->lSurfacePitch = surfacePitch;
             frameInfo->FrameCompletionNumber = static_cast<ULONGLONG>(*frameNumber);
         }
     }
@@ -1022,9 +1020,22 @@ Return Value:
         // Note that for compressed sizes, this calculation will probably not
         // be just width * height * bitdepth
         //
-        FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biSizeImage =
-            FormatVideoInfoHeader->DataFormat.SampleSize = 
-            KS_DIBSIZE (FormatVideoInfoHeader->VideoInfoHeader.bmiHeader);
+        if (FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biCompression == FOURCC_NV12) {
+            const ULONG width = (ULONG)FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biWidth;
+            const ULONG height = (ULONG)abs(FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biHeight);
+            ULONGLONG imageSize =
+                (static_cast<ULONGLONG>(width) * static_cast<ULONGLONG>(height) * 3ull) / 2ull;
+            if (imageSize > MAXULONG) {
+                return STATUS_INVALID_PARAMETER;
+            }
+            FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biSizeImage =
+                FormatVideoInfoHeader->DataFormat.SampleSize =
+                static_cast<ULONG>(imageSize);
+        } else {
+            FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biSizeImage =
+                FormatVideoInfoHeader->DataFormat.SampleSize =
+                KS_DIBSIZE (FormatVideoInfoHeader->VideoInfoHeader.bmiHeader);
+        }
 
         //
         // REVIEW - Perform other validation such as cropping and scaling checks
@@ -1258,6 +1269,17 @@ Return Value:
                 Status = STATUS_INVALID_PARAMETER;
             }
 
+            else if (ConnectionFormat->VideoInfoHeader.bmiHeader.biCompression == FOURCC_NV12) {
+                ULONGLONG nv12Size =
+                    (static_cast<ULONGLONG>(ImageSize) * 3ull) / 2ull;
+                if (nv12Size > MAXULONG) {
+                    Status = STATUS_INVALID_PARAMETER;
+                } else {
+                    ImageSize = static_cast<ULONG>(nv12Size);
+                    Status = STATUS_SUCCESS;
+                }
+            }
+
             //
             // We only support fixed-size packed RGB/YUY2 formats here, so
             // this is valid for those formats.
@@ -1271,13 +1293,21 @@ Return Value:
 
                 Status = STATUS_INVALID_PARAMETER;
 
+            } else {
+
+                Status = STATUS_SUCCESS;
+
             }
 
             //
             // Valid for the formats we use.  Otherwise, this would be
             // checked later.
             //
-            else if (ConnectionFormat->VideoInfoHeader.bmiHeader.biSizeImage <
+            if (!NT_SUCCESS(Status)) {
+
+                ;
+
+            } else if (ConnectionFormat->VideoInfoHeader.bmiHeader.biSizeImage <
                     ImageSize) {
 
                 Status = STATUS_INVALID_PARAMETER;
@@ -1374,6 +1404,130 @@ Return Value:
     DISPATCH AND DESCRIPTOR LAYOUT
 
 **************************************************************************/
+
+NTSTATUS
+CCapturePin::
+GetDroppedFrames (
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+    )
+{
+    UNREFERENCED_PARAMETER(Request);
+
+    PKSPIN Pin = KsGetPinFromIrp(Irp);
+    if (!Pin || !Pin->Context || !Data) {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    CCapturePin* CapPin = reinterpret_cast<CCapturePin*>(Pin->Context);
+    PKSPROPERTY_DROPPEDFRAMES_CURRENT_S DroppedFrames =
+        reinterpret_cast<PKSPROPERTY_DROPPEDFRAMES_CURRENT_S>(Data);
+
+    RtlZeroMemory(DroppedFrames, sizeof(*DroppedFrames));
+    DroppedFrames->PictureNumber = CapPin->m_FrameNumber;
+    DroppedFrames->DropCount = CapPin->m_DroppedFrames;
+    if (CapPin->m_VideoInfoHeader) {
+        DroppedFrames->AverageFrameSize =
+            CapPin->m_VideoInfoHeader->bmiHeader.biSizeImage;
+    }
+
+    Irp->IoStatus.Information = sizeof(*DroppedFrames);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+CCapturePin::
+GetPreferredCaptureSurface (
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+    )
+{
+    UNREFERENCED_PARAMETER(Request);
+
+    if (!Data) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *reinterpret_cast<PCAPTURE_MEMORY_ALLOCATION_FLAGS>(Data) =
+        KS_CAPTURE_ALLOC_SYSTEM_AGP;
+    Irp->IoStatus.Information = sizeof(CAPTURE_MEMORY_ALLOCATION_FLAGS);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+CCapturePin::
+GetCurrentCaptureSurface (
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+    )
+{
+    return GetPreferredCaptureSurface(Irp, Request, Data);
+}
+
+NTSTATUS
+CCapturePin::
+SetCurrentCaptureSurface (
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+    )
+{
+    UNREFERENCED_PARAMETER(Request);
+
+    if (!Data) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    CAPTURE_MEMORY_ALLOCATION_FLAGS requested =
+        *reinterpret_cast<PCAPTURE_MEMORY_ALLOCATION_FLAGS>(Data);
+    if (requested != KS_CAPTURE_ALLOC_SYSTEM &&
+        requested != KS_CAPTURE_ALLOC_SYSTEM_AGP) {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    Irp->IoStatus.Information = sizeof(CAPTURE_MEMORY_ALLOCATION_FLAGS);
+    return STATUS_SUCCESS;
+}
+
+DEFINE_KSPROPERTY_TABLE(DroppedFramesPropertyTable)
+{
+    DEFINE_KSPROPERTY_ITEM(
+        KSPROPERTY_DROPPEDFRAMES_CURRENT,
+        CCapturePin::GetDroppedFrames,
+        sizeof(KSPROPERTY),
+        sizeof(KSPROPERTY_DROPPEDFRAMES_CURRENT_S),
+        NULL,
+        NULL,
+        0,
+        NULL,
+        NULL,
+        0
+    )
+};
+
+DEFINE_KSPROPERTY_TABLE(VramCapturePropertyTable)
+{
+    DEFINE_KSPROPERTY_PREFERRED_CAPTURE_SURFACE(CCapturePin::GetPreferredCaptureSurface),
+    DEFINE_KSPROPERTY_CURRENT_CAPTURE_SURFACE(
+        CCapturePin::GetCurrentCaptureSurface,
+        CCapturePin::SetCurrentCaptureSurface)
+};
+
+DEFINE_KSPROPERTY_SET_TABLE(CapturePinPropertySets)
+{
+    DEFINE_STD_PROPERTY_SET(PROPSETID_VIDCAP_DROPPEDFRAMES, DroppedFramesPropertyTable),
+    DEFINE_STD_PROPERTY_SET(KSPROPSETID_VramCapture, VramCapturePropertyTable)
+};
+
+DEFINE_KSAUTOMATION_TABLE(CapturePinAutomationTable)
+{
+    DEFINE_KSAUTOMATION_PROPERTIES(CapturePinPropertySets),
+    DEFINE_KSAUTOMATION_METHODS_NULL,
+    DEFINE_KSAUTOMATION_EVENTS_NULL
+};
 
 //
 // FormatRGB24Bpp_Capture:
@@ -1536,6 +1690,76 @@ FormatYUY2_Capture = {
 }; 
 
 //
+// FormatNV12_Capture:
+//
+// This is the data range description of the NV12 format preferred by the
+// Windows Camera Media Foundation pipeline.
+//
+const
+KS_DATARANGE_VIDEO
+FormatNV12_Capture = {
+
+    {
+        sizeof (KS_DATARANGE_VIDEO),
+        0,
+        (D_X * D_Y * 3) / 2,
+        0,
+        STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO),
+        0x3231564e, 0x0000, 0x0010, 0x80, 0x00,
+        0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+        STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO)
+    },
+
+    TRUE,
+    FALSE,
+    0,
+    0,
+
+    {
+        STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO ),
+        KS_AnalogVideo_None,
+        D_X,D_Y,
+        D_X,D_Y,
+        D_X,D_Y,
+        8,
+        2,
+        8,
+        2,
+        D_X, D_Y,
+        D_X, D_Y,
+        8,
+        2,
+        0,
+        0,
+        0,
+        0,
+        333667,
+        640000000,
+        12 * 30 * D_X * D_Y,
+        12 * 30 * D_X * D_Y
+    },
+
+    {
+        0,0,0,0,
+        0,0,0,0,
+        12 * 30 * D_X * D_Y,
+        0L,
+        333667,
+        sizeof (KS_BITMAPINFOHEADER),
+        D_X,
+        D_Y,
+        1,
+        12,
+        FOURCC_NV12,
+        (D_X * D_Y * 3) / 2,
+        0,
+        0,
+        0,
+        0
+    }
+};
+
+//
 // CapturePinDispatch:
 //
 // This is the dispatch table for the capture pin.  It provides notifications
@@ -1638,7 +1862,7 @@ FormatRGB32Bpp_Capture = {
         333667,                             // REFERENCE_TIME AvgTimePerFrame
         sizeof (KS_BITMAPINFOHEADER),       // DWORD biSize
         D_X,                                // LONG  biWidth
-        D_Y,                                // LONG  biHeight
+        -D_Y,                               // LONG  biHeight (top-down RGB)
         1,                                  // WORD  biPlanes
         32,                                 // WORD  biBitCount
         KS_BI_RGB,                          // DWORD biCompression
@@ -1653,13 +1877,13 @@ FormatRGB32Bpp_Capture = {
 //
 // CapturePinDataRanges:
 //
-// This is the list of data ranges supported on the capture pin.  We support
-// three: RGB32, RGB24, and YUY2.
+// This is the list of data ranges supported on the capture pin. Prefer YUY2
+// to test the Windows Camera system-buffer path, then keep NV12/RGB32 fallbacks.
 //
 const
 PKSDATARANGE
 CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
-    (PKSDATARANGE) &FormatRGB32Bpp_Capture,
     (PKSDATARANGE) &FormatYUY2_Capture,
-    (PKSDATARANGE) &FormatRGB24Bpp_Capture
+    (PKSDATARANGE) &FormatNV12_Capture,
+    (PKSDATARANGE) &FormatRGB32Bpp_Capture
 };
