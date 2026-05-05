@@ -393,31 +393,20 @@ void OnIdle() {
 void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerState) {
     static bool s_loggedNullTexture = false;
     static bool s_loggedFirstTexture = false;
-    static bool s_loggedWaitingForBroker = false;
-    static bool s_loggedBrokerDropAfterUpload = false;
-    static bool s_uploadedWhileConnected = false;
+    static bool s_loggedDefaultFeed = false;
 
     if (!brokerFrameRendered || !g_driverBridge || !g_driverBridge->IsActive() || !g_pfnGetSharedTexture) {
         return;
     }
 
     if (brokerState != BrokerState::Connected) {
-        if (!s_uploadedWhileConnected) {
-            if (!s_loggedWaitingForBroker) {
-                VirtuaCamLog::LogLine(L"Delaying DriverBridge upload until broker reports Connected");
-                s_loggedWaitingForBroker = true;
-            }
-            return;
-        }
-        if (!s_loggedBrokerDropAfterUpload) {
-            VirtuaCamLog::LogLine(L"Broker left Connected; keeping last good driver feed alive");
-            s_loggedBrokerDropAfterUpload = true;
+        if (!s_loggedDefaultFeed) {
+            VirtuaCamLog::LogLine(L"Broker has no live producer; sending generated default feed to DriverBridge");
+            s_loggedDefaultFeed = true;
         }
     }
-
-    s_loggedWaitingForBroker = false;
-    if (brokerState == BrokerState::Connected) {
-        s_loggedBrokerDropAfterUpload = false;
+    else {
+        s_loggedDefaultFeed = false;
     }
 
     wil::com_ptr_nothrow<ID3D11Texture2D> sharedTexture;
@@ -440,12 +429,9 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
     if (FAILED(hr)) {
         if (hr == HRESULT_FROM_WIN32(ERROR_RETRY)) {
             VirtuaCamLog::LogLine(L"DriverBridge::SendFrame requested retry after reinitialize");
-            s_uploadedWhileConnected = false;
         } else {
             VirtuaCamLog::LogHr(L"DriverBridge::SendFrame failed", hr);
         }
-    } else {
-        s_uploadedWhileConnected = true;
     }
 }
 
