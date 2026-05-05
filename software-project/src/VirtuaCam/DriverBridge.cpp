@@ -79,16 +79,20 @@ namespace
 
     bool IsWarmupRejectStatus(const DriverStatusSnapshot& status)
     {
-        if (status.SetDataAcceptedCount != 0) {
-            return false;
-        }
-
-        if (status.HardwareState != kDriverHardwareStateRunning) {
+        if (status.LastSetDataReason == kDriverSetDataRejectNotRunning) {
             return true;
         }
 
-        return status.LastSetDataReason == kDriverSetDataRejectNotRunning ||
-            status.LastSetDataReason == kDriverSetDataRejectNotConnected;
+        if (status.LastSetDataReason == kDriverSetDataRejectNotConnected) {
+            return true;
+        }
+
+        if (status.SetDataAcceptedCount == 0 &&
+            status.HardwareState != kDriverHardwareStateRunning) {
+            return true;
+        }
+
+        return false;
     }
 
     const char* kVertexShaderSource = R"(
@@ -521,7 +525,7 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
                 m_connected = false;
             }
             if (IsWarmupRejectStatus(status)) {
-                if (n <= 5 || n % 30 == 0) {
+                if (n == 1 || n % 120 == 0) {
                     VirtuaCamLog::LogLine(std::format(
                         L"Driver warm-up reject: frame={} hw={} client={} setOk={} setReject={} reason={}",
                         n,

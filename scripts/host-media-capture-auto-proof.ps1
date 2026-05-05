@@ -3,7 +3,8 @@ param(
     [string]$ArtifactRoot = "test-reports\host-media-capture-auto",
     [ValidateSet("auto", "printwindow", "wgc", "bitblt")][string]$CaptureBackend = "wgc",
     [string]$DeviceNamePattern = "Virtual Camera",
-    [int]$TimeoutSeconds = 25
+    [int]$TimeoutSeconds = 25,
+    [switch]$IncludeAutoSurfaceProbe
 )
 
 Set-StrictMode -Version Latest
@@ -310,7 +311,12 @@ try {
         throw "Timed out waiting for held VirtuaCam source."
     }
 
-    foreach ($pref in @("Auto", "Cpu")) {
+    $memoryPreferences = @("Cpu")
+    if ($IncludeAutoSurfaceProbe.IsPresent) {
+        $memoryPreferences = @("Auto", "Cpu")
+    }
+
+    foreach ($pref in $memoryPreferences) {
         foreach ($sharing in @("ExclusiveControl", "SharedReadOnly")) {
             try {
                 $summary.Results += Invoke-FrameReaderProof -MemoryPreference $pref -SharingMode $sharing -DevicePattern $DeviceNamePattern -Timeout $TimeoutSeconds
