@@ -9,6 +9,7 @@ param(
     [ValidateSet("Notepad", "Settings", "Explorer", "ProofPanel")][string]$SourceWindowMode = "Notepad",
     [ValidateSet("auto", "printwindow", "wgc", "bitblt")][string]$CaptureBackend = "auto",
     [string[]]$BrowserExtraArgs = @(),
+    [switch]$SkipBrowser,
     [string]$AttemptId = "manual",
     [switch]$ServeHttp,
     [int]$HttpPort = 8000,
@@ -117,6 +118,7 @@ try {
             $ShouldServeHttp,
             $RequestedHttpPort,
             $RequestedBrowserExtraArgs,
+            $RequestedSkipBrowser,
             $RequestedAttemptId,
             $RequestedGuestStatusPath,
             $TaskUser,
@@ -146,6 +148,7 @@ try {
             ServeHttp = [bool]$ShouldServeHttp
             HttpPort = [int]$RequestedHttpPort
             BrowserExtraArgs = @($RequestedBrowserExtraArgs)
+            LaunchBrowser = -not [bool]$RequestedSkipBrowser
             AttemptId = $RequestedAttemptId
             GuestStatusPath = $RequestedGuestStatusPath
         }
@@ -181,6 +184,7 @@ try {
         $ServeHttp,
         $HttpPort,
         $BrowserExtraArgs,
+        $SkipBrowser,
         $AttemptId,
         $guestLaunch.StatusPath,
         $GuestUser,

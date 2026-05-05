@@ -415,7 +415,8 @@ function Get-GuestConsoleState {
             return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
         }
 
-        $quserText = Join-GuestTextOutput @(cmd.exe /c quser 2>&1)
+        $cmdPath = Join-Path $env:WINDIR "System32\cmd.exe"
+        $quserText = Join-GuestTextOutput @(& $cmdPath /c quser 2>&1)
         $consoleLine = $null
         foreach ($line in ($quserText -split "`r?`n")) {
             if ($line -match '\bconsole\b') {
@@ -461,7 +462,6 @@ function Test-GuestConsoleReady {
         ([string]$State.ConsoleUser) -ine $ExpectedUser) {
         return $false
     }
-
     return $true
 }
 
@@ -606,6 +606,8 @@ if ([string]::IsNullOrWhiteSpace($LogPath)) {
 $sessionStatusPath = Join-Path $artifactDir "vm-session-status.json"
 $stopSignalPath = Join-Path $artifactDir "vm-session-stop.signal"
 $holdLogPath = Join-Path $artifactDir "vm-session-host.log"
+$holdStdoutPath = Join-Path $artifactDir "vm-session-host.stdout.txt"
+$holdStderrPath = Join-Path $artifactDir "vm-session-host.stderr.txt"
 $playwrightLogPath = Join-Path $artifactDir "playwright-vm-webcam-proof.log"
 $attemptStatePath = Join-Path $artifactDir "attempt-state.json"
 $proofResultPath = Join-Path $artifactDir "vm-webcam-proof.json"
@@ -865,7 +867,7 @@ try {
     }
 
     Write-HvLog -Message "Launching held guest webcam session." -LogPath $LogPath -Level STEP
-    $holdProc = Start-Process -FilePath "powershell.exe" -ArgumentList $holdArgs -PassThru -WindowStyle Hidden
+    $holdProc = Start-Process -FilePath "powershell.exe" -ArgumentList $holdArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $holdStdoutPath -RedirectStandardError $holdStderrPath
 
     $status = $null
     $deadline = (Get-Date).AddSeconds(90)
@@ -878,7 +880,9 @@ try {
         }
 
         if ($holdProc.HasExited) {
-            throw "Guest hold session exited before ready signal."
+            $stdout = if (Test-Path -LiteralPath $holdStdoutPath) { Get-Content -LiteralPath $holdStdoutPath -Raw } else { "" }
+            $stderr = if (Test-Path -LiteralPath $holdStderrPath) { Get-Content -LiteralPath $holdStderrPath -Raw } else { "" }
+            throw ("Guest hold session exited before ready signal. ExitCode={0}`nSTDOUT={1}`nSTDERR={2}" -f $holdProc.ExitCode, $stdout.Trim(), $stderr.Trim())
         }
 
         Start-Sleep -Seconds 2
