@@ -50,12 +50,6 @@
 #define ID_ASPECT_RATIO_4_3             18102
 #define ID_ASPECT_RATIO_3_4             18103
 
-#define ASPECT_RATIO_MASK_16_9          0x00000001u
-#define ASPECT_RATIO_MASK_9_16          0x00000002u
-#define ASPECT_RATIO_MASK_4_3           0x00000004u
-#define ASPECT_RATIO_MASK_3_4           0x00000008u
-#define ASPECT_RATIO_MASK_ALL           (ASPECT_RATIO_MASK_16_9 | ASPECT_RATIO_MASK_9_16 | ASPECT_RATIO_MASK_4_3 | ASPECT_RATIO_MASK_3_4)
-
 enum class BrokerState { Searching, Connected, Failed };
 enum class VCamCommand { None = 0 };
 enum class SourceMode { Off, Consumer, Camera, Discovered, Window };

@@ -7,6 +7,7 @@
 #include "DriverBridge.h"
 #include "RuntimeLog.h"
 #include <wrl.h>
+#include <mfreadwrite.h>
 #include <filesystem>
 #include <algorithm>
 #include <map>

@@ -81,6 +81,7 @@ add_executable(VirtuaCam WIN32
 )
 set_target_properties(VirtuaCam PROPERTIES OUTPUT_NAME "VirtuaCam")
 target_link_libraries(VirtuaCam PRIVATE VirtuaCamCommon)
+target_link_libraries(VirtuaCam PRIVATE ${VCAM_MF_LIBS})
 target_link_libraries(VirtuaCam PRIVATE ${VCAM_MF_GUID_LIBS})
 target_compile_definitions(VirtuaCam PRIVATE UNICODE _UNICODE)
 target_precompile_headers(VirtuaCam PRIVATE VirtuaCam/pch.h)

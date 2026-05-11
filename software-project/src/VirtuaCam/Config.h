@@ -11,6 +11,12 @@ enum class AspectRatioMode
     R3_4
 };
 
+#define ASPECT_RATIO_MASK_16_9          0x00000001u
+#define ASPECT_RATIO_MASK_9_16          0x00000002u
+#define ASPECT_RATIO_MASK_4_3           0x00000004u
+#define ASPECT_RATIO_MASK_3_4           0x00000008u
+#define ASPECT_RATIO_MASK_ALL           (ASPECT_RATIO_MASK_16_9 | ASPECT_RATIO_MASK_9_16 | ASPECT_RATIO_MASK_4_3 | ASPECT_RATIO_MASK_3_4)
+
 namespace VirtuaCamConfig
 {
     struct AppSettings
