@@ -2151,7 +2151,6 @@ DEFINE_RGB32_CAPTURE_RANGE(FormatRGB32Bpp_3x4_Capture, D_3X4_X, D_3X4_Y);
 // This is the list of data ranges supported on the capture pin. Prefer YUY2
 // to test the Windows Camera system-buffer path, then keep NV12/RGB32 fallbacks.
 //
-const
 PKSDATARANGE
 CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
     (PKSDATARANGE) &FormatYUY2_Capture,
@@ -2167,3 +2166,75 @@ CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
     (PKSDATARANGE) &FormatNV12_3x4_Capture,
     (PKSDATARANGE) &FormatRGB32Bpp_3x4_Capture
 };
+
+extern "C"
+void
+VirtuaCamSetPreferredAspect (
+    _In_ ULONG AspectMode
+    )
+{
+    PKSDATARANGE orderedRanges[CAPTURE_PIN_DATA_RANGE_COUNT] = {};
+
+    switch (AspectMode) {
+    case VIRTUACAM_ASPECT_9_16:
+        orderedRanges[0] = (PKSDATARANGE)&FormatYUY2_9x16_Capture;
+        orderedRanges[1] = (PKSDATARANGE)&FormatNV12_9x16_Capture;
+        orderedRanges[2] = (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture;
+        orderedRanges[3] = (PKSDATARANGE)&FormatYUY2_Capture;
+        orderedRanges[4] = (PKSDATARANGE)&FormatNV12_Capture;
+        orderedRanges[5] = (PKSDATARANGE)&FormatRGB32Bpp_Capture;
+        orderedRanges[6] = (PKSDATARANGE)&FormatYUY2_480p_Capture;
+        orderedRanges[7] = (PKSDATARANGE)&FormatNV12_480p_Capture;
+        orderedRanges[8] = (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture;
+        orderedRanges[9] = (PKSDATARANGE)&FormatYUY2_3x4_Capture;
+        orderedRanges[10] = (PKSDATARANGE)&FormatNV12_3x4_Capture;
+        orderedRanges[11] = (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture;
+        break;
+    case VIRTUACAM_ASPECT_4_3:
+        orderedRanges[0] = (PKSDATARANGE)&FormatYUY2_480p_Capture;
+        orderedRanges[1] = (PKSDATARANGE)&FormatNV12_480p_Capture;
+        orderedRanges[2] = (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture;
+        orderedRanges[3] = (PKSDATARANGE)&FormatYUY2_Capture;
+        orderedRanges[4] = (PKSDATARANGE)&FormatNV12_Capture;
+        orderedRanges[5] = (PKSDATARANGE)&FormatRGB32Bpp_Capture;
+        orderedRanges[6] = (PKSDATARANGE)&FormatYUY2_9x16_Capture;
+        orderedRanges[7] = (PKSDATARANGE)&FormatNV12_9x16_Capture;
+        orderedRanges[8] = (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture;
+        orderedRanges[9] = (PKSDATARANGE)&FormatYUY2_3x4_Capture;
+        orderedRanges[10] = (PKSDATARANGE)&FormatNV12_3x4_Capture;
+        orderedRanges[11] = (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture;
+        break;
+    case VIRTUACAM_ASPECT_3_4:
+        orderedRanges[0] = (PKSDATARANGE)&FormatYUY2_3x4_Capture;
+        orderedRanges[1] = (PKSDATARANGE)&FormatNV12_3x4_Capture;
+        orderedRanges[2] = (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture;
+        orderedRanges[3] = (PKSDATARANGE)&FormatYUY2_Capture;
+        orderedRanges[4] = (PKSDATARANGE)&FormatNV12_Capture;
+        orderedRanges[5] = (PKSDATARANGE)&FormatRGB32Bpp_Capture;
+        orderedRanges[6] = (PKSDATARANGE)&FormatYUY2_480p_Capture;
+        orderedRanges[7] = (PKSDATARANGE)&FormatNV12_480p_Capture;
+        orderedRanges[8] = (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture;
+        orderedRanges[9] = (PKSDATARANGE)&FormatYUY2_9x16_Capture;
+        orderedRanges[10] = (PKSDATARANGE)&FormatNV12_9x16_Capture;
+        orderedRanges[11] = (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture;
+        break;
+    case VIRTUACAM_ASPECT_16_9:
+    default:
+        orderedRanges[0] = (PKSDATARANGE)&FormatYUY2_Capture;
+        orderedRanges[1] = (PKSDATARANGE)&FormatNV12_Capture;
+        orderedRanges[2] = (PKSDATARANGE)&FormatRGB32Bpp_Capture;
+        orderedRanges[3] = (PKSDATARANGE)&FormatYUY2_480p_Capture;
+        orderedRanges[4] = (PKSDATARANGE)&FormatNV12_480p_Capture;
+        orderedRanges[5] = (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture;
+        orderedRanges[6] = (PKSDATARANGE)&FormatYUY2_9x16_Capture;
+        orderedRanges[7] = (PKSDATARANGE)&FormatNV12_9x16_Capture;
+        orderedRanges[8] = (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture;
+        orderedRanges[9] = (PKSDATARANGE)&FormatYUY2_3x4_Capture;
+        orderedRanges[10] = (PKSDATARANGE)&FormatNV12_3x4_Capture;
+        orderedRanges[11] = (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture;
+        break;
+    }
+
+    RtlCopyMemory(CapturePinDataRanges, orderedRanges, sizeof(CapturePinDataRanges));
+    DbgPrint("[avshws] Preferred aspect mode=%lu applied to capture data range order\n", AspectMode);
+}

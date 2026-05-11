@@ -41,7 +41,7 @@ Use the repository root scripts. This subproject does not have a separate public
 
 Default staged user-mode artifacts are `VirtuaCam.exe`, `VirtuaCamProcess.exe`, `DirectPortBroker.dll`, `DirectPortClient.dll`, and `DirectPortConsumer.dll`.
 
-Aspect ratio is available from `Settings > Aspect Ratio` with `16:9`, `9:16`, `4:3`, and `3:4`. The selected ratio changes how the producer fits content into the fixed driver frame; it preserves source shape and uses black padding instead of stretching.
+Aspect ratio is available from `Settings > Aspect Ratio` with `16:9`, `9:16`, `4:3`, and `3:4`. The selected ratio is sent to the driver as the preferred capture format for the next stream open (`1280x720`, `720x1280`, `640x480`, or `480x640`). The producer preserves source shape and uses black padding when content does not match the selected frame.
 
 ## License
 

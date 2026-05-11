@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pch.h"
+#include "Config.h"
 #include <dshow.h>
 #include <dmksctrl.h>
 #include <vector>
@@ -19,6 +20,7 @@ public:
     HRESULT RegisterClientRequestEvent(HANDLE eventHandle);
     HRESULT Connect();
     HRESULT Disconnect();
+    HRESULT SetPreferredAspectRatio(AspectRatioMode mode);
     HRESULT SendFrame(ID3D11Texture2D* sourceTexture);
 
 private:

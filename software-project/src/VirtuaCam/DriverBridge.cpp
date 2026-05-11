@@ -25,6 +25,7 @@ namespace
     constexpr ULONG kDriverPropertyIdDisconnect = 2;
     constexpr ULONG kDriverPropertyIdStatus = 3;
     constexpr ULONG kDriverPropertyIdRegisterEvent = 4;
+    constexpr ULONG kDriverPropertyIdPreferredAspect = 5;
     constexpr ULONG kDriverHardwareStateRunning = 2;
     constexpr ULONG kDriverSetDataRejectNotRunning = 1;
     constexpr ULONG kDriverSetDataRejectNotConnected = 3;
@@ -33,6 +34,17 @@ namespace
     constexpr const wchar_t* kVideoCameraCategoryGuid = L"{e5323777-f976-4f5b-9b55-b94699c46e44}";
     constexpr const wchar_t* kCaptureCategoryGuid = L"{65e8773d-8f56-11d0-a3b9-00a0c9223196}";
     constexpr ULONG kIoctlKsProperty = CTL_CODE(FILE_DEVICE_KS, 0x000, METHOD_NEITHER, FILE_ANY_ACCESS);
+
+    ULONG AspectRatioModeToDriverValue(AspectRatioMode mode)
+    {
+        switch (mode) {
+        case AspectRatioMode::R9_16: return 1;
+        case AspectRatioMode::R4_3: return 2;
+        case AspectRatioMode::R3_4: return 3;
+        case AspectRatioMode::R16_9:
+        default: return 0;
+        }
+    }
 
     extern "C" HRESULT WINAPI KsOpenDefaultDevice(
         _In_ REFGUID Category,
@@ -896,6 +908,30 @@ HRESULT DriverBridge::RegisterClientRequestEvent(HANDLE eventHandle)
         L"DriverBridge::RegisterClientRequestEvent succeeded handle=0x{:X}",
         static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(eventHandle))));
     return hr;
+}
+
+HRESULT DriverBridge::SetPreferredAspectRatio(AspectRatioMode mode)
+{
+    RETURN_HR_IF(E_UNEXPECTED, !m_active);
+
+    ULONG aspectMode = AspectRatioModeToDriverValue(mode);
+    HRESULT hr = SetDriverProperty(kDriverPropertyIdPreferredAspect, &aspectMode, sizeof(aspectMode));
+    if (FAILED(hr)) {
+        DWORD supportFlags = 0;
+        const bool supportKnown = IsPropertySetSupported(kDriverPropertyIdPreferredAspect, &supportFlags);
+        VirtuaCamLog::LogLine(std::format(
+            L"DriverBridge::SetPreferredAspectRatio property {} failed hr=0x{:08X} supportKnown={} supportFlags=0x{:08X}",
+            kDriverPropertyIdPreferredAspect,
+            static_cast<unsigned>(hr),
+            supportKnown ? 1 : 0,
+            supportFlags));
+        return hr;
+    }
+
+    VirtuaCamLog::LogLine(std::format(
+        L"DriverBridge preferred aspect set: {}",
+        VirtuaCamConfig::AspectRatioName(mode)));
+    return S_OK;
 }
 
 HRESULT DriverBridge::Disconnect()

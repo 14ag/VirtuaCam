@@ -92,6 +92,23 @@ void TogglePipTl() { g_showPipTL = !g_showPipTL; SaveSettings(); }
 void TogglePipTr() { g_showPipTR = !g_showPipTR; SaveSettings(); }
 void TogglePipBl() { g_showPipBL = !g_showPipBL; SaveSettings(); }
 AspectRatioMode GetAspectRatioMode() { return g_aspectRatioMode; }
+void ApplyDriverPreferredAspectRatio()
+{
+    if (!g_driverBridge || !g_driverBridge->IsActive()) {
+        return;
+    }
+
+    HRESULT hr = g_driverBridge->SetPreferredAspectRatio(g_aspectRatioMode);
+    if (FAILED(hr)) {
+        VirtuaCamLog::LogHr(L"DriverBridge::SetPreferredAspectRatio failed", hr);
+        return;
+    }
+
+    hr = g_driverBridge->Disconnect();
+    if (FAILED(hr) && hr != S_FALSE) {
+        VirtuaCamLog::LogHr(L"DriverBridge::Disconnect after aspect change failed", hr);
+    }
+}
 void SetAspectRatioMode(AspectRatioMode mode)
 {
     if (g_aspectRatioMode == mode) {
@@ -104,6 +121,7 @@ void SetAspectRatioMode(AspectRatioMode mode)
         L"Aspect ratio changed: {} config={}",
         VirtuaCamConfig::AspectRatioName(g_aspectRatioMode),
         VirtuaCamConfig::GetConfigPath().wstring()));
+    ApplyDriverPreferredAspectRatio();
 }
 
 const VirtuaCam::Discovery* GetGlobalDiscovery() { return g_discovery.get(); }
@@ -377,6 +395,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 L"Make sure driver-project is installed.";
             VirtuaCamLog::ShowAndLogError(g_hMainWnd, message.c_str(), L"Error", hrDriver);
         }
+    } else {
+        ApplyDriverPreferredAspectRatio();
     }
 
     VirtuaCamLog::LogLine(L"Entering message loop.");

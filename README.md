@@ -97,7 +97,7 @@ VirtuaCam stores these settings in:
 %LOCALAPPDATA%\VirtuaCam\settings.ini
 ```
 
-The producer keeps the driver output at `1280x720`; the selected aspect ratio defines the fitted content area inside that frame, with black padding when needed.
+The driver defaults to `1280x720`, and also advertises `640x480`, `720x1280`, and `480x640` capture modes. The tray aspect setting is sent to the driver as the preferred capture format, so the next camera stream open chooses matching dimensions when the client accepts the advertised order. The producer still preserves source shape with black padding when content does not match the selected frame.
 
 ## Validation
 

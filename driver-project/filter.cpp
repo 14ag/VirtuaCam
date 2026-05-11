@@ -272,6 +272,36 @@ SetRegisterEvent(
 
 NTSTATUS
 CCaptureFilter::
+SetPreferredAspect(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    UNREFERENCED_PARAMETER(Request);
+    PAGED_CODE();
+
+    PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.InputBufferLength;
+    if (pIrpStack->Parameters.DeviceIoControl.OutputBufferLength > bufferLength) {
+        bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    }
+    if (!Data || bufferLength < sizeof(ULONG)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    const ULONG aspectMode = *reinterpret_cast<PULONG>(Data);
+    if (aspectMode > VIRTUACAM_ASPECT_3_4) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    VirtuaCamSetPreferredAspect(aspectMode);
+    Irp->IoStatus.Information = sizeof(ULONG);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+CCaptureFilter::
 GetStatus(
     _In_ PIRP Irp,
     _In_ PKSIDENTIFIER Request,
@@ -445,6 +475,18 @@ DEFINE_KSPROPERTY_TABLE(CustomPropertyTable)
         (ULONG)sizeof(KSPROPERTY),                        //MinProperty
         (ULONG)sizeof(HANDLE),                            //MinData
         (PFNKSHANDLER)&CCaptureFilter::SetRegisterEvent,  //SetPropertyHandler
+        (PKSPROPERTY_VALUES)NULL,                         //Values
+        0,                                                //RelationsCount
+        (PKSPROPERTY)NULL,                                //Relations
+        (PFNKSHANDLER)NULL,                               //SupportHandler
+        (ULONG)0                                          //SerializedSize
+    },
+    {
+        VIRTUACAM_PROP_PREFERRED_ASPECT,                  //PropertyId
+        (PFNKSHANDLER)NULL,                               //GetPropertyHandler
+        (ULONG)sizeof(KSPROPERTY),                        //MinProperty
+        (ULONG)sizeof(ULONG),                             //MinData
+        (PFNKSHANDLER)&CCaptureFilter::SetPreferredAspect,//SetPropertyHandler
         (PKSPROPERTY_VALUES)NULL,                         //Values
         0,                                                //RelationsCount
         (PKSPROPERTY)NULL,                                //Relations

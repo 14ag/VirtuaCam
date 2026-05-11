@@ -3,6 +3,8 @@ param(
     [string]$ArtifactRoot = "test-reports\host-media-capture-auto",
     [ValidateSet("auto", "printwindow", "wgc", "bitblt")][string]$CaptureBackend = "wgc",
     [string]$DeviceNamePattern = "Virtual Camera",
+    [int]$PreferredWidth = 0,
+    [int]$PreferredHeight = 0,
     [int]$TimeoutSeconds = 25,
     [switch]$IncludeAutoSurfaceProbe
 )
@@ -178,6 +180,32 @@ function Invoke-FrameReaderProof {
             throw "No color VideoPreview or VideoRecord frame source."
         }
 
+        $requestedFormat = $null
+        if ($PreferredWidth -gt 0 -and $PreferredHeight -gt 0) {
+            $requestedFormat = @($source.SupportedFormats) |
+                Where-Object {
+                    [int]$_.VideoFormat.Width -eq $PreferredWidth -and
+                    [int]$_.VideoFormat.Height -eq $PreferredHeight
+                } |
+                Sort-Object @{
+                    Expression = {
+                        switch ($_.Subtype) {
+                            "YUY2" { 0 }
+                            "NV12" { 1 }
+                            "RGB32" { 2 }
+                            "Bgra8" { 2 }
+                            default { 10 }
+                        }
+                    }
+                } |
+                Select-Object -First 1
+            if (-not $requestedFormat) {
+                $available = @($source.SupportedFormats | ForEach-Object { "$($_.Subtype):$($_.VideoFormat.Width)x$($_.VideoFormat.Height)" }) -join ", "
+                throw "No supported format matched ${PreferredWidth}x${PreferredHeight}. Available: $available"
+            }
+            Await-AsyncAction -Action ($source.SetFormatAsync($requestedFormat))
+        }
+
         $reader = Await-AsyncOperation -Operation ($capture.CreateFrameReaderAsync($source)) -ResultType ([Windows.Media.Capture.Frames.MediaFrameReader, Windows.Media.Capture, ContentType=WindowsRuntime])
         $startStatus = Await-AsyncOperation -Operation ($reader.StartAsync()) -ResultType $readerStatusType
 
@@ -220,6 +248,8 @@ function Invoke-FrameReaderProof {
             CurrentSubtype = [string]$source.CurrentFormat.Subtype
             CurrentWidth = [int]$source.CurrentFormat.VideoFormat.Width
             CurrentHeight = [int]$source.CurrentFormat.VideoFormat.Height
+            RequestedWidth = [int]$PreferredWidth
+            RequestedHeight = [int]$PreferredHeight
             ReaderStartStatus = [string]$startStatus
             SoftwareBitmapPresent = [bool]$videoFrame.SoftwareBitmap
             Direct3DSurfacePresent = [bool]$videoFrame.Direct3DSurface

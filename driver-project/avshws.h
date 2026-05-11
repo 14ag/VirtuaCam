@@ -159,9 +159,14 @@ KSAUTOMATION_TABLE
 CapturePinAutomationTable;
 
 extern
-const
 PKSDATARANGE
 CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT];
+
+extern "C"
+void
+VirtuaCamSetPreferredAspect (
+    _In_ ULONG AspectMode
+    );
 
 /*************************************************
 
