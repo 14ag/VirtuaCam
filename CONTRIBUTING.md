@@ -87,7 +87,17 @@ If you add, remove, or rename staged binaries, update `scripts/tools/artifact-ma
 
 ## Validation expectations
 
-No automated test suite is checked in today. For changes that affect behavior, manual validation is expected:
+The repository has targeted whitebox checks plus manual and VM validation. For changes that affect behavior, start with the checks that match the changed surface:
+
+```powershell
+.\scripts\test-code-review-20260511.ps1
+.\scripts\test-frame-ex-abi.ps1
+.\scripts\test-performance-audit.ps1 -SkipBuild -SkipRuntime
+```
+
+Run `test-performance-audit.ps1` without skip switches when you need the software build and no-debug PPM dump runtime check.
+
+For changes that affect behavior, manual validation is also expected:
 
 1. build affected component or full repo
 2. install if driver or packaging changed
@@ -110,6 +120,19 @@ For Hyper-V bench or HLK workflow changes, also include whether you ran:
 .\scripts\hyperv-clean-checkpoint.ps1 -GuestPasswordPlaintext <password> -ForceRefresh -EnableSsh
 .\scripts\hyperv-clean-validate.ps1 -GuestPasswordPlaintext <password> -RequireHlkClient
 .\scripts\hyperv-hlk-preflight.ps1 -GuestPasswordPlaintext <password> -ControllerName <controller>
+.\scripts\run-vhlk-tests.ps1
+```
+
+For driver security or KS property changes, run the invalid-buffer fuzz script strictly in `driver-test`:
+
+```powershell
+.\scripts\test-ks-invalid-buffer-fuzz.ps1 -VmName driver-test
+```
+
+For camera passthrough audio selection changes, run:
+
+```powershell
+.\scripts\test-host-camera-passthrough-audio-config.ps1
 ```
 
 ## Pull requests

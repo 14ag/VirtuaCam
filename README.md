@@ -12,6 +12,10 @@ Repository goal: build and install a virtual camera that appears to Windows came
 - `scripts\build-all.ps1`: single build entrypoint; builds software and driver and stages everything into `output/`
 - `scripts\install-all.ps1`: single install entrypoint; installs only from `output/`, registers `DirectPortClient.dll`, and configures startup
 - `scripts\clean-output.ps1`: removes `output/` so the next build recreates a fresh staged package
+- `scripts\test-code-review-20260511.ps1`: whitebox checks for the 2026-05-11 code-review fixes
+- `scripts\test-performance-audit.ps1`: whitebox/runtime checks for the 2026-05-11 performance-audit fixes
+- `scripts\run-vhlk-tests.ps1`: vHLK queue/monitor helper that reads controller credentials from `.env`
+- `shared\`: driver/user-mode ABI constants and structures shared by both projects
 - `software-project/`: CMake-based user-mode code
 - `driver-project/`: Visual Studio / WDK driver code
 - `implementation/`: retained WDK and AVStream audit references
@@ -97,9 +101,21 @@ VirtuaCam stores these settings in:
 %LOCALAPPDATA%\VirtuaCam\settings.ini
 ```
 
-The driver defaults to `1280x720`, and also advertises `640x480`, `720x1280`, and `480x640` capture modes. The tray aspect setting is sent to the driver as the preferred capture format, so the next camera stream open chooses matching dimensions when the client accepts the advertised order. The producer still preserves source shape with black padding when content does not match the selected frame.
+The config also stores `AudioCaptureDeviceName`. The tray menu exposes `Audio Source`, with `None` plus active WASAPI capture devices. Startup falls back to `Stereo Mix` when present, and camera passthrough attempts to select a matching USB camera microphone before saving the selection. This is capture-side audio plumbing; the repository does not yet stage a separate `VirtuaCam Microphone` endpoint.
+
+The driver defaults to `1280x720`, and also advertises `640x480`, `720x1280`, and `480x640` capture modes. The tray aspect setting is sent to the driver as the preferred capture format, and camera passthrough can restrict the allowed driver aspect mask to formats supported by the physical camera. The next camera stream open chooses matching dimensions when the client accepts the advertised order. The producer still preserves source shape with black padding when content does not match the selected frame.
 
 ## Validation
+
+Repository whitebox checks:
+
+```powershell
+.\scripts\test-code-review-20260511.ps1
+.\scripts\test-frame-ex-abi.ps1
+.\scripts\test-performance-audit.ps1 -SkipBuild -SkipRuntime
+```
+
+`test-performance-audit.ps1` can also build `VirtuaCam`, `DirectPortBroker`, and `VirtuaCamProcess` and briefly launch `VirtuaCam.exe` when run without skip switches.
 
 Use Hyper-V guest `driver-test` for crash repro, verifier, dump collection, browser proof, and Windows Camera proof. Test artifacts are written under `test-reports\`; `output\` is reserved for staged build/install components.
 
@@ -122,6 +138,7 @@ HLK client helper:
 
 - `.\scripts\hyperv-hlk-client.ps1`
 - `.\scripts\hyperv-hlk-preflight.ps1`
+- `.\scripts\run-vhlk-tests.ps1`
 
 Host-side proof helpers:
 
@@ -130,9 +147,18 @@ Host-side proof helpers:
 .\scripts\host-windows-camera-proof.ps1
 .\scripts\host-media-capture-auto-proof.ps1
 .\scripts\host-media-capture-auto-proof.ps1 -IncludeAutoSurfaceProbe
+.\scripts\test-host-camera-passthrough-audio-config.ps1
 ```
 
 `host-media-capture-auto-proof.ps1` runs the CPU-backed frame-reader path by default. Use `-IncludeAutoSurfaceProbe` when you also want to probe the WinRT `Auto` memory preference path.
+
+VM-only driver fuzz:
+
+```powershell
+.\scripts\test-ks-invalid-buffer-fuzz.ps1 -VmName driver-test
+```
+
+The latest retained vHLK report is `test-reports\vhlk-final-report-20260511.md`. It did not record a clean playlist pass: one executed run had 10 passed tests, one 480p record failure, one running test, and 101 queued tests, while the later queue attempt did not start tests within the monitor window. Current code advertises 480p and portrait modes; rerun targeted vHLK before treating the playlist as clean.
 
 Suggested bench order:
 
@@ -152,7 +178,7 @@ Producer
   -> shared texture + fence
   -> DirectPortBroker.dll
   -> VirtuaCam.exe / DriverBridge
-  -> IKsPropertySet(Set)
+  -> IKsPropertySet(Set), preferring FrameEx BGRA32/NV12 when supported
   -> avshws.sys
   -> Windows camera client
 ```
