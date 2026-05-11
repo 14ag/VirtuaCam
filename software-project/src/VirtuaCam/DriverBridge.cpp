@@ -4,9 +4,13 @@
 #include <dvdmedia.h>
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <cwctype>
+#include <limits>
 #include <winioctl.h>
+#include "VirtuaCamDriverAbi.h"
 #include "RuntimeLog.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
@@ -27,6 +31,8 @@ namespace
     constexpr ULONG kDriverPropertyIdRegisterEvent = 4;
     constexpr ULONG kDriverPropertyIdPreferredAspect = 5;
     constexpr ULONG kDriverPropertyIdAllowedAspects = 6;
+    constexpr ULONG kDriverPropertyIdFrameEx = VIRTUACAM_PROP_FRAME_EX;
+    constexpr ULONG kDriverStatusV1Size = VIRTUACAM_DRIVER_STATUS_V1_SIZE;
     constexpr ULONG kDriverHardwareStateRunning = 2;
     constexpr ULONG kDriverSetDataRejectNotRunning = 1;
     constexpr ULONG kDriverSetDataRejectNotConnected = 3;
@@ -98,7 +104,15 @@ namespace
         ULONG LastSetDataReason = 0;
         ULONGLONG CompletedFrameCount = 0;
         ULONGLONG LastFrameTime100ns = 0;
+        ULONG OutputFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+        ULONG OutputStride0 = 0;
+        ULONG OutputStride1 = 0;
+        ULONG UploadFormatMask = 0;
+        ULONG LastSetDataFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+        ULONG ReservedStatus[3] = {};
     };
+
+    static_assert(offsetof(DriverStatusSnapshot, OutputFormat) == VIRTUACAM_DRIVER_STATUS_V1_SIZE);
 
     bool IsWarmupRejectStatus(const DriverStatusSnapshot& status)
     {
@@ -277,6 +291,7 @@ void DriverBridge::Shutdown()
     m_samplerState.reset();
     m_pixelShader.reset();
     m_vertexShader.reset();
+    ResetFrameExResources();
     m_stagingTexture.reset();
     m_scaledRtv.reset();
     m_scaledTexture.reset();
@@ -285,6 +300,10 @@ void DriverBridge::Shutdown()
     m_ksControl.reset();
     m_propertySet.reset();
     m_filter.reset();
+    m_frameExSupportKnown = false;
+    m_frameExSupported = false;
+    m_outputFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+    m_uploadFormatMask = 0;
 }
 
 bool DriverBridge::IsRecoverableSendFailure(HRESULT hr)
@@ -442,6 +461,7 @@ HRESULT DriverBridge::EnsureGpuResources(ID3D11Texture2D* sourceTexture)
         m_scaledRtv.reset();
         m_scaledTexture.reset();
         m_stagingTexture.reset();
+        ResetFrameExResources();
 
         D3D11_TEXTURE2D_DESC scaledDesc = {};
         scaledDesc.Width = m_outputWidth;
@@ -493,7 +513,18 @@ HRESULT DriverBridge::RefreshDriverGeometry()
 
     const UINT newWidth = status.Width;
     const UINT newHeight = status.Height;
-    if (newWidth == m_outputWidth && newHeight == m_outputHeight) {
+    const bool hasV2Status =
+        returned >= offsetof(DriverStatusSnapshot, LastSetDataFormat) + sizeof(status.LastSetDataFormat);
+    const ULONG newOutputFormat = hasV2Status ? status.OutputFormat : VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+    const ULONG newUploadMask = hasV2Status ? status.UploadFormatMask : 0;
+    const bool outputFormatChanged =
+        newOutputFormat != m_outputFormat ||
+        newUploadMask != m_uploadFormatMask;
+
+    m_outputFormat = newOutputFormat;
+    m_uploadFormatMask = newUploadMask;
+
+    if (newWidth == m_outputWidth && newHeight == m_outputHeight && !outputFormatChanged) {
         return S_OK;
     }
 
@@ -502,7 +533,122 @@ HRESULT DriverBridge::RefreshDriverGeometry()
     m_scaledRtv.reset();
     m_scaledTexture.reset();
     m_stagingTexture.reset();
+    ResetFrameExResources();
     m_rgbBuffer.resize(static_cast<size_t>(m_outputWidth) * m_outputHeight * kDriverBytesPerPixel);
+    return S_OK;
+}
+
+void DriverBridge::ResetFrameExResources()
+{
+    m_videoOutputView.reset();
+    m_videoInputView.reset();
+    m_videoProcessor.reset();
+    m_videoProcessorEnumerator.reset();
+    m_videoContext.reset();
+    m_videoDevice.reset();
+    m_nv12StagingTexture.reset();
+    m_nv12Texture.reset();
+}
+
+bool DriverBridge::CanUseFrameEx(ULONG uploadFormat) const
+{
+    if (!m_frameExSupported) {
+        return false;
+    }
+
+    if (uploadFormat == VIRTUACAM_FRAME_FORMAT_BGRA32 ||
+        uploadFormat == VIRTUACAM_FRAME_FORMAT_RGB32) {
+        return m_outputFormat == VIRTUACAM_FRAME_FORMAT_RGB32 &&
+            (m_uploadFormatMask & VIRTUACAM_UPLOAD_FORMAT_MASK_BGRA32) != 0;
+    }
+
+    if (uploadFormat == VIRTUACAM_FRAME_FORMAT_NV12) {
+        return m_outputFormat == VIRTUACAM_FRAME_FORMAT_NV12 &&
+            (m_uploadFormatMask & VIRTUACAM_UPLOAD_FORMAT_MASK_NV12) != 0;
+    }
+
+    return false;
+}
+
+bool DriverBridge::IsFrameExSupported()
+{
+    if (!m_frameExSupportKnown) {
+        DWORD supportFlags = 0;
+        m_frameExSupported =
+            IsPropertySetSupported(kDriverPropertyIdFrameEx, &supportFlags) &&
+            ((supportFlags & KSPROPERTY_TYPE_SET) != 0);
+        m_frameExSupportKnown = true;
+    }
+    return m_frameExSupported;
+}
+
+HRESULT DriverBridge::EnsureNv12Resources()
+{
+    if (m_nv12Texture && m_nv12StagingTexture && m_videoProcessor &&
+        m_videoInputView && m_videoOutputView) {
+        return S_OK;
+    }
+
+    RETURN_HR_IF_NULL(E_UNEXPECTED, m_device);
+    RETURN_HR_IF_NULL(E_UNEXPECTED, m_context);
+    RETURN_HR_IF_NULL(E_UNEXPECTED, m_scaledTexture);
+
+    ResetFrameExResources();
+
+    RETURN_IF_FAILED(m_device->QueryInterface(IID_PPV_ARGS(m_videoDevice.put())));
+    RETURN_IF_FAILED(m_context->QueryInterface(IID_PPV_ARGS(m_videoContext.put())));
+
+    D3D11_TEXTURE2D_DESC nv12Desc = {};
+    nv12Desc.Width = m_outputWidth;
+    nv12Desc.Height = m_outputHeight;
+    nv12Desc.MipLevels = 1;
+    nv12Desc.ArraySize = 1;
+    nv12Desc.Format = DXGI_FORMAT_NV12;
+    nv12Desc.SampleDesc.Count = 1;
+    nv12Desc.Usage = D3D11_USAGE_DEFAULT;
+    nv12Desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    RETURN_IF_FAILED(m_device->CreateTexture2D(&nv12Desc, nullptr, m_nv12Texture.put()));
+
+    D3D11_TEXTURE2D_DESC stagingDesc = nv12Desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    RETURN_IF_FAILED(m_device->CreateTexture2D(&stagingDesc, nullptr, m_nv12StagingTexture.put()));
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDesc = {};
+    contentDesc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    contentDesc.InputWidth = m_outputWidth;
+    contentDesc.InputHeight = m_outputHeight;
+    contentDesc.OutputWidth = m_outputWidth;
+    contentDesc.OutputHeight = m_outputHeight;
+    contentDesc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+    RETURN_IF_FAILED(m_videoDevice->CreateVideoProcessorEnumerator(
+        &contentDesc,
+        m_videoProcessorEnumerator.put()));
+    RETURN_IF_FAILED(m_videoDevice->CreateVideoProcessor(
+        m_videoProcessorEnumerator.get(),
+        0,
+        m_videoProcessor.put()));
+
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDesc = {};
+    inputDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    inputDesc.Texture2D.MipSlice = 0;
+    inputDesc.Texture2D.ArraySlice = 0;
+    RETURN_IF_FAILED(m_videoDevice->CreateVideoProcessorInputView(
+        m_scaledTexture.get(),
+        m_videoProcessorEnumerator.get(),
+        &inputDesc,
+        m_videoInputView.put()));
+
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputDesc = {};
+    outputDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    outputDesc.Texture2D.MipSlice = 0;
+    RETURN_IF_FAILED(m_videoDevice->CreateVideoProcessorOutputView(
+        m_nv12Texture.get(),
+        m_videoProcessorEnumerator.get(),
+        &outputDesc,
+        m_videoOutputView.put()));
+
     return S_OK;
 }
 
@@ -518,6 +664,98 @@ HRESULT DriverBridge::EnsureSourceTextureView(ID3D11Texture2D* sourceTexture)
     m_sourceTexture = sourceTexture;
     RETURN_IF_FAILED(m_device->CreateShaderResourceView(sourceTexture, nullptr, m_sourceSrv.put()));
     return S_OK;
+}
+
+HRESULT DriverBridge::TrySendFrameEx(const VIRTUACAM_FRAME_EX_HEADER& header)
+{
+    RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), !IsFrameExSupported());
+    RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED), !CanUseFrameEx(header.Format));
+    RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_INVALID_DATA), m_frameExBuffer.size() < sizeof(header));
+
+    std::memcpy(m_frameExBuffer.data(), &header, sizeof(header));
+    const HRESULT hr = SetDriverProperty(
+        kDriverPropertyIdFrameEx,
+        m_frameExBuffer.data(),
+        static_cast<ULONG>(m_frameExBuffer.size()));
+    if (FAILED(hr) && !m_frameExFallbackLogged) {
+        m_frameExFallbackLogged = true;
+        VirtuaCamLog::LogHr(L"DriverBridge frame-v2 send failed; falling back to legacy BGR24 path", hr);
+    }
+    return hr;
+}
+
+HRESULT DriverBridge::UploadMappedFrameExBgra(const D3D11_MAPPED_SUBRESOURCE& mapped)
+{
+    const size_t stride = static_cast<size_t>(m_outputWidth) * 4ull;
+    const size_t payloadLength = stride * static_cast<size_t>(m_outputHeight);
+    const size_t totalLength = sizeof(VIRTUACAM_FRAME_EX_HEADER) + payloadLength;
+    const size_t maxUlong = (std::numeric_limits<ULONG>::max)();
+    RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_INVALID_DATA), payloadLength > maxUlong || totalLength > maxUlong);
+
+    m_frameExBuffer.resize(totalLength);
+    BYTE* dst = m_frameExBuffer.data() + sizeof(VIRTUACAM_FRAME_EX_HEADER);
+    for (UINT y = 0; y < m_outputHeight; ++y) {
+        const BYTE* src = static_cast<const BYTE*>(mapped.pData) + (static_cast<size_t>(mapped.RowPitch) * y);
+        std::memcpy(dst + (stride * y), src, stride);
+    }
+
+    VIRTUACAM_FRAME_EX_HEADER header = {};
+    header.Size = sizeof(header);
+    header.Version = VIRTUACAM_FRAME_EX_VERSION;
+    header.Format = VIRTUACAM_FRAME_FORMAT_BGRA32;
+    header.Width = m_outputWidth;
+    header.Height = m_outputHeight;
+    header.Stride0 = static_cast<LONG>(stride);
+    header.PayloadOffset = sizeof(header);
+    header.PayloadLength = static_cast<ULONG>(payloadLength);
+    header.FrameId = ++m_frameId;
+    return TrySendFrameEx(header);
+}
+
+HRESULT DriverBridge::UploadMappedFrameExNv12(const D3D11_MAPPED_SUBRESOURCE& mapped)
+{
+    RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_INVALID_DATA), (m_outputHeight & 1) != 0);
+    RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_INVALID_DATA), mapped.RowPitch < m_outputWidth);
+
+    const size_t yLength = static_cast<size_t>(m_outputWidth) * m_outputHeight;
+    const size_t uvLength = static_cast<size_t>(m_outputWidth) * (m_outputHeight / 2);
+    const size_t payloadLength = yLength + uvLength;
+    const size_t totalLength = sizeof(VIRTUACAM_FRAME_EX_HEADER) + payloadLength;
+    const size_t maxUlong = (std::numeric_limits<ULONG>::max)();
+    RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_INVALID_DATA), payloadLength > maxUlong || totalLength > maxUlong);
+
+    m_frameExBuffer.resize(totalLength);
+    BYTE* dst = m_frameExBuffer.data() + sizeof(VIRTUACAM_FRAME_EX_HEADER);
+    const BYTE* yPlane = static_cast<const BYTE*>(mapped.pData);
+    const BYTE* uvPlane = yPlane + (static_cast<size_t>(mapped.RowPitch) * m_outputHeight);
+
+    for (UINT y = 0; y < m_outputHeight; ++y) {
+        std::memcpy(
+            dst + (static_cast<size_t>(m_outputWidth) * y),
+            yPlane + (static_cast<size_t>(mapped.RowPitch) * y),
+            m_outputWidth);
+    }
+
+    BYTE* uvDst = dst + yLength;
+    for (UINT y = 0; y < m_outputHeight / 2; ++y) {
+        std::memcpy(
+            uvDst + (static_cast<size_t>(m_outputWidth) * y),
+            uvPlane + (static_cast<size_t>(mapped.RowPitch) * y),
+            m_outputWidth);
+    }
+
+    VIRTUACAM_FRAME_EX_HEADER header = {};
+    header.Size = sizeof(header);
+    header.Version = VIRTUACAM_FRAME_EX_VERSION;
+    header.Format = VIRTUACAM_FRAME_FORMAT_NV12;
+    header.Width = m_outputWidth;
+    header.Height = m_outputHeight;
+    header.Stride0 = static_cast<LONG>(m_outputWidth);
+    header.Stride1 = static_cast<LONG>(m_outputWidth);
+    header.PayloadOffset = sizeof(header);
+    header.PayloadLength = static_cast<ULONG>(payloadLength);
+    header.FrameId = ++m_frameId;
+    return TrySendFrameEx(header);
 }
 
 HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
@@ -651,7 +889,7 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
     }
 
     VirtuaCamLog::LogLine(std::format(
-        L"{} frame={} hw={} client={} queuedMappings={} queuedBytes={} completed={} completedFrames={} skipped={} lastFill=0x{:08X} stride={} widthBytes={} required={} byteCount={} remaining={} lastSetLen={} setOk={} setReject={} rejectReason={} returned={}",
+        L"{} frame={} hw={} client={} queuedMappings={} queuedBytes={} completed={} completedFrames={} skipped={} lastFill=0x{:08X} stride={} widthBytes={} required={} byteCount={} remaining={} lastSetLen={} setOk={} setReject={} rejectReason={} outFmt={} uploadMask=0x{:08X} lastSetFmt={} returned={}",
         prefix ? prefix : L"Driver status",
         frameSequence,
         status.HardwareState,
@@ -671,6 +909,9 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
         status.SetDataAcceptedCount,
         status.SetDataRejectedCount,
         status.LastSetDataReason,
+        status.OutputFormat,
+        status.UploadFormatMask,
+        status.LastSetDataFormat,
         returned));
 }
 
@@ -1039,11 +1280,67 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
     ID3D11ShaderResourceView* nullSrv[] = { nullptr };
     m_context->PSSetShaderResources(0, 1, nullSrv);
 
+    HRESULT hr = S_OK;
+    const bool frameExSupported = IsFrameExSupported();
+
+    if (frameExSupported && CanUseFrameEx(VIRTUACAM_FRAME_FORMAT_BGRA32)) {
+        m_context->CopyResource(m_stagingTexture.get(), m_scaledTexture.get());
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        RETURN_IF_FAILED(m_context->Map(m_stagingTexture.get(), 0, D3D11_MAP_READ, 0, &mapped));
+        hr = UploadMappedFrameExBgra(mapped);
+        if (FAILED(hr)) {
+            hr = UploadMappedFrame(mapped);
+        }
+        m_context->Unmap(m_stagingTexture.get(), 0);
+
+        if (SUCCEEDED(hr)) {
+            return hr;
+        }
+    } else if (frameExSupported && CanUseFrameEx(VIRTUACAM_FRAME_FORMAT_NV12)) {
+        hr = EnsureNv12Resources();
+        if (SUCCEEDED(hr)) {
+            RECT rect = { 0, 0, static_cast<LONG>(m_outputWidth), static_cast<LONG>(m_outputHeight) };
+            m_videoContext->VideoProcessorSetStreamFrameFormat(
+                m_videoProcessor.get(),
+                0,
+                D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+            m_videoContext->VideoProcessorSetStreamSourceRect(m_videoProcessor.get(), 0, TRUE, &rect);
+            m_videoContext->VideoProcessorSetStreamDestRect(m_videoProcessor.get(), 0, TRUE, &rect);
+            m_videoContext->VideoProcessorSetOutputTargetRect(m_videoProcessor.get(), TRUE, &rect);
+
+            D3D11_VIDEO_PROCESSOR_STREAM stream = {};
+            stream.Enable = TRUE;
+            stream.pInputSurface = m_videoInputView.get();
+            hr = m_videoContext->VideoProcessorBlt(
+                m_videoProcessor.get(),
+                m_videoOutputView.get(),
+                0,
+                1,
+                &stream);
+        }
+
+        if (SUCCEEDED(hr)) {
+            m_context->CopyResource(m_nv12StagingTexture.get(), m_nv12Texture.get());
+
+            D3D11_MAPPED_SUBRESOURCE mapped = {};
+            hr = m_context->Map(m_nv12StagingTexture.get(), 0, D3D11_MAP_READ, 0, &mapped);
+            if (SUCCEEDED(hr)) {
+                hr = UploadMappedFrameExNv12(mapped);
+                m_context->Unmap(m_nv12StagingTexture.get(), 0);
+            }
+        }
+
+        if (SUCCEEDED(hr)) {
+            return hr;
+        }
+    }
+
     m_context->CopyResource(m_stagingTexture.get(), m_scaledTexture.get());
 
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     RETURN_IF_FAILED(m_context->Map(m_stagingTexture.get(), 0, D3D11_MAP_READ, 0, &mapped));
-    HRESULT hr = UploadMappedFrame(mapped);
+    hr = UploadMappedFrame(mapped);
     m_context->Unmap(m_stagingTexture.get(), 0);
 
     if (FAILED(hr) && IsRecoverableSendFailure(hr)) {

@@ -199,6 +199,75 @@ SetData(
 	return status;
 }
 
+//  Set VIRTUACAM_PROP_FRAME_EX.
+NTSTATUS
+CCaptureFilter::
+SetFrameEx(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    UNREFERENCED_PARAMETER(Request);
+    PAGED_CODE();
+
+    PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
+
+    if (bufferLength < sizeof(VIRTUACAM_FRAME_EX_HEADER) || Data == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    VIRTUACAM_FRAME_EX_HEADER header = {};
+    __try {
+        RtlCopyMemory(&header, Data, sizeof(header));
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
+
+    if (header.Size != sizeof(VIRTUACAM_FRAME_EX_HEADER) ||
+        header.Version != VIRTUACAM_FRAME_EX_VERSION ||
+        header.PayloadOffset < sizeof(VIRTUACAM_FRAME_EX_HEADER) ||
+        header.PayloadLength == 0 ||
+        header.Width == 0 ||
+        header.Height == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    const ULONGLONG copyLength64 =
+        static_cast<ULONGLONG>(header.PayloadOffset) +
+        static_cast<ULONGLONG>(header.PayloadLength);
+    if (copyLength64 > MAXULONG || copyLength64 > bufferLength) {
+        return STATUS_INVALID_BUFFER_SIZE;
+    }
+
+    const ULONG copyLength = static_cast<ULONG>(copyLength64);
+    PUCHAR frameCopy = reinterpret_cast<PUCHAR>(
+        ExAllocatePool2(
+            POOL_FLAG_NON_PAGED,
+            copyLength,
+            AVSHWS_POOLTAG));
+    if (!frameCopy) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    __try {
+        RtlCopyMemory(frameCopy, Data, copyLength);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        ExFreePoolWithTag(frameCopy, AVSHWS_POOLTAG);
+        return GetExceptionCode();
+    }
+
+    CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
+    CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
+    NTSTATUS status = device->SetFrameEx(frameCopy, copyLength);
+    ExFreePoolWithTag(frameCopy, AVSHWS_POOLTAG);
+
+    return status;
+}
+
 // Set VIRTUACAM_PROP_CONNECT.
 NTSTATUS
 CCaptureFilter::
@@ -344,7 +413,7 @@ GetStatus(
 
     PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
     ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
-    if (!Data || bufferLength < sizeof(VIRTUACAM_DRIVER_STATUS)) {
+    if (!Data || bufferLength < VIRTUACAM_DRIVER_STATUS_V1_SIZE) {
         return STATUS_BUFFER_TOO_SMALL;
     }
 
@@ -353,14 +422,19 @@ GetStatus(
     VIRTUACAM_DRIVER_STATUS status = {};
     device->QueryStatus(&status);
 
+    ULONG bytesToCopy = sizeof(status);
+    if (bufferLength < bytesToCopy) {
+        bytesToCopy = bufferLength;
+    }
+
     __try {
-        RtlCopyMemory(Data, &status, sizeof(status));
+        RtlCopyMemory(Data, &status, bytesToCopy);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         return GetExceptionCode();
     }
 
-    Irp->IoStatus.Information = sizeof(status);
+    Irp->IoStatus.Information = bytesToCopy;
     return STATUS_SUCCESS;
 }
 
@@ -465,6 +539,18 @@ DEFINE_KSPROPERTY_TABLE(CustomPropertyTable)
 		(ULONG)0									//SerializedSize
 	},
     {
+        VIRTUACAM_PROP_FRAME_EX,                    //PropertyId
+        (PFNKSHANDLER)NULL,                         //GetPropertyHandler
+        (ULONG)sizeof(KSPROPERTY),                  //MinProperty
+        (ULONG)sizeof(VIRTUACAM_FRAME_EX_HEADER),   //MinData
+        (PFNKSHANDLER)&CCaptureFilter::SetFrameEx,  //SetPropertyHandler
+        (PKSPROPERTY_VALUES)NULL,                   //Values
+        0,                                          //RelationsCount
+        (PKSPROPERTY)NULL,                          //Relations
+        (PFNKSHANDLER)NULL,                         //SupportHandler
+        (ULONG)0                                    //SerializedSize
+    },
+    {
         VIRTUACAM_PROP_CONNECT,                     //PropertyId
         (PFNKSHANDLER)NULL,                         //GetPropertyHandler
         (ULONG)sizeof(KSPROPERTY),                  //MinProperty
@@ -492,7 +578,7 @@ DEFINE_KSPROPERTY_TABLE(CustomPropertyTable)
         VIRTUACAM_PROP_STATUS,                         //PropertyId
         (PFNKSHANDLER)&CCaptureFilter::GetStatus,      //GetPropertyHandler
         (ULONG)sizeof(KSPROPERTY),                     //MinProperty
-        (ULONG)sizeof(VIRTUACAM_DRIVER_STATUS),        //MinData
+        (ULONG)VIRTUACAM_DRIVER_STATUS_V1_SIZE,        //MinData
         (PFNKSHANDLER)NULL,                            //SetPropertyHandler
         (PKSPROPERTY_VALUES)NULL,                      //Values
         0,                                             //RelationsCount

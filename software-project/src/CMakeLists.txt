@@ -28,6 +28,7 @@ add_library(VirtuaCamCommon STATIC
     VirtuaCam/RuntimeLog.cpp
 )
 set_source_files_properties(VirtuaCam/Guids.cpp PROPERTIES SKIP_PRECOMPILE_HEADER ON)
+target_include_directories(VirtuaCamCommon PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../shared")
 target_link_libraries(VirtuaCamCommon PUBLIC ${VCAM_COMMON_VCPKG_LIBS} ${VCAM_D3D_LIBS} ${VCAM_WIN_LIBS})
 target_compile_definitions(VirtuaCamCommon PRIVATE UNICODE _UNICODE)
 

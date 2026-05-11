@@ -831,13 +831,29 @@ Return Value:
     m_LastMappingsCompleted = 0;
     m_InterruptTime = 0;
 
+    ULONG outputFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+    if (m_VideoInfoHeader->bmiHeader.biCompression == KS_BI_RGB &&
+        m_VideoInfoHeader->bmiHeader.biBitCount == 24) {
+        outputFormat = VIRTUACAM_FRAME_FORMAT_BGR24;
+    } else if (m_VideoInfoHeader->bmiHeader.biCompression == KS_BI_RGB &&
+        m_VideoInfoHeader->bmiHeader.biBitCount == 32) {
+        outputFormat = VIRTUACAM_FRAME_FORMAT_RGB32;
+    } else if (m_VideoInfoHeader->bmiHeader.biCompression == FOURCC_NV12 &&
+        m_VideoInfoHeader->bmiHeader.biBitCount == 12) {
+        outputFormat = VIRTUACAM_FRAME_FORMAT_NV12;
+    } else if (m_VideoInfoHeader->bmiHeader.biCompression == FOURCC_YUY2 &&
+        m_VideoInfoHeader->bmiHeader.biBitCount == 16) {
+        outputFormat = VIRTUACAM_FRAME_FORMAT_YUY2;
+    }
+
     return
         m_HardwareSimulation -> Start (
             m_ImageSynth,
             m_VideoInfoHeader -> AvgTimePerFrame,
             m_VideoInfoHeader -> bmiHeader.biWidth,
             ABS (m_VideoInfoHeader -> bmiHeader.biHeight),
-            m_VideoInfoHeader -> bmiHeader.biSizeImage
+            m_VideoInfoHeader -> bmiHeader.biSizeImage,
+            outputFormat
             );
 
 
@@ -1206,6 +1222,14 @@ NTSTATUS CCaptureDevice::SetData(PVOID data, ULONG dataLength)
     return STATUS_DEVICE_NOT_READY;
 }
 
+NTSTATUS CCaptureDevice::SetFrameEx(PVOID data, ULONG dataLength)
+{
+    if (m_HardwareSimulation) {
+        return m_HardwareSimulation->SetFrameEx(data, dataLength);
+    }
+    return STATUS_DEVICE_NOT_READY;
+}
+
 void CCaptureDevice::ConnectClient()
 {
     DbgPrint("[avshws] ConnectClient device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
@@ -1253,7 +1277,7 @@ void CCaptureDevice::QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status)
 
     RtlZeroMemory(status, sizeof(*status));
     status->Size = sizeof(*status);
-    status->Version = 1;
+    status->Version = VIRTUACAM_DRIVER_STATUS_VERSION;
 
     if (m_HardwareSimulation) {
         m_HardwareSimulation->QueryStatus(status);

@@ -168,6 +168,11 @@ private:
     ULONG m_SetDataAcceptedCount;
     ULONG m_SetDataRejectedCount;
     ULONG m_LastSetDataReason;
+    ULONG m_OutputFormat;
+    ULONG m_OutputStride0;
+    ULONG m_OutputStride1;
+    ULONG m_UploadFormatMask;
+    ULONG m_LastSetDataFormat;
 
     //
     // The hardware sink that will be used for interrupt notifications.
@@ -262,7 +267,8 @@ public:
         IN LONGLONG TimePerFrame,
         IN ULONG Width,
         IN ULONG Height,
-        IN ULONG ImageSize
+        IN ULONG ImageSize,
+        IN ULONG OutputFormat
         );
 
     //
@@ -335,6 +341,7 @@ public:
 	// Sets the virtual frame buffer of the simulation.
 	//
 	NTSTATUS SetData(PVOID data, ULONG dataLength);
+    NTSTATUS SetFrameEx(PVOID data, ULONG dataLength);
     void SetClientConnected(BOOLEAN connected);
     BOOLEAN IsClientConnected();
     HARDWARE_STATE GetHardwareState();

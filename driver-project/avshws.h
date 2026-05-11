@@ -44,6 +44,7 @@ extern "C" {
 #include <ks.h>
 #include <ksmedia.h>
 
+#include "..\shared\VirtuaCamDriverAbi.h"
 #include "customprops.h"
 
 /*************************************************
@@ -215,7 +216,16 @@ typedef struct _VIRTUACAM_DRIVER_STATUS {
     ULONG LastSetDataReason;
     ULONGLONG CompletedFrameCount;
     ULONGLONG LastFrameTime100ns;
+    ULONG OutputFormat;
+    ULONG OutputStride0;
+    ULONG OutputStride1;
+    ULONG UploadFormatMask;
+    ULONG LastSetDataFormat;
+    ULONG ReservedStatus[3];
 } VIRTUACAM_DRIVER_STATUS, *PVIRTUACAM_DRIVER_STATUS;
+
+static_assert(FIELD_OFFSET(VIRTUACAM_DRIVER_STATUS, OutputFormat) == VIRTUACAM_DRIVER_STATUS_V1_SIZE,
+    "VIRTUACAM_DRIVER_STATUS v1 prefix changed.");
 
 /*************************************************
 
