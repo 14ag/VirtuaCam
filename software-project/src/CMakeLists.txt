@@ -15,7 +15,7 @@ set(VCAM_COMMON_VCPKG_LIBS WIL::WIL)
 set(VCAM_MF_LIBS mfplat mfuuid mfreadwrite mf)
 set(VCAM_MF_GUID_LIBS mfuuid)
 set(VCAM_D3D_LIBS d3d11 d2d1 dwrite windowscodecs d3d12 d3dcompiler dxgi)
-set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 comctl32 shlwapi synchronization dwmapi windowsapp avrt strmiids ksproxy wtsapi32 userenv)
+set(VCAM_WIN_LIBS ole32 oleaut32 runtimeobject propsys advapi32 user32 shell32 comctl32 shlwapi synchronization dwmapi windowsapp avrt strmiids ksproxy wtsapi32 userenv bcrypt)
 
 add_library(VirtuaCamCommon STATIC
     VirtuaCam/Tools.cpp
@@ -51,7 +51,7 @@ add_library(DirectPortBroker SHARED
     "${CMAKE_CURRENT_BINARY_DIR}/DirectPortBroker.def"
 )
 set(DEF_BROKER "${CMAKE_CURRENT_BINARY_DIR}/DirectPortBroker.def")
-file(WRITE ${DEF_BROKER} "LIBRARY DirectPortBroker\nEXPORTS\n    InitializeBroker\n    ShutdownBroker\n    UpdateProducerPriorityList\n    SetCompositingMode\n    RenderBrokerFrame\n    GetSharedTexture\n    GetBrokerState\n    GetBrokerFrameValue\n")
+file(WRITE ${DEF_BROKER} "LIBRARY DirectPortBroker\nEXPORTS\n    InitializeBroker\n    ShutdownBroker\n    UpdateProducerPriorityList\n    RegisterExpectedProducer\n    SetCompositingMode\n    RenderBrokerFrame\n    GetSharedTexture\n    GetBrokerState\n    GetBrokerFrameValue\n")
 set_target_properties(DirectPortBroker PROPERTIES OUTPUT_NAME "DirectPortBroker")
 target_link_libraries(DirectPortBroker PRIVATE VirtuaCamCommon)
 target_link_libraries(DirectPortBroker PRIVATE ${VCAM_MF_LIBS})

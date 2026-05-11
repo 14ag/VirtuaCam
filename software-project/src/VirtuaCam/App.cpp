@@ -29,6 +29,7 @@ typedef ID3D11Texture2D* (*PFN_GetSharedTexture)();
 typedef BrokerState (*PFN_GetBrokerState)();
 typedef UINT64 (*PFN_GetBrokerFrameValue)();
 typedef void (*PFN_UpdateProducerPriorityList)(const DWORD*, int);
+typedef void (*PFN_RegisterExpectedProducer)(DWORD, UINT64);
 typedef void (*PFN_SetCompositingMode)(bool);
 
 static HMODULE g_hBrokerDll = nullptr;
@@ -39,6 +40,7 @@ static PFN_GetSharedTexture g_pfnGetSharedTexture = nullptr;
 static PFN_GetBrokerState g_pfnGetBrokerState = nullptr;
 static PFN_GetBrokerFrameValue g_pfnGetBrokerFrameValue = nullptr;
 static PFN_UpdateProducerPriorityList g_pfnUpdateProducerPriorityList = nullptr;
+static PFN_RegisterExpectedProducer g_pfnRegisterExpectedProducer = nullptr;
 static PFN_SetCompositingMode g_pfnSetCompositingMode = nullptr;
 
 static SourceState g_mainSourceState;
@@ -332,7 +334,25 @@ DWORD LaunchProducer(const std::wstring& key, const std::wstring& args)
     std::filesystem::path childExe = std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"VirtuaCamProcess.exe";
     std::wstring exePath = childExe.wstring();
 
-    std::wstring argsWithBroker = std::format(L"{} --broker-pid {}", args, GetCurrentProcessId());
+    UINT64 brokerNonce = 0;
+    if (FAILED(BCryptGenRandom(
+            nullptr,
+            reinterpret_cast<PUCHAR>(&brokerNonce),
+            sizeof(brokerNonce),
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG)) ||
+        brokerNonce == 0) {
+        LARGE_INTEGER counter = {};
+        QueryPerformanceCounter(&counter);
+        brokerNonce = (static_cast<UINT64>(GetCurrentProcessId()) << 32) ^
+            static_cast<UINT64>(counter.QuadPart) ^
+            GetTickCount64();
+    }
+
+    std::wstring argsWithBroker = std::format(
+        L"{} --broker-pid {} --broker-nonce {}",
+        args,
+        GetCurrentProcessId(),
+        brokerNonce);
     std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, argsWithBroker);
     if (g_debugLoggingEnabled) {
         cmdLine += L" -debug";
@@ -344,6 +364,9 @@ DWORD LaunchProducer(const std::wstring& key, const std::wstring& args)
     if (CreateProcessW(exePath.c_str(), cmdLineMutable.data(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
     {
         g_producerProcesses[key] = pi;
+        if (g_pfnRegisterExpectedProducer) {
+            g_pfnRegisterExpectedProducer(pi.dwProcessId, brokerNonce);
+        }
         VirtuaCamLog::LogLine(std::format(L"LaunchProducer success: key={} pid={} args={}", key, pi.dwProcessId, argsWithBroker));
         Sleep(200);
         return pi.dwProcessId;
@@ -753,8 +776,9 @@ HRESULT LoadBroker() {
     g_pfnGetBrokerState = (PFN_GetBrokerState)GetProcAddress(g_hBrokerDll, "GetBrokerState");
     g_pfnGetBrokerFrameValue = (PFN_GetBrokerFrameValue)GetProcAddress(g_hBrokerDll, "GetBrokerFrameValue");
     g_pfnUpdateProducerPriorityList = (PFN_UpdateProducerPriorityList)GetProcAddress(g_hBrokerDll, "UpdateProducerPriorityList");
+    g_pfnRegisterExpectedProducer = (PFN_RegisterExpectedProducer)GetProcAddress(g_hBrokerDll, "RegisterExpectedProducer");
     g_pfnSetCompositingMode = (PFN_SetCompositingMode)GetProcAddress(g_hBrokerDll, "SetCompositingMode");
-    if (!g_pfnInitializeBroker || !g_pfnShutdownBroker || !g_pfnRenderBrokerFrame || !g_pfnGetSharedTexture || !g_pfnGetBrokerState || !g_pfnGetBrokerFrameValue || !g_pfnUpdateProducerPriorityList || !g_pfnSetCompositingMode) {
+    if (!g_pfnInitializeBroker || !g_pfnShutdownBroker || !g_pfnRenderBrokerFrame || !g_pfnGetSharedTexture || !g_pfnGetBrokerState || !g_pfnGetBrokerFrameValue || !g_pfnUpdateProducerPriorityList || !g_pfnRegisterExpectedProducer || !g_pfnSetCompositingMode) {
         VirtuaCamLog::LogLine(L"DirectPortBroker.dll missing expected exports");
         return E_FAIL;
     }

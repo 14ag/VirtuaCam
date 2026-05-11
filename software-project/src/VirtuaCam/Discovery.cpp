@@ -50,15 +50,25 @@ void Discovery::DiscoverStreams() {
             if (hManifest) {
                 BroadcastManifest* pView = (BroadcastManifest*)MapViewOfFile(hManifest, FILE_MAP_READ, 0, 0, sizeof(BroadcastManifest));
                 if (pView) {
-                    if (memcmp(&pView->adapterLuid, &pImpl->m_adapterLuid, sizeof(LUID)) == 0) {
+                    std::wstring textureName;
+                    std::wstring fenceName;
+                    if (ValidateBroadcastManifest(
+                            pView,
+                            pe32.th32ProcessID,
+                            0,
+                            &pImpl->m_adapterLuid,
+                            textureName,
+                            fenceName)) {
                         DiscoveredSharedStream stream;
                         stream.processId = pe32.th32ProcessID;
                         stream.processName = pe32.szExeFile;
                         stream.producerType = L"DirectPort";
                         stream.manifestName = manifestName;
-                        stream.textureName = pView->textureName;
-                        stream.fenceName = pView->fenceName;
+                        stream.textureName = textureName;
+                        stream.fenceName = fenceName;
                         stream.sharedFenceHandleValue = pView->sharedFenceHandleValue;
+                        stream.brokerNonce = pView->brokerNonce;
+                        stream.ownerPid = pView->ownerPid;
                         stream.adapterLuid = pView->adapterLuid;
                         pImpl->m_discoveredStreams.push_back(stream);
                     }

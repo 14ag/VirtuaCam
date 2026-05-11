@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include "VirtuaCamDriverAbi.h"
 
 enum class AspectRatioMode
 {
@@ -11,11 +12,11 @@ enum class AspectRatioMode
     R3_4
 };
 
-#define ASPECT_RATIO_MASK_16_9          0x00000001u
-#define ASPECT_RATIO_MASK_9_16          0x00000002u
-#define ASPECT_RATIO_MASK_4_3           0x00000004u
-#define ASPECT_RATIO_MASK_3_4           0x00000008u
-#define ASPECT_RATIO_MASK_ALL           (ASPECT_RATIO_MASK_16_9 | ASPECT_RATIO_MASK_9_16 | ASPECT_RATIO_MASK_4_3 | ASPECT_RATIO_MASK_3_4)
+#define ASPECT_RATIO_MASK_16_9          VIRTUACAM_ASPECT_MASK_16_9
+#define ASPECT_RATIO_MASK_9_16          VIRTUACAM_ASPECT_MASK_9_16
+#define ASPECT_RATIO_MASK_4_3           VIRTUACAM_ASPECT_MASK_4_3
+#define ASPECT_RATIO_MASK_3_4           VIRTUACAM_ASPECT_MASK_3_4
+#define ASPECT_RATIO_MASK_ALL           VIRTUACAM_ASPECT_MASK_ALL
 
 namespace VirtuaCamConfig
 {

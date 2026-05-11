@@ -357,6 +357,92 @@ HRESULT CreateCurrentUserOnlySecurityAttributes(wil::unique_hlocal_security_desc
     return S_OK;
 }
 
+bool InitializeBroadcastManifest(
+    BroadcastManifest* manifest,
+    DWORD ownerPid,
+    UINT64 brokerNonce,
+    UINT width,
+    UINT height,
+    DXGI_FORMAT format,
+    const LUID& adapterLuid,
+    const std::wstring& textureName,
+    const std::wstring& fenceName)
+{
+    if (!manifest ||
+        textureName.empty() ||
+        fenceName.empty() ||
+        textureName.size() >= VIRTUACAM_MANIFEST_NAME_CAPACITY ||
+        fenceName.size() >= VIRTUACAM_MANIFEST_NAME_CAPACITY) {
+        return false;
+    }
+
+    ZeroMemory(manifest, sizeof(*manifest));
+    manifest->magic = VIRTUACAM_MANIFEST_MAGIC;
+    manifest->version = VIRTUACAM_MANIFEST_VERSION;
+    manifest->size = sizeof(BroadcastManifest);
+    manifest->ownerPid = ownerPid;
+    manifest->brokerNonce = brokerNonce;
+    manifest->width = width;
+    manifest->height = height;
+    manifest->format = format;
+    manifest->adapterLuid = adapterLuid;
+    manifest->textureNameLength = static_cast<UINT32>(textureName.size());
+    manifest->fenceNameLength = static_cast<UINT32>(fenceName.size());
+
+    return SUCCEEDED(StringCchCopyW(
+               manifest->textureName,
+               VIRTUACAM_MANIFEST_NAME_CAPACITY,
+               textureName.c_str())) &&
+           SUCCEEDED(StringCchCopyW(
+               manifest->fenceName,
+               VIRTUACAM_MANIFEST_NAME_CAPACITY,
+               fenceName.c_str()));
+}
+
+bool ValidateBroadcastManifest(
+    const BroadcastManifest* manifest,
+    DWORD expectedOwnerPid,
+    UINT64 expectedBrokerNonce,
+    const LUID* expectedAdapterLuid,
+    std::wstring& textureName,
+    std::wstring& fenceName)
+{
+    textureName.clear();
+    fenceName.clear();
+
+    if (!manifest ||
+        manifest->magic != VIRTUACAM_MANIFEST_MAGIC ||
+        manifest->version != VIRTUACAM_MANIFEST_VERSION ||
+        manifest->size != sizeof(BroadcastManifest) ||
+        manifest->ownerPid != expectedOwnerPid ||
+        manifest->textureNameLength == 0 ||
+        manifest->fenceNameLength == 0 ||
+        manifest->textureNameLength >= VIRTUACAM_MANIFEST_NAME_CAPACITY ||
+        manifest->fenceNameLength >= VIRTUACAM_MANIFEST_NAME_CAPACITY) {
+        return false;
+    }
+
+    if (expectedBrokerNonce != 0 && manifest->brokerNonce != expectedBrokerNonce) {
+        return false;
+    }
+
+    if (expectedAdapterLuid &&
+        memcmp(&manifest->adapterLuid, expectedAdapterLuid, sizeof(LUID)) != 0) {
+        return false;
+    }
+
+    const size_t textureLength = wcsnlen_s(manifest->textureName, VIRTUACAM_MANIFEST_NAME_CAPACITY);
+    const size_t fenceLength = wcsnlen_s(manifest->fenceName, VIRTUACAM_MANIFEST_NAME_CAPACITY);
+    if (textureLength != manifest->textureNameLength ||
+        fenceLength != manifest->fenceNameLength) {
+        return false;
+    }
+
+    textureName.assign(manifest->textureName, textureLength);
+    fenceName.assign(manifest->fenceName, fenceLength);
+    return true;
+}
+
 namespace
 {
     constexpr wchar_t kLocalPrefix[] = L"Local\\";

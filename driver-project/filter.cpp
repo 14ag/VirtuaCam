@@ -31,6 +31,121 @@
 #pragma code_seg("PAGE")
 #endif // ALLOC_PRAGMA
 
+namespace
+{
+    ULONG GetPropertyDataLength(_In_ PIRP Irp)
+    {
+        PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+        return irpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    }
+
+    NTSTATUS ValidatePrivatePropertyAccess(_In_ PIRP Irp, _In_ ACCESS_MASK desiredAccess)
+    {
+        return IoValidateDeviceIoControlAccess(Irp, desiredAccess);
+    }
+
+    NTSTATUS CopyPropertyDataFromCaller(
+        _In_ PIRP Irp,
+        _In_reads_bytes_(length) PVOID Data,
+        _In_ ULONG length,
+        _Out_writes_bytes_(length) PVOID destination,
+        _In_ ULONG alignment
+        )
+    {
+        if (!Data || !destination || length == 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        __try {
+            if (Irp->RequestorMode != KernelMode) {
+                ProbeForRead(Data, length, alignment);
+            }
+            RtlCopyMemory(destination, Data, length);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            return GetExceptionCode();
+        }
+
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS CopyPropertyDataToCaller(
+        _In_ PIRP Irp,
+        _Out_writes_bytes_(length) PVOID Data,
+        _In_reads_bytes_(length) const void* source,
+        _In_ ULONG length,
+        _In_ ULONG alignment
+        )
+    {
+        if (!Data || !source || length == 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        __try {
+            if (Irp->RequestorMode != KernelMode) {
+                ProbeForWrite(Data, length, alignment);
+            }
+            RtlCopyMemory(Data, source, length);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            return GetExceptionCode();
+        }
+
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS CapturePropertyDataToPool(
+        _In_ PIRP Irp,
+        _In_reads_bytes_(length) PVOID Data,
+        _In_ ULONG length,
+        _Outptr_result_bytebuffer_(length) PUCHAR* capturedData
+        )
+    {
+        if (!capturedData) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        *capturedData = NULL;
+
+        if (!Data || length == 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        PUCHAR buffer = reinterpret_cast<PUCHAR>(
+            ExAllocatePool2(
+                POOL_FLAG_NON_PAGED,
+                length,
+                AVSHWS_POOLTAG));
+        if (!buffer) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        NTSTATUS status = CopyPropertyDataFromCaller(Irp, Data, length, buffer, 1);
+        if (!NT_SUCCESS(status)) {
+            ExFreePoolWithTag(buffer, AVSHWS_POOLTAG);
+            return status;
+        }
+
+        *capturedData = buffer;
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS ReadPropertyUlong(_In_ PIRP Irp, _Inout_ PVOID Data, _Out_ PULONG value)
+    {
+        if (GetPropertyDataLength(Irp) != sizeof(ULONG)) {
+            return STATUS_INVALID_BUFFER_SIZE;
+        }
+        return CopyPropertyDataFromCaller(Irp, Data, sizeof(ULONG), value, __alignof(ULONG));
+    }
+
+    NTSTATUS ReadPropertyHandle(_In_ PIRP Irp, _Inout_ PVOID Data, _Out_ PHANDLE value)
+    {
+        if (GetPropertyDataLength(Irp) != sizeof(HANDLE)) {
+            return STATUS_INVALID_BUFFER_SIZE;
+        }
+        return CopyPropertyDataFromCaller(Irp, Data, sizeof(HANDLE), value, __alignof(HANDLE));
+    }
+}
+
 
 NTSTATUS
 CCaptureFilter::
@@ -110,18 +225,20 @@ GetData(
 {
 	PAGED_CODE();
 
-	PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
-	ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    NTSTATUS status = ValidatePrivatePropertyAccess(Irp, FILE_READ_DATA);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+	ULONG bufferLength = GetPropertyDataLength(Irp);
 	if (!Data || bufferLength < sizeof(DWORD)) {
 		return STATUS_BUFFER_TOO_SMALL;
 	}
 
     DWORD value = 0xAA77AA77;
-    __try {
-        RtlCopyMemory(Data, &value, sizeof(value));
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return GetExceptionCode();
+    status = CopyPropertyDataToCaller(Irp, Data, &value, sizeof(value), __alignof(DWORD));
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
 	Irp->IoStatus.Information = sizeof(DWORD);
@@ -142,8 +259,12 @@ SetData(
 
 	CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
 
-	PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
-	ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    NTSTATUS status = ValidatePrivatePropertyAccess(Irp, FILE_WRITE_DATA);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+	ULONG bufferLength = GetPropertyDataLength(Irp);
 
 	if (bufferLength == 0 || Data == NULL) {
 		return STATUS_INVALID_PARAMETER;
@@ -170,21 +291,14 @@ SetData(
         }
     }
 
-    PUCHAR frameCopy = reinterpret_cast<PUCHAR>(
-        ExAllocatePool2(
-            POOL_FLAG_NON_PAGED,
-            dataLength,
-            AVSHWS_POOLTAG));
-    if (!frameCopy) {
-        return STATUS_INSUFFICIENT_RESOURCES;
+    if (bufferLength != dataLength) {
+        return STATUS_INVALID_BUFFER_SIZE;
     }
 
-    __try {
-        RtlCopyMemory(frameCopy, Data, dataLength);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        ExFreePoolWithTag(frameCopy, AVSHWS_POOLTAG);
-        return GetExceptionCode();
+    PUCHAR frameCopy = NULL;
+    status = CapturePropertyDataToPool(Irp, Data, dataLength, &frameCopy);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
 	static volatile LONG s_driverFrameCount = 0;
@@ -193,7 +307,7 @@ SetData(
 		DbgPrint("[avshws] SetData frame=%ld len=%lu rawLen=%lu width=%lu height=%lu irql=%lu\n", n, dataLength, bufferLength, driverStatus.Width, driverStatus.Height, (ULONG)KeGetCurrentIrql());
 	}
 
-    NTSTATUS status = device->SetData(frameCopy, dataLength);
+    status = device->SetData(frameCopy, dataLength);
     ExFreePoolWithTag(frameCopy, AVSHWS_POOLTAG);
 
 	return status;
@@ -211,19 +325,21 @@ SetFrameEx(
     UNREFERENCED_PARAMETER(Request);
     PAGED_CODE();
 
-    PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
-    ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    NTSTATUS status = ValidatePrivatePropertyAccess(Irp, FILE_WRITE_DATA);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    ULONG bufferLength = GetPropertyDataLength(Irp);
 
     if (bufferLength < sizeof(VIRTUACAM_FRAME_EX_HEADER) || Data == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
     VIRTUACAM_FRAME_EX_HEADER header = {};
-    __try {
-        RtlCopyMemory(&header, Data, sizeof(header));
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return GetExceptionCode();
+    status = CopyPropertyDataFromCaller(Irp, Data, sizeof(header), &header, __alignof(VIRTUACAM_FRAME_EX_HEADER));
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
     if (header.Size != sizeof(VIRTUACAM_FRAME_EX_HEADER) ||
@@ -238,31 +354,20 @@ SetFrameEx(
     const ULONGLONG copyLength64 =
         static_cast<ULONGLONG>(header.PayloadOffset) +
         static_cast<ULONGLONG>(header.PayloadLength);
-    if (copyLength64 > MAXULONG || copyLength64 > bufferLength) {
+    if (copyLength64 > MAXULONG || copyLength64 != bufferLength) {
         return STATUS_INVALID_BUFFER_SIZE;
     }
 
     const ULONG copyLength = static_cast<ULONG>(copyLength64);
-    PUCHAR frameCopy = reinterpret_cast<PUCHAR>(
-        ExAllocatePool2(
-            POOL_FLAG_NON_PAGED,
-            copyLength,
-            AVSHWS_POOLTAG));
-    if (!frameCopy) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    __try {
-        RtlCopyMemory(frameCopy, Data, copyLength);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        ExFreePoolWithTag(frameCopy, AVSHWS_POOLTAG);
-        return GetExceptionCode();
+    PUCHAR frameCopy = NULL;
+    status = CapturePropertyDataToPool(Irp, Data, copyLength, &frameCopy);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
     CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
     CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
-    NTSTATUS status = device->SetFrameEx(frameCopy, copyLength);
+    status = device->SetFrameEx(frameCopy, copyLength);
     ExFreePoolWithTag(frameCopy, AVSHWS_POOLTAG);
 
     return status;
@@ -280,6 +385,11 @@ SetConnect(
     UNREFERENCED_PARAMETER(Request);
     UNREFERENCED_PARAMETER(Data);
     PAGED_CODE();
+
+    NTSTATUS status = ValidatePrivatePropertyAccess(Irp, FILE_WRITE_DATA);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
 
     CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
     CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
@@ -303,6 +413,11 @@ SetDisconnect(
     UNREFERENCED_PARAMETER(Data);
     PAGED_CODE();
 
+    NTSTATUS status = ValidatePrivatePropertyAccess(Irp, FILE_WRITE_DATA);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
     CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
     CCaptureDevice* device = CCaptureDevice::Recast(KsFilterGetDevice(filter->m_Filter));
     static volatile LONG s_disconnectSequence = 0;
@@ -323,13 +438,16 @@ SetRegisterEvent(
     UNREFERENCED_PARAMETER(Request);
     PAGED_CODE();
 
-    PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
-    ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.InputBufferLength;
-    if (!Data || bufferLength < sizeof(HANDLE)) {
-        return STATUS_INVALID_PARAMETER;
+    NTSTATUS status = ValidatePrivatePropertyAccess(Irp, FILE_WRITE_DATA);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
-    HANDLE eventHandle = *(PHANDLE)Data;
+    HANDLE eventHandle = NULL;
+    status = ReadPropertyHandle(Irp, Data, &eventHandle);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
     if (!eventHandle) {
         return STATUS_INVALID_HANDLE;
     }
@@ -350,16 +468,16 @@ SetPreferredAspect(
     UNREFERENCED_PARAMETER(Request);
     PAGED_CODE();
 
-    PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
-    ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.InputBufferLength;
-    if (pIrpStack->Parameters.DeviceIoControl.OutputBufferLength > bufferLength) {
-        bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
-    }
-    if (!Data || bufferLength < sizeof(ULONG)) {
-        return STATUS_INVALID_PARAMETER;
+    NTSTATUS status = ValidatePrivatePropertyAccess(Irp, FILE_WRITE_DATA);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
-    const ULONG aspectMode = *reinterpret_cast<PULONG>(Data);
+    ULONG aspectMode = 0;
+    status = ReadPropertyUlong(Irp, Data, &aspectMode);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
     if (aspectMode > VIRTUACAM_ASPECT_3_4) {
         return STATUS_INVALID_PARAMETER;
     }
@@ -380,16 +498,16 @@ SetAllowedAspects(
     UNREFERENCED_PARAMETER(Request);
     PAGED_CODE();
 
-    PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
-    ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.InputBufferLength;
-    if (pIrpStack->Parameters.DeviceIoControl.OutputBufferLength > bufferLength) {
-        bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
-    }
-    if (!Data || bufferLength < sizeof(ULONG)) {
-        return STATUS_INVALID_PARAMETER;
+    NTSTATUS status = ValidatePrivatePropertyAccess(Irp, FILE_WRITE_DATA);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
-    ULONG allowedMask = *reinterpret_cast<PULONG>(Data);
+    ULONG allowedMask = 0;
+    status = ReadPropertyUlong(Irp, Data, &allowedMask);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
     allowedMask &= VIRTUACAM_ASPECT_MASK_ALL;
     if (allowedMask == 0) {
         allowedMask = VIRTUACAM_ASPECT_MASK_ALL;
@@ -411,8 +529,12 @@ GetStatus(
     UNREFERENCED_PARAMETER(Request);
     PAGED_CODE();
 
-    PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
-    ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    NTSTATUS copyStatus = ValidatePrivatePropertyAccess(Irp, FILE_READ_DATA);
+    if (!NT_SUCCESS(copyStatus)) {
+        return copyStatus;
+    }
+
+    ULONG bufferLength = GetPropertyDataLength(Irp);
     if (!Data || bufferLength < VIRTUACAM_DRIVER_STATUS_V1_SIZE) {
         return STATUS_BUFFER_TOO_SMALL;
     }
@@ -427,11 +549,9 @@ GetStatus(
         bytesToCopy = bufferLength;
     }
 
-    __try {
-        RtlCopyMemory(Data, &status, bytesToCopy);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return GetExceptionCode();
+    copyStatus = CopyPropertyDataToCaller(Irp, Data, &status, bytesToCopy, __alignof(VIRTUACAM_DRIVER_STATUS));
+    if (!NT_SUCCESS(copyStatus)) {
+        return copyStatus;
     }
 
     Irp->IoStatus.Information = bytesToCopy;

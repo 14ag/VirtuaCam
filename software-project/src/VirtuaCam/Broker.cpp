@@ -6,6 +6,7 @@
 #include <vector>
 #include <mutex>
 #include <algorithm>
+#include <map>
 #include "wil/resource.h"
 #include "App.h"
 #include "Tools.h"
@@ -36,6 +37,7 @@ static HANDLE g_sharedNTHandle_Out = nullptr;
 static HANDLE g_sharedFenceHandle_Out = nullptr;
 
 static std::vector<DWORD> g_producerPriorityList;
+static std::map<DWORD, UINT64> g_expectedProducers;
 static std::mutex g_producerListMutex;
 static bool g_isGridMode = false;
 static std::vector<VirtuaCam::DiscoveredSharedStream> g_cachedStreams;
@@ -135,12 +137,17 @@ HRESULT CreateSharingResources(UINT width, UINT height, DXGI_FORMAT format) {
     g_pManifestView_Out = (BroadcastManifest*)MapViewOfFile(g_hManifest_Out, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BroadcastManifest));
     if (!g_pManifestView_Out) { ShutdownSharing(); return E_FAIL; }
     
-    ZeroMemory(g_pManifestView_Out, sizeof(BroadcastManifest));
-    g_pManifestView_Out->width = width; g_pManifestView_Out->height = height;
-    g_pManifestView_Out->format = format; g_pManifestView_Out->adapterLuid = g_adapterLuid;
+    RETURN_HR_IF(E_FAIL, !InitializeBroadcastManifest(
+        g_pManifestView_Out,
+        GetCurrentProcessId(),
+        0,
+        width,
+        height,
+        format,
+        g_adapterLuid,
+        textureName,
+        fenceName));
     g_pManifestView_Out->command = VCamCommand::None;
-    wcscpy_s(g_pManifestView_Out->textureName, _countof(g_pManifestView_Out->textureName), textureName.c_str());
-    wcscpy_s(g_pManifestView_Out->fenceName, _countof(g_pManifestView_Out->fenceName), fenceName.c_str());
     return S_OK;
 }
 
@@ -174,6 +181,7 @@ extern "C" {
         if (g_discovery) g_discovery->Teardown();
         g_cachedStreams.clear();
         g_streamsToMux.clear();
+        g_expectedProducers.clear();
         g_haveDiscoverySnapshot = false;
         g_forceDiscovery = true;
         g_forceComposite = true;
@@ -190,6 +198,17 @@ extern "C" {
     BROKER_API void UpdateProducerPriorityList(const DWORD* pids, int count) {
         std::lock_guard<std::mutex> lock(g_producerListMutex);
         g_producerPriorityList.assign(pids, pids + count);
+        g_forceDiscovery = true;
+        g_forceComposite = true;
+    }
+
+    BROKER_API void RegisterExpectedProducer(DWORD pid, UINT64 nonce) {
+        if (pid == 0 || nonce == 0) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(g_producerListMutex);
+        g_expectedProducers[pid] = nonce;
         g_forceDiscovery = true;
         g_forceComposite = true;
     }
@@ -221,22 +240,32 @@ extern "C" {
         
         {
             std::lock_guard<std::mutex> lock(g_producerListMutex);
+            std::vector<VirtuaCam::DiscoveredSharedStream> trustedStreams;
+            trustedStreams.reserve(allStreams.size());
+            for (const auto& stream : allStreams) {
+                const auto expected = g_expectedProducers.find(stream.processId);
+                if (expected != g_expectedProducers.end() &&
+                    expected->second == stream.brokerNonce) {
+                    trustedStreams.push_back(stream);
+                }
+            }
+
             isGridMode = g_isGridMode;
             forceComposite = g_forceComposite;
             g_forceComposite = false;
             if (isGridMode) {
-                g_streamsToMux = allStreams;
-                activeProducerPidCount = allStreams.size();
+                g_streamsToMux = trustedStreams;
+                activeProducerPidCount = trustedStreams.size();
             } else {
                 g_streamsToMux.reserve(g_producerPriorityList.size());
                 for (DWORD pid : g_producerPriorityList) {
                     if (pid == 0) {
                         g_streamsToMux.push_back({});
                     } else {
-                        auto it = std::find_if(allStreams.begin(), allStreams.end(), 
+                        auto it = std::find_if(trustedStreams.begin(), trustedStreams.end(), 
                             [pid](const auto& s){ return s.processId == pid; });
-                        
-                        if (it != allStreams.end()) {
+                         
+                        if (it != trustedStreams.end()) {
                             g_streamsToMux.push_back(*it);
                             activeProducerPidCount++;
                         } else {
@@ -279,6 +308,7 @@ extern "C" {
         context.As(&context4);
         UINT64 frameValue = g_multiplexer->GetOutputFrameValue();
         context4->Signal(g_sharedFence_Out.Get(), frameValue);
+        context->Flush();
 
         if (g_brokerState == BrokerState::Connected && !g_loggedFirstCompositeAfterConnect) {
             VirtuaCamLog::LogLine(std::format(

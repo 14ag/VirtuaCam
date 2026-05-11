@@ -45,6 +45,7 @@ typedef enum DWM_SYSTEMBACKDROP_TYPE {
 #include <propvarutil.h>
 #include <mfapi.h>
 #include <mfidl.h>
+#include <mfreadwrite.h>
 #include <mferror.h>
 #include <mfcaptureengine.h>
 #include <ks.h>
@@ -72,6 +73,7 @@ typedef enum DWM_SYSTEMBACKDROP_TYPE {
 #include <dwrite.h>
 #include <wincodec.h>
 #include <uuids.h>
+#include <bcrypt.h>
 
 #include <string>
 #include <format>

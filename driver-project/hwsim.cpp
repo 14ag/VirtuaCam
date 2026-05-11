@@ -1891,6 +1891,7 @@ Return Value:
     PUCHAR sourceFrame = NULL;
     PUCHAR synthesisBuffer = NULL;
     ULONG imageSize = 0;
+    BOOLEAN framePinned = FALSE;
 
     KeAcquireSpinLockAtDpcLevel(&m_FrameLock);
     hardwareState = m_HardwareState;
@@ -1906,6 +1907,10 @@ Return Value:
         sourceFrame = (useUploadedFrame && m_TemporaryBuffer)
             ? m_TemporaryBuffer
             : (m_DefaultFrameBuffer ? m_DefaultFrameBuffer : m_TemporaryBuffer);
+        if (sourceFrame) {
+            InterlockedIncrement(&m_FrameReadActive);
+            framePinned = TRUE;
+        }
     }
     KeReleaseSpinLockFromDpcLevel(&m_FrameLock);
 
@@ -1917,10 +1922,14 @@ Return Value:
         }
     }
 
+    if (framePinned) {
+        InterlockedDecrement(&m_FrameReadActive);
+    }
+
     if (hardwareState == HardwareRunning &&
         clientConnected &&
         lastFrameTime.QuadPart > 0 &&
-        m_SetDataAcceptedCount > 0) {
+        acceptedFrameCount > 0) {
         LARGE_INTEGER now;
         KeQuerySystemTimePrecise(&now);
         if ((now.QuadPart - lastFrameTime.QuadPart) > kClientHeartbeatTimeout100ns) {
@@ -1999,15 +2008,19 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     KeReleaseSpinLock(&m_FrameLock, irql);
 
     if (!shouldWrite || !stagingBuffer || outputBytesPerPixel == 0) {
-        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        KeAcquireSpinLock(&m_FrameLock, &irql);
+        m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
+        KeReleaseSpinLock(&m_FrameLock, irql);
         return MapSetDataRejectReasonToStatus(rejectReason);
     }
 
     const ULONGLONG requiredSourceLength64 = static_cast<ULONGLONG>(width) * static_cast<ULONGLONG>(height) * 3ull;
     if (requiredSourceLength64 > MAXULONG) {
-        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        KeAcquireSpinLock(&m_FrameLock, &irql);
+        m_SetDataRejectedCount++;
         m_LastSetDataReason = kSetDataRejectBadGeometry;
+        KeReleaseSpinLock(&m_FrameLock, irql);
         InterlockedDecrement(&m_FrameWriteActive);
         return MapSetDataRejectReasonToStatus(kSetDataRejectBadGeometry);
     }
@@ -2016,8 +2029,10 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
 
 	if (dataLength < requiredSourceLength)
 	{
-        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        KeAcquireSpinLock(&m_FrameLock, &irql);
+        m_SetDataRejectedCount++;
         m_LastSetDataReason = kSetDataRejectShortSource;
+        KeReleaseSpinLock(&m_FrameLock, irql);
         InterlockedDecrement(&m_FrameWriteActive);
 		return MapSetDataRejectReasonToStatus(kSetDataRejectShortSource);
 	}
@@ -2085,15 +2100,17 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     }
     KeReleaseSpinLock(&m_FrameLock, irql);
 
+    KeAcquireSpinLock(&m_FrameLock, &irql);
     if (acceptedFrame) {
-        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataAcceptedCount));
+        m_SetDataAcceptedCount++;
         m_LastSetDataReason = kSetDataRejectNone;
         status = STATUS_SUCCESS;
     } else {
-        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
         status = MapSetDataRejectReasonToStatus(rejectReason);
     }
+    KeReleaseSpinLock(&m_FrameLock, irql);
 
     InterlockedDecrement(&m_FrameWriteActive);
 
@@ -2186,8 +2203,10 @@ NTSTATUS CHardwareSimulation::SetFrameEx(PVOID data, ULONG dataLength)
     KeReleaseSpinLock(&m_FrameLock, irql);
 
     if (!shouldWrite || !stagingBuffer) {
-        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        KeAcquireSpinLock(&m_FrameLock, &irql);
+        m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
+        KeReleaseSpinLock(&m_FrameLock, irql);
         return MapSetDataRejectReasonToStatus(rejectReason);
     }
 
@@ -2201,8 +2220,10 @@ NTSTATUS CHardwareSimulation::SetFrameEx(PVOID data, ULONG dataLength)
         outputFormat == VIRTUACAM_FRAME_FORMAT_NV12) {
         RtlCopyMemory(stagingBuffer, payload, imageSize);
     } else {
-        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        KeAcquireSpinLock(&m_FrameLock, &irql);
+        m_SetDataRejectedCount++;
         m_LastSetDataReason = kSetDataRejectUnsupportedFormat;
+        KeReleaseSpinLock(&m_FrameLock, irql);
         InterlockedDecrement(&m_FrameWriteActive);
         return MapSetDataRejectReasonToStatus(kSetDataRejectUnsupportedFormat);
     }
@@ -2230,15 +2251,17 @@ NTSTATUS CHardwareSimulation::SetFrameEx(PVOID data, ULONG dataLength)
     }
     KeReleaseSpinLock(&m_FrameLock, irql);
 
+    KeAcquireSpinLock(&m_FrameLock, &irql);
     if (acceptedFrame) {
-        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataAcceptedCount));
+        m_SetDataAcceptedCount++;
         m_LastSetDataReason = kSetDataRejectNone;
         status = STATUS_SUCCESS;
     } else {
-        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_SetDataRejectedCount));
+        m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
         status = MapSetDataRejectReasonToStatus(rejectReason);
     }
+    KeReleaseSpinLock(&m_FrameLock, irql);
 
     InterlockedDecrement(&m_FrameWriteActive);
 
@@ -2357,16 +2380,6 @@ void CHardwareSimulation::QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status)
     status->UploadFormatMask = m_UploadFormatMask;
     status->InterruptTime = m_InterruptTime;
     status->LastFrameTime100ns = static_cast<ULONGLONG>(m_LastFrameTime.QuadPart);
-    KeReleaseSpinLock(&m_FrameLock, irql);
-
-    KeAcquireSpinLock(&m_ListLock, &irql);
-    status->ScatterGatherMappingsQueued = m_ScatterGatherMappingsQueued;
-    status->ScatterGatherBytesQueued = m_ScatterGatherBytesQueued;
-    status->NumMappingsCompleted = m_NumMappingsCompleted;
-    status->NumFramesSkipped = m_NumFramesSkipped;
-    status->LastCompletedDelta = m_LastCompletedDelta;
-    KeReleaseSpinLock(&m_ListLock, irql);
-
     status->LastFillStatus = m_LastFillStatus;
     status->LastFillStride = m_LastFillStride;
     status->LastFillWidthBytes = m_LastFillWidthBytes;
@@ -2378,4 +2391,13 @@ void CHardwareSimulation::QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status)
     status->SetDataRejectedCount = m_SetDataRejectedCount;
     status->LastSetDataReason = m_LastSetDataReason;
     status->LastSetDataFormat = m_LastSetDataFormat;
+    KeReleaseSpinLock(&m_FrameLock, irql);
+
+    KeAcquireSpinLock(&m_ListLock, &irql);
+    status->ScatterGatherMappingsQueued = m_ScatterGatherMappingsQueued;
+    status->ScatterGatherBytesQueued = m_ScatterGatherBytesQueued;
+    status->NumMappingsCompleted = m_NumMappingsCompleted;
+    status->NumFramesSkipped = m_NumFramesSkipped;
+    status->LastCompletedDelta = m_LastCompletedDelta;
+    KeReleaseSpinLock(&m_ListLock, irql);
 }

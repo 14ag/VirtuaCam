@@ -86,11 +86,16 @@ HRESULT InitOutputResources()
     g_pManifestViewOut = (BroadcastManifest*)MapViewOfFile(g_hManifestOut, FILE_MAP_ALL_ACCESS, 0, 0, 0);
     RETURN_HR_IF_NULL(E_FAIL, g_pManifestViewOut);
     
-    ZeroMemory(g_pManifestViewOut, sizeof(BroadcastManifest));
-    g_pManifestViewOut->width = 1920; g_pManifestViewOut->height = 1080; g_pManifestViewOut->format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    g_pManifestViewOut->adapterLuid = g_adapterLuid;
-    wcscpy_s(g_pManifestViewOut->textureName, textureName.c_str());
-    wcscpy_s(g_pManifestViewOut->fenceName, fenceName.c_str());
+    RETURN_HR_IF(E_FAIL, !InitializeBroadcastManifest(
+        g_pManifestViewOut,
+        pid,
+        0,
+        1920,
+        1080,
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+        g_adapterLuid,
+        textureName,
+        fenceName));
     
     ComPtr<ID3DBlob> vsBlob, psBlob;
     D3DCompile(g_vertexShader, strlen(g_vertexShader), nullptr, nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsBlob, nullptr);
@@ -171,6 +176,7 @@ PRODUCER_API bool ProcessFrame()
     g_context->CopyResource(g_sharedOutTexture.Get(), g_outputTexture.Get());
     g_sharedOutFrameValue++;
     g_context4->Signal(g_sharedOutFence.Get(), g_sharedOutFrameValue);
+    g_context->Flush();
     if (g_pManifestViewOut) {
         InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestViewOut->frameValue), g_sharedOutFrameValue);
     }

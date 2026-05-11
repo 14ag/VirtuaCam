@@ -176,19 +176,20 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
         return FAILED(hrTexture) ? hrTexture : E_FAIL;
     }
 
-    if (streamInfo.sharedFenceHandleValue == 0) {
+    wil::unique_handle namedFenceHandle(GetHandleFromName(streamInfo.fenceName.c_str(), GENERIC_READ | GENERIC_WRITE));
+    if (!namedFenceHandle) {
         VirtuaCamLog::LogLine(std::format(
-            L"UpdateProducerConnection missing duplicated shared fence handle: pid={} name='{}'",
+            L"UpdateProducerConnection failed to open shared fence by name: pid={} name='{}'",
             streamInfo.processId,
             streamInfo.fenceName));
         return E_FAIL;
     }
 
-    newRes.importedFenceHandle.reset(reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(streamInfo.sharedFenceHandleValue)));
+    newRes.importedFenceHandle = std::move(namedFenceHandle);
     const HRESULT hrFence = device5->OpenSharedFence(newRes.importedFenceHandle.get(), IID_PPV_ARGS(&newRes.sharedFence));
     if (FAILED(hrFence) || !newRes.sharedFence) {
         VirtuaCamLog::LogLine(std::format(
-            L"UpdateProducerConnection failed to open shared fence: pid={} name='{}' handle=0x{:X} hr=0x{:08X}",
+            L"UpdateProducerConnection failed to import shared fence: pid={} name='{}' legacyHandle=0x{:X} hr=0x{:08X}",
             streamInfo.processId,
             streamInfo.fenceName,
             static_cast<unsigned long long>(streamInfo.sharedFenceHandleValue),
@@ -227,6 +228,25 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
             streamInfo.manifestName),
             err);
         return HRESULT_FROM_WIN32(err);
+    }
+
+    std::wstring validatedTextureName;
+    std::wstring validatedFenceName;
+    if (!ValidateBroadcastManifest(
+            newRes.manifestView,
+            streamInfo.processId,
+            streamInfo.brokerNonce,
+            &streamInfo.adapterLuid,
+            validatedTextureName,
+            validatedFenceName) ||
+        validatedTextureName != streamInfo.textureName ||
+        validatedFenceName != streamInfo.fenceName) {
+        ReleaseProducerResource(newRes);
+        VirtuaCamLog::LogLine(std::format(
+            L"UpdateProducerConnection rejected manifest after map: pid={} name='{}'",
+            streamInfo.processId,
+            streamInfo.manifestName));
+        return E_ACCESSDENIED;
     }
 
     newRes.connected = true;
@@ -404,5 +424,6 @@ bool Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
     m_context->CopyResource(m_outputTexture.Get(), m_compositeTexture.Get());
     m_outputFrameValue++;
     m_context4->Signal(m_outputFence.Get(), m_outputFrameValue);
+    m_context->Flush();
     return true;
 }

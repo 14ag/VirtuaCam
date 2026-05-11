@@ -27,17 +27,46 @@ std::wstring GetBrokerFenceName();
 
 enum class VCamCommand;
 
+inline constexpr UINT32 VIRTUACAM_MANIFEST_MAGIC = 0x324D4356u; // VCM2
+inline constexpr UINT32 VIRTUACAM_MANIFEST_VERSION = 2u;
+inline constexpr UINT32 VIRTUACAM_MANIFEST_NAME_CAPACITY = 256u;
+
 struct BroadcastManifest {
+    UINT32 magic;
+    UINT32 version;
+    UINT32 size;
+    DWORD ownerPid;
+    UINT64 brokerNonce;
     UINT64 frameValue;
     UINT width;
     UINT height;
     DXGI_FORMAT format;
     LUID adapterLuid;
-    WCHAR textureName[256];
-    WCHAR fenceName[256];
+    UINT32 textureNameLength;
+    UINT32 fenceNameLength;
+    WCHAR textureName[VIRTUACAM_MANIFEST_NAME_CAPACITY];
+    WCHAR fenceName[VIRTUACAM_MANIFEST_NAME_CAPACITY];
     UINT64 sharedFenceHandleValue;
     volatile VCamCommand command;
 };
+
+bool InitializeBroadcastManifest(
+    BroadcastManifest* manifest,
+    DWORD ownerPid,
+    UINT64 brokerNonce,
+    UINT width,
+    UINT height,
+    DXGI_FORMAT format,
+    const LUID& adapterLuid,
+    const std::wstring& textureName,
+    const std::wstring& fenceName);
+bool ValidateBroadcastManifest(
+    const BroadcastManifest* manifest,
+    DWORD expectedOwnerPid,
+    UINT64 expectedBrokerNonce,
+    const LUID* expectedAdapterLuid,
+    std::wstring& textureName,
+    std::wstring& fenceName);
 
 void TraceMFAttributes(IUnknown* unknown, PCWSTR prefix);
 std::wstring PKSIDENTIFIER_ToString(PKSIDENTIFIER id, ULONG length);

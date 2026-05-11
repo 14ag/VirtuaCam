@@ -395,6 +395,7 @@ namespace BuiltInCaptureProducer
     static std::atomic<UINT64> g_fenceValue = 0;
     static DWORD g_brokerProcessId = 0;
     static UINT64 g_brokerFenceHandleValue = 0;
+    static UINT64 g_brokerNonce = 0;
 
     static ComPtr<ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice> g_winrtD3dDevice;
     static ComPtr<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem> g_captureItem;
@@ -589,6 +590,7 @@ namespace BuiltInCaptureProducer
         g_hSharedTextureHandle = nullptr;
         g_hSharedFenceHandle = nullptr;
         g_brokerFenceHandleValue = 0;
+        g_brokerNonce = 0;
 
         g_sharedD3D11Fence.Reset();
         g_sharedD3D11Texture.Reset();
@@ -872,35 +874,27 @@ namespace BuiltInCaptureProducer
         g_pManifestView = (BroadcastManifest*)MapViewOfFile(g_hManifest, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BroadcastManifest));
         if (!g_pManifestView) return HRESULT_FROM_WIN32(GetLastError());
 
-        ZeroMemory(g_pManifestView, sizeof(BroadcastManifest));
-        g_pManifestView->width = width;
-        g_pManifestView->height = height;
-        g_pManifestView->format = DXGI_FORMAT_B8G8R8A8_UNORM;
-
         ComPtr<IDXGIDevice> dxgi;
         g_d3d11Device.As(&dxgi);
         ComPtr<IDXGIAdapter> adapter;
         dxgi->GetAdapter(&adapter);
         DXGI_ADAPTER_DESC desc{};
         adapter->GetDesc(&desc);
-        g_pManifestView->adapterLuid = desc.AdapterLuid;
-
-        wcscpy_s(g_pManifestView->textureName, texName.c_str());
-        wcscpy_s(g_pManifestView->fenceName, fenceName.c_str());
-        g_pManifestView->sharedFenceHandleValue = 0;
+        RETURN_HR_IF(E_FAIL, !InitializeBroadcastManifest(
+            g_pManifestView,
+            pid,
+            g_brokerNonce,
+            width,
+            height,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            desc.AdapterLuid,
+            texName,
+            fenceName));
 
         ComPtr<IDXGIResource1> r1;
         g_sharedD3D11Texture.As(&r1);
         RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, texName.c_str(), &g_hSharedTextureHandle));
         RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_hSharedFenceHandle));
-        if (g_brokerProcessId != 0) {
-            RETURN_IF_FAILED(DuplicateSharedHandleIntoProcess(g_hSharedFenceHandle, g_brokerProcessId, g_brokerFenceHandleValue));
-            g_pManifestView->sharedFenceHandleValue = g_brokerFenceHandleValue;
-            VirtuaCamLog::LogLine(std::format(
-                L"Producer duplicated shared fence into broker pid={} handle=0x{:X}",
-                g_brokerProcessId,
-                static_cast<unsigned long long>(g_brokerFenceHandleValue)));
-        }
 
         return S_OK;
     }
@@ -993,10 +987,15 @@ namespace BuiltInCaptureProducer
         UINT64 hwndVal = 0;
         std::wstring argsStr = args ? args : L"";
         UINT64 brokerPidValue = 0;
+        UINT64 brokerNonceValue = 0;
         g_brokerProcessId = 0;
         g_brokerFenceHandleValue = 0;
+        g_brokerNonce = 0;
         if (TryGetArgU64(argsStr, L"--broker-pid", brokerPidValue) && brokerPidValue <= MAXDWORD) {
             g_brokerProcessId = static_cast<DWORD>(brokerPidValue);
+        }
+        if (TryGetArgU64(argsStr, L"--broker-nonce", brokerNonceValue)) {
+            g_brokerNonce = brokerNonceValue;
         }
         RETURN_HR_IF(E_INVALIDARG, !TryGetArgU64(argsStr, L"--hwnd", hwndVal));
         HWND hwndToCapture = reinterpret_cast<HWND>(hwndVal);
@@ -1137,6 +1136,7 @@ namespace BuiltInCaptureProducer
 
         UINT64 newFenceValue = g_fenceValue.fetch_add(1) + 1;
         g_d3d11Context4->Signal(g_sharedD3D11Fence.Get(), newFenceValue);
+        g_d3d11Context->Flush();
 
         if (g_pManifestView) {
             InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
@@ -1472,48 +1472,229 @@ static bool IsProcessRunningForService(const wchar_t* processName)
     return found;
 }
 
-static std::wstring GetVirtuaCamExePathFromRegistryOrDefaultForService()
+static bool ReadVirtuaCamRegistryString(const wchar_t* valueName, std::wstring& value)
 {
-    HKEY hKey = nullptr;
-    wchar_t value[MAX_PATH] = {};
-    DWORD valueSize = sizeof(value);
     DWORD valueType = 0;
+    DWORD valueSize = 0;
+    const wchar_t keyPath[] = L"SOFTWARE\\VirtuaCam";
 
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\VirtuaCam", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        const LSTATUS status = RegQueryValueExW(hKey, L"VirtuaCamExe", nullptr, &valueType, reinterpret_cast<LPBYTE>(value), &valueSize);
-        RegCloseKey(hKey);
-        if (status == ERROR_SUCCESS && valueType == REG_SZ && value[0] != L'\0') {
-            return value;
+    LSTATUS status = RegGetValueW(
+        HKEY_LOCAL_MACHINE,
+        keyPath,
+        valueName,
+        RRF_RT_REG_SZ,
+        &valueType,
+        nullptr,
+        &valueSize);
+    if (status != ERROR_SUCCESS || valueSize < sizeof(wchar_t)) {
+        return false;
+    }
+
+    std::vector<wchar_t> buffer((valueSize / sizeof(wchar_t)) + 1);
+    status = RegGetValueW(
+        HKEY_LOCAL_MACHINE,
+        keyPath,
+        valueName,
+        RRF_RT_REG_SZ,
+        &valueType,
+        buffer.data(),
+        &valueSize);
+    if (status != ERROR_SUCCESS || buffer.empty() || buffer[0] == L'\0') {
+        return false;
+    }
+
+    value.assign(buffer.data());
+    return !value.empty();
+}
+
+static bool CanonicalizePathForService(const std::wstring& path, std::wstring& canonical)
+{
+    canonical.clear();
+    if (path.empty()) {
+        return false;
+    }
+
+    DWORD needed = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    if (needed == 0) {
+        return false;
+    }
+
+    std::vector<wchar_t> buffer(needed + 1);
+    DWORD written = GetFullPathNameW(path.c_str(), static_cast<DWORD>(buffer.size()), buffer.data(), nullptr);
+    if (written == 0 || written >= buffer.size()) {
+        return false;
+    }
+
+    canonical.assign(buffer.data(), written);
+    std::replace(canonical.begin(), canonical.end(), L'/', L'\\');
+    return true;
+}
+
+static std::wstring ToLowerForService(std::wstring value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(towlower(ch));
+    });
+    return value;
+}
+
+static bool IsPathUnderDirectoryForService(const std::wstring& path, const std::wstring& directory)
+{
+    std::wstring pathLower = ToLowerForService(path);
+    std::wstring directoryLower = ToLowerForService(directory);
+    while (!directoryLower.empty() &&
+           (directoryLower.back() == L'\\' || directoryLower.back() == L'/')) {
+        directoryLower.pop_back();
+    }
+    directoryLower.push_back(L'\\');
+    return pathLower.rfind(directoryLower, 0) == 0;
+}
+
+static bool ComputeFileSha256HexForService(const std::wstring& path, std::wstring& hashHex)
+{
+    hashHex.clear();
+
+    wil::unique_hfile file(CreateFileW(
+        path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr));
+    if (!file) {
+        return false;
+    }
+
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    DWORD objectLength = 0;
+    DWORD hashLength = 0;
+    DWORD bytesReturned = 0;
+    std::vector<BYTE> hashObject;
+    std::vector<BYTE> digest;
+    BYTE buffer[64 * 1024] = {};
+    bool ok = false;
+
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0))) {
+        goto Cleanup;
+    }
+    if (!BCRYPT_SUCCESS(BCryptGetProperty(
+            algorithm,
+            BCRYPT_OBJECT_LENGTH,
+            reinterpret_cast<PUCHAR>(&objectLength),
+            sizeof(objectLength),
+            &bytesReturned,
+            0)) ||
+        !BCRYPT_SUCCESS(BCryptGetProperty(
+            algorithm,
+            BCRYPT_HASH_LENGTH,
+            reinterpret_cast<PUCHAR>(&hashLength),
+            sizeof(hashLength),
+            &bytesReturned,
+            0)) ||
+        objectLength == 0 ||
+        hashLength == 0) {
+        goto Cleanup;
+    }
+
+    hashObject.resize(objectLength);
+    digest.resize(hashLength);
+    if (!BCRYPT_SUCCESS(BCryptCreateHash(
+            algorithm,
+            &hash,
+            hashObject.data(),
+            static_cast<ULONG>(hashObject.size()),
+            nullptr,
+            0,
+            0))) {
+        goto Cleanup;
+    }
+
+    for (;;) {
+        DWORD bytesRead = 0;
+        if (!ReadFile(file.get(), buffer, sizeof(buffer), &bytesRead, nullptr)) {
+            goto Cleanup;
+        }
+        if (bytesRead == 0) {
+            break;
+        }
+        if (!BCRYPT_SUCCESS(BCryptHashData(hash, buffer, bytesRead, 0))) {
+            goto Cleanup;
         }
     }
 
-    wchar_t modulePath[MAX_PATH] = {};
-    if (!GetModuleFileNameW(nullptr, modulePath, ARRAYSIZE(modulePath))) {
-        return L"VirtuaCam.exe";
+    if (!BCRYPT_SUCCESS(BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0))) {
+        goto Cleanup;
     }
-    std::wstring path = modulePath;
-    size_t slash = path.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) {
-        path.resize(slash + 1);
+
+    hashHex.reserve(digest.size() * 2);
+    for (BYTE byte : digest) {
+        wchar_t hex[3] = {};
+        if (FAILED(StringCchPrintfW(hex, ARRAYSIZE(hex), L"%02X", byte))) {
+            goto Cleanup;
+        }
+        hashHex.append(hex);
     }
-    path += L"VirtuaCam.exe";
-    return path;
+    ok = true;
+
+Cleanup:
+    if (hash) {
+        BCryptDestroyHash(hash);
+    }
+    if (algorithm) {
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+    }
+    if (!ok) {
+        hashHex.clear();
+    }
+    return ok;
+}
+
+static std::wstring GetTrustedVirtuaCamExePathForService()
+{
+    std::wstring installDir;
+    std::wstring exePath;
+    std::wstring expectedHash;
+    if (!ReadVirtuaCamRegistryString(L"InstallDir", installDir) ||
+        !ReadVirtuaCamRegistryString(L"VirtuaCamExe", exePath) ||
+        !ReadVirtuaCamRegistryString(L"VirtuaCamExeSha256", expectedHash)) {
+        VirtuaCamLog::LogLine(L"Watcher service: trusted VirtuaCam registry config missing");
+        return L"";
+    }
+
+    std::wstring canonicalInstallDir;
+    std::wstring canonicalExePath;
+    if (!CanonicalizePathForService(installDir, canonicalInstallDir) ||
+        !CanonicalizePathForService(exePath, canonicalExePath) ||
+        !IsPathUnderDirectoryForService(canonicalExePath, canonicalInstallDir)) {
+        VirtuaCamLog::LogLine(L"Watcher service: VirtuaCamExe failed install-dir trust check");
+        return L"";
+    }
+
+    DWORD attrs = GetFileAttributesW(canonicalExePath.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        VirtuaCamLog::LogLine(L"Watcher service: VirtuaCamExe missing or directory");
+        return L"";
+    }
+
+    std::wstring actualHash;
+    if (!ComputeFileSha256HexForService(canonicalExePath, actualHash) ||
+        _wcsicmp(actualHash.c_str(), expectedHash.c_str()) != 0) {
+        VirtuaCamLog::LogLine(L"Watcher service: VirtuaCamExe SHA-256 trust check failed");
+        return L"";
+    }
+
+    return canonicalExePath;
 }
 
 static bool LaunchVirtuaCamStartupFromService()
 {
-    std::wstring exePath = GetVirtuaCamExePathFromRegistryOrDefaultForService();
-    std::wstring startupArgs = L"/startup";
-
-    wchar_t extraArgs[1024] = {};
-    const DWORD extraArgsLength = GetEnvironmentVariableW(
-        L"VIRTUACAM_STARTUP_ARGS",
-        extraArgs,
-        ARRAYSIZE(extraArgs));
-    if (extraArgsLength > 0 && extraArgsLength < ARRAYSIZE(extraArgs)) {
-        startupArgs += L" ";
-        startupArgs += extraArgs;
+    std::wstring exePath = GetTrustedVirtuaCamExePathForService();
+    if (exePath.empty()) {
+        return false;
     }
+    std::wstring startupArgs = L"/startup";
 
     const DWORD sessionId = WTSGetActiveConsoleSessionId();
     if (sessionId == 0xFFFFFFFF) {
@@ -1757,6 +1938,7 @@ namespace BuiltInCameraProducer
     static std::atomic<UINT64> g_fenceValue = 0;
     static DWORD g_brokerProcessId = 0;
     static UINT64 g_brokerFenceHandleValue = 0;
+    static UINT64 g_brokerNonce = 0;
 
     static ComPtr<IMFSourceReader> g_sourceReader;
     static long g_videoWidth = 0;
@@ -1883,35 +2065,27 @@ namespace BuiltInCameraProducer
         g_pManifestView = (BroadcastManifest*)MapViewOfFile(g_hManifest, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(BroadcastManifest));
         if (!g_pManifestView) return HRESULT_FROM_WIN32(GetLastError());
 
-        ZeroMemory(g_pManifestView, sizeof(BroadcastManifest));
-        g_pManifestView->width = width;
-        g_pManifestView->height = height;
-        g_pManifestView->format = DXGI_FORMAT_B8G8R8A8_UNORM;
-
         ComPtr<IDXGIDevice> dxgi;
         g_d3d11Device.As(&dxgi);
         ComPtr<IDXGIAdapter> adapter;
         dxgi->GetAdapter(&adapter);
         DXGI_ADAPTER_DESC desc{};
         adapter->GetDesc(&desc);
-        g_pManifestView->adapterLuid = desc.AdapterLuid;
-
-        wcscpy_s(g_pManifestView->textureName, texName.c_str());
-        wcscpy_s(g_pManifestView->fenceName, fenceName.c_str());
-        g_pManifestView->sharedFenceHandleValue = 0;
+        RETURN_HR_IF(E_FAIL, !InitializeBroadcastManifest(
+            g_pManifestView,
+            pid,
+            g_brokerNonce,
+            width,
+            height,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            desc.AdapterLuid,
+            texName,
+            fenceName));
 
         ComPtr<IDXGIResource1> r1;
         g_sharedD3D11Texture.As(&r1);
         RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, texName.c_str(), &g_hSharedTextureHandle));
         RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_hSharedFenceHandle));
-        if (g_brokerProcessId != 0) {
-            RETURN_IF_FAILED(DuplicateSharedHandleIntoProcess(g_hSharedFenceHandle, g_brokerProcessId, g_brokerFenceHandleValue));
-            g_pManifestView->sharedFenceHandleValue = g_brokerFenceHandleValue;
-            VirtuaCamLog::LogLine(std::format(
-                L"Camera producer duplicated shared fence into broker pid={} handle=0x{:X}",
-                g_brokerProcessId,
-                static_cast<unsigned long long>(g_brokerFenceHandleValue)));
-        }
 
         return S_OK;
     }
@@ -1974,10 +2148,15 @@ namespace BuiltInCameraProducer
     {
         std::wstring argsStr = args ? args : L"";
         UINT64 brokerPidValue = 0;
+        UINT64 brokerNonceValue = 0;
         g_brokerProcessId = 0;
         g_brokerFenceHandleValue = 0;
+        g_brokerNonce = 0;
         if (TryGetArgU64(argsStr, L"--broker-pid", brokerPidValue) && brokerPidValue <= MAXDWORD) {
             g_brokerProcessId = static_cast<DWORD>(brokerPidValue);
+        }
+        if (TryGetArgU64(argsStr, L"--broker-nonce", brokerNonceValue)) {
+            g_brokerNonce = brokerNonceValue;
         }
 
         if (!g_mfStarted) {
@@ -2060,6 +2239,7 @@ namespace BuiltInCameraProducer
 
         UINT64 newFenceValue = g_fenceValue.fetch_add(1) + 1;
         g_d3d11Context4->Signal(g_sharedD3D11Fence.Get(), newFenceValue);
+        g_d3d11Context->Flush();
         if (g_pManifestView) {
             InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
         }
@@ -2095,6 +2275,7 @@ namespace BuiltInCameraProducer
         g_hSharedFenceHandle = nullptr;
         g_brokerProcessId = 0;
         g_brokerFenceHandleValue = 0;
+        g_brokerNonce = 0;
 
         g_sharedD3D11Fence.Reset();
         g_sharedD3D11Texture.Reset();

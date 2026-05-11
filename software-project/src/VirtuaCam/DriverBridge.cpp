@@ -40,7 +40,7 @@ namespace
     const GUID kCaptureCategory = { 0x65e8773d, 0x8f56, 0x11d0, { 0xa3, 0xb9, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96 } };
     constexpr const wchar_t* kVideoCameraCategoryGuid = L"{e5323777-f976-4f5b-9b55-b94699c46e44}";
     constexpr const wchar_t* kCaptureCategoryGuid = L"{65e8773d-8f56-11d0-a3b9-00a0c9223196}";
-    constexpr ULONG kIoctlKsProperty = CTL_CODE(FILE_DEVICE_KS, 0x000, METHOD_NEITHER, FILE_ANY_ACCESS);
+    constexpr ULONG kIoctlKsProperty = IOCTL_KS_PROPERTY;
 
     bool DriverFrameDumpEnabled()
     {
