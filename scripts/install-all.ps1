@@ -292,6 +292,31 @@ function Install-WatcherService {
     Write-Success "Watcher service installed and running: $watcherServiceName"
 }
 
+function Protect-VirtuaCamRegistryKey {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $acl = Get-Acl -Path $Path
+    $acl.SetAccessRuleProtection($true, $false)
+
+    foreach ($rule in @($acl.Access)) {
+        [void]$acl.RemoveAccessRule($rule)
+    }
+
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit
+    $propagation = [System.Security.AccessControl.PropagationFlags]::None
+    $rules = @(
+        [System.Security.AccessControl.RegistryAccessRule]::new("SYSTEM", "FullControl", $inheritance, $propagation, "Allow"),
+        [System.Security.AccessControl.RegistryAccessRule]::new("BUILTIN\Administrators", "FullControl", $inheritance, $propagation, "Allow"),
+        [System.Security.AccessControl.RegistryAccessRule]::new("BUILTIN\Users", "ReadKey", $inheritance, $propagation, "Allow")
+    )
+
+    foreach ($rule in $rules) {
+        $acl.AddAccessRule($rule)
+    }
+
+    Set-Acl -Path $Path -AclObject $acl
+}
+
 function Uninstall-WatcherService {
     $service = Get-Service -Name $watcherServiceName -ErrorAction SilentlyContinue
     if (-not $service) {
@@ -421,12 +446,20 @@ if (-not $SkipDllRegister) {
 
 Write-Step "Configure registry and startup from output"
 New-Item -Path $virtuaCamRegPath -Force | Out-Null
-Set-ItemProperty -Path $virtuaCamRegPath -Name "InstallDir" -Value $installDir
-Set-ItemProperty -Path $virtuaCamRegPath -Name "VirtuaCamExe" -Value $virtuaCamExe
-Set-ItemProperty -Path $virtuaCamRegPath -Name "ProcessExe" -Value $processExe
+$installDirCanonical = [System.IO.Path]::GetFullPath($installDir)
+$virtuaCamExeCanonical = [System.IO.Path]::GetFullPath($virtuaCamExe)
+$processExeCanonical = [System.IO.Path]::GetFullPath($processExe)
+$virtuaCamExeHash = (Get-FileHash -LiteralPath $virtuaCamExeCanonical -Algorithm SHA256).Hash
+$processExeHash = (Get-FileHash -LiteralPath $processExeCanonical -Algorithm SHA256).Hash
+Set-ItemProperty -Path $virtuaCamRegPath -Name "InstallDir" -Value $installDirCanonical
+Set-ItemProperty -Path $virtuaCamRegPath -Name "VirtuaCamExe" -Value $virtuaCamExeCanonical
+Set-ItemProperty -Path $virtuaCamRegPath -Name "ProcessExe" -Value $processExeCanonical
+Set-ItemProperty -Path $virtuaCamRegPath -Name "VirtuaCamExeSha256" -Value $virtuaCamExeHash
+Set-ItemProperty -Path $virtuaCamRegPath -Name "ProcessExeSha256" -Value $processExeHash
+Protect-VirtuaCamRegistryKey -Path $virtuaCamRegPath
 Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCamProcess" -ErrorAction SilentlyContinue
 Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCam" -ErrorAction SilentlyContinue
-Install-WatcherService -ProcessPath $processExe
+Install-WatcherService -ProcessPath $processExeCanonical
 Write-Success "Configured HKLM\SOFTWARE\VirtuaCam and watcher service startup"
 
 Write-Host "`n============================================================" -ForegroundColor Green

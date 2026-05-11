@@ -44,6 +44,11 @@ namespace
         return IoValidateDeviceIoControlAccess(Irp, desiredAccess);
     }
 
+    bool ShouldProbePropertyData(_In_ PIRP Irp, _In_opt_ PVOID Data)
+    {
+        return Irp->RequestorMode != KernelMode && Data == Irp->UserBuffer;
+    }
+
     NTSTATUS CopyPropertyDataFromCaller(
         _In_ PIRP Irp,
         _In_reads_bytes_(length) PVOID Data,
@@ -57,7 +62,7 @@ namespace
         }
 
         __try {
-            if (Irp->RequestorMode != KernelMode) {
+            if (ShouldProbePropertyData(Irp, Data)) {
                 ProbeForRead(Data, length, alignment);
             }
             RtlCopyMemory(destination, Data, length);
@@ -82,7 +87,7 @@ namespace
         }
 
         __try {
-            if (Irp->RequestorMode != KernelMode) {
+            if (ShouldProbePropertyData(Irp, Data)) {
                 ProbeForWrite(Data, length, alignment);
             }
             RtlCopyMemory(Data, source, length);

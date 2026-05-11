@@ -153,28 +153,6 @@ namespace
         return found;
     }
 
-    HRESULT DuplicateSharedHandleIntoProcess(HANDLE sourceHandle, DWORD targetProcessId, UINT64& duplicatedHandleValue)
-    {
-        duplicatedHandleValue = 0;
-        RETURN_HR_IF(E_INVALIDARG, !sourceHandle || targetProcessId == 0);
-
-        wil::unique_handle targetProcess(OpenProcess(PROCESS_DUP_HANDLE, FALSE, targetProcessId));
-        RETURN_LAST_ERROR_IF(!targetProcess);
-
-        HANDLE duplicatedHandle = nullptr;
-        RETURN_LAST_ERROR_IF(!DuplicateHandle(
-            GetCurrentProcess(),
-            sourceHandle,
-            targetProcess.get(),
-            &duplicatedHandle,
-            0,
-            FALSE,
-            DUPLICATE_SAME_ACCESS));
-
-        duplicatedHandleValue = static_cast<UINT64>(reinterpret_cast<UINT_PTR>(duplicatedHandle));
-        return S_OK;
-    }
-
     constexpr UINT kProducerCanvasWidth = 1920;
     constexpr UINT kProducerCanvasHeight = 1080;
 
@@ -393,8 +371,6 @@ namespace BuiltInCaptureProducer
     static HANDLE g_hManifest = nullptr;
     static BroadcastManifest* g_pManifestView = nullptr;
     static std::atomic<UINT64> g_fenceValue = 0;
-    static DWORD g_brokerProcessId = 0;
-    static UINT64 g_brokerFenceHandleValue = 0;
     static UINT64 g_brokerNonce = 0;
 
     static ComPtr<ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice> g_winrtD3dDevice;
@@ -589,7 +565,6 @@ namespace BuiltInCaptureProducer
         if (g_hSharedFenceHandle) CloseHandle(g_hSharedFenceHandle);
         g_hSharedTextureHandle = nullptr;
         g_hSharedFenceHandle = nullptr;
-        g_brokerFenceHandleValue = 0;
         g_brokerNonce = 0;
 
         g_sharedD3D11Fence.Reset();
@@ -986,14 +961,8 @@ namespace BuiltInCaptureProducer
     {
         UINT64 hwndVal = 0;
         std::wstring argsStr = args ? args : L"";
-        UINT64 brokerPidValue = 0;
         UINT64 brokerNonceValue = 0;
-        g_brokerProcessId = 0;
-        g_brokerFenceHandleValue = 0;
         g_brokerNonce = 0;
-        if (TryGetArgU64(argsStr, L"--broker-pid", brokerPidValue) && brokerPidValue <= MAXDWORD) {
-            g_brokerProcessId = static_cast<DWORD>(brokerPidValue);
-        }
         if (TryGetArgU64(argsStr, L"--broker-nonce", brokerNonceValue)) {
             g_brokerNonce = brokerNonceValue;
         }
@@ -1166,7 +1135,6 @@ namespace BuiltInCaptureProducer
         g_captureItem.Reset();
         g_winrtD3dDevice.Reset();
         ResetSharedOutputs();
-        g_brokerProcessId = 0;
         g_captureTargetHwnd = nullptr;
         g_captureBackend = CaptureBackend::None;
 
@@ -1936,8 +1904,6 @@ namespace BuiltInCameraProducer
     static HANDLE g_hManifest = nullptr;
     static BroadcastManifest* g_pManifestView = nullptr;
     static std::atomic<UINT64> g_fenceValue = 0;
-    static DWORD g_brokerProcessId = 0;
-    static UINT64 g_brokerFenceHandleValue = 0;
     static UINT64 g_brokerNonce = 0;
 
     static ComPtr<IMFSourceReader> g_sourceReader;
@@ -2147,14 +2113,8 @@ namespace BuiltInCameraProducer
     HRESULT InitializeProducer(const wchar_t* args)
     {
         std::wstring argsStr = args ? args : L"";
-        UINT64 brokerPidValue = 0;
         UINT64 brokerNonceValue = 0;
-        g_brokerProcessId = 0;
-        g_brokerFenceHandleValue = 0;
         g_brokerNonce = 0;
-        if (TryGetArgU64(argsStr, L"--broker-pid", brokerPidValue) && brokerPidValue <= MAXDWORD) {
-            g_brokerProcessId = static_cast<DWORD>(brokerPidValue);
-        }
         if (TryGetArgU64(argsStr, L"--broker-nonce", brokerNonceValue)) {
             g_brokerNonce = brokerNonceValue;
         }
@@ -2273,8 +2233,6 @@ namespace BuiltInCameraProducer
         if (g_hSharedFenceHandle) CloseHandle(g_hSharedFenceHandle);
         g_hSharedTextureHandle = nullptr;
         g_hSharedFenceHandle = nullptr;
-        g_brokerProcessId = 0;
-        g_brokerFenceHandleValue = 0;
         g_brokerNonce = 0;
 
         g_sharedD3D11Fence.Reset();

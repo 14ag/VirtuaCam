@@ -496,6 +496,12 @@ int wmain(int argc, wchar_t** argv) {
         if (mode == L"rgb24" && cap.subtype != MEDIASUBTYPE_RGB24) {
             continue;
         }
+        if (mode == L"rgb32" && cap.subtype != MEDIASUBTYPE_RGB32) {
+            continue;
+        }
+        if (mode == L"nv12" && cap.subtype != MEDIASUBTYPE_NV12) {
+            continue;
+        }
         if (mode == L"yuy2" && cap.subtype != MEDIASUBTYPE_YUY2) {
             continue;
         }
