@@ -47,7 +47,8 @@ namespace
     constexpr wchar_t kClientRequestEventName[] = L"VirtuaCamClientRequest";
     constexpr wchar_t kGlobalClientRequestEventName[] = L"Global\\VirtuaCamClientRequest";
     constexpr DWORD kWatcherOpenRetryMs = 1000;
-    constexpr DWORD kProducerIdleWaitMs = 1;
+    constexpr DWORD kProducerFrameIntervalMs = 33;
+    constexpr DWORD kProducerIdleBackoffMaxMs = 250;
 
     struct HString
     {
@@ -405,8 +406,105 @@ namespace BuiltInCaptureProducer
     static CaptureBackend g_captureBackend = CaptureBackend::None;
     static UINT g_captureWidth = 0;
     static UINT g_captureHeight = 0;
-    static std::vector<BYTE> g_gdiFrame;
     static bool g_roInitialized = false;
+
+    struct GdiCaptureCache
+    {
+        HWND hwnd = nullptr;
+        UINT width = 0;
+        UINT height = 0;
+        HDC windowDc = nullptr;
+        HDC memoryDc = nullptr;
+        HBITMAP dib = nullptr;
+        HGDIOBJ oldBitmap = nullptr;
+        void* bits = nullptr;
+
+        void Reset()
+        {
+            if (memoryDc && oldBitmap && oldBitmap != HGDI_ERROR) {
+                SelectObject(memoryDc, oldBitmap);
+            }
+            if (dib) {
+                DeleteObject(dib);
+            }
+            if (memoryDc) {
+                DeleteDC(memoryDc);
+            }
+            if (windowDc && hwnd) {
+                ReleaseDC(hwnd, windowDc);
+            }
+
+            hwnd = nullptr;
+            width = 0;
+            height = 0;
+            windowDc = nullptr;
+            memoryDc = nullptr;
+            dib = nullptr;
+            oldBitmap = nullptr;
+            bits = nullptr;
+        }
+
+        HRESULT Ensure(HWND targetHwnd, UINT targetWidth, UINT targetHeight)
+        {
+            RETURN_HR_IF_NULL(E_HANDLE, targetHwnd);
+            RETURN_HR_IF(E_INVALIDARG, targetWidth == 0 || targetHeight == 0);
+
+            if (hwnd == targetHwnd &&
+                width == targetWidth &&
+                height == targetHeight &&
+                windowDc &&
+                memoryDc &&
+                dib &&
+                bits) {
+                return S_OK;
+            }
+
+            Reset();
+            hwnd = targetHwnd;
+            width = targetWidth;
+            height = targetHeight;
+
+            windowDc = GetDC(hwnd);
+            if (!windowDc) {
+                const DWORD err = GetLastError();
+                Reset();
+                return HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
+            }
+
+            memoryDc = CreateCompatibleDC(windowDc);
+            if (!memoryDc) {
+                const DWORD err = GetLastError();
+                Reset();
+                return HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
+            }
+
+            BITMAPINFO bmi{};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = static_cast<LONG>(width);
+            bmi.bmiHeader.biHeight = -static_cast<LONG>(height);
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+
+            dib = CreateDIBSection(windowDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+            if (!dib || !bits) {
+                const DWORD err = GetLastError();
+                Reset();
+                return HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
+            }
+
+            oldBitmap = SelectObject(memoryDc, dib);
+            if (!oldBitmap || oldBitmap == HGDI_ERROR) {
+                const DWORD err = GetLastError();
+                Reset();
+                return HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
+            }
+
+            return S_OK;
+        }
+    };
+
+    static GdiCaptureCache g_gdiCache;
 
     constexpr UINT kPrintWindowFlagsClientOnly = 0x00000001;
     constexpr UINT kPrintWindowFlagsRenderFullContent = 0x00000002; // PW_RENDERFULLCONTENT (Win8.1+)
@@ -510,7 +608,7 @@ namespace BuiltInCaptureProducer
         g_canvasConstants.Reset();
         g_captureWidth = 0;
         g_captureHeight = 0;
-        g_gdiFrame.clear();
+        g_gdiCache.Reset();
     }
 
     // Accessor to unwrap IDirect3DSurface -> underlying D3D11 texture.
@@ -704,7 +802,7 @@ namespace BuiltInCaptureProducer
         g_captureWidth = static_cast<UINT>(width);
         g_captureHeight = static_cast<UINT>(height);
         RETURN_IF_FAILED(EnsureCaptureSourceTexture(g_captureWidth, g_captureHeight));
-        g_gdiFrame.resize(static_cast<size_t>(g_captureWidth) * static_cast<size_t>(g_captureHeight) * 4);
+        RETURN_IF_FAILED(g_gdiCache.Ensure(hwndToCapture, g_captureWidth, g_captureHeight));
         return S_OK;
     }
 
@@ -826,60 +924,22 @@ namespace BuiltInCaptureProducer
             VirtuaCamLog::LogLine(std::format(L"PrintWindow source resized: {}x{}", width, height));
         }
 
-        HDC windowDc = GetDC(g_captureTargetHwnd);
-        if (!windowDc) {
-            return HRESULT_FROM_WIN32(GetLastError());
-        }
+        RETURN_IF_FAILED(g_gdiCache.Ensure(g_captureTargetHwnd, width, height));
 
-        HDC memoryDc = CreateCompatibleDC(windowDc);
-        if (!memoryDc) {
-            ReleaseDC(g_captureTargetHwnd, windowDc);
-            return HRESULT_FROM_WIN32(GetLastError());
-        }
-
-        BITMAPINFO bmi{};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = static_cast<LONG>(width);
-        bmi.bmiHeader.biHeight = -static_cast<LONG>(height);
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        void* bits = nullptr;
-        HBITMAP dib = CreateDIBSection(windowDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-        if (!dib || !bits) {
-            const DWORD err = GetLastError();
-            if (dib) {
-                DeleteObject(dib);
-            }
-            DeleteDC(memoryDc);
-            ReleaseDC(g_captureTargetHwnd, windowDc);
-            return HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
-        }
-
-        HGDIOBJ oldBitmap = SelectObject(memoryDc, dib);
-        BOOL copied = PrintWindow(g_captureTargetHwnd, memoryDc, kPrintWindowFlagsClientFullContent);
+        BOOL copied = PrintWindow(g_captureTargetHwnd, g_gdiCache.memoryDc, kPrintWindowFlagsClientFullContent);
 
         HRESULT hr = S_OK;
         if (!copied) {
-            hr = HRESULT_FROM_WIN32(GetLastError());
-        } else if (IsProbablyAllBlackBgrx(reinterpret_cast<const BYTE*>(bits), width, height)) {
+            const DWORD err = GetLastError();
+            hr = HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
+        } else if (IsProbablyAllBlackBgrx(reinterpret_cast<const BYTE*>(g_gdiCache.bits), width, height)) {
             hr = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
         } else {
-            const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
-            if (g_gdiFrame.size() != byteCount) {
-                g_gdiFrame.resize(byteCount);
-            }
-            memcpy(g_gdiFrame.data(), bits, byteCount);
             RETURN_IF_FAILED(EnsureCaptureSourceTexture(width, height));
-            g_d3d11Context->UpdateSubresource(g_sourceD3D11Texture.Get(), 0, nullptr, g_gdiFrame.data(), width * 4, 0);
+            g_d3d11Context->UpdateSubresource(g_sourceD3D11Texture.Get(), 0, nullptr, g_gdiCache.bits, width * 4, 0);
             hr = RenderTextureToCanvas(g_sourceD3D11Texture.Get(), width, height);
         }
 
-        SelectObject(memoryDc, oldBitmap);
-        DeleteObject(dib);
-        DeleteDC(memoryDc);
-        ReleaseDC(g_captureTargetHwnd, windowDc);
         return hr;
     }
 
@@ -902,67 +962,29 @@ namespace BuiltInCaptureProducer
             VirtuaCamLog::LogLine(std::format(L"BitBlt source resized: {}x{}", width, height));
         }
 
-        HDC windowDc = GetDC(g_captureTargetHwnd);
-        if (!windowDc) {
-            return HRESULT_FROM_WIN32(GetLastError());
-        }
+        RETURN_IF_FAILED(g_gdiCache.Ensure(g_captureTargetHwnd, width, height));
 
-        HDC memoryDc = CreateCompatibleDC(windowDc);
-        if (!memoryDc) {
-            ReleaseDC(g_captureTargetHwnd, windowDc);
-            return HRESULT_FROM_WIN32(GetLastError());
-        }
-
-        BITMAPINFO bmi{};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = static_cast<LONG>(width);
-        bmi.bmiHeader.biHeight = -static_cast<LONG>(height);
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        void* bits = nullptr;
-        HBITMAP dib = CreateDIBSection(windowDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-        if (!dib || !bits) {
-            const DWORD err = GetLastError();
-            if (dib) {
-                DeleteObject(dib);
-            }
-            DeleteDC(memoryDc);
-            ReleaseDC(g_captureTargetHwnd, windowDc);
-            return HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
-        }
-
-        HGDIOBJ oldBitmap = SelectObject(memoryDc, dib);
         const BOOL copied = BitBlt(
-            memoryDc,
+            g_gdiCache.memoryDc,
             0,
             0,
             static_cast<int>(width),
             static_cast<int>(height),
-            windowDc,
+            g_gdiCache.windowDc,
             0,
             0,
             SRCCOPY | CAPTUREBLT);
 
         HRESULT hr = S_OK;
         if (!copied) {
-            hr = HRESULT_FROM_WIN32(GetLastError());
+            const DWORD err = GetLastError();
+            hr = HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
         } else {
-            const size_t byteCount = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
-            if (g_gdiFrame.size() != byteCount) {
-                g_gdiFrame.resize(byteCount);
-            }
-            memcpy(g_gdiFrame.data(), bits, byteCount);
             RETURN_IF_FAILED(EnsureCaptureSourceTexture(width, height));
-            g_d3d11Context->UpdateSubresource(g_sourceD3D11Texture.Get(), 0, nullptr, g_gdiFrame.data(), width * 4, 0);
+            g_d3d11Context->UpdateSubresource(g_sourceD3D11Texture.Get(), 0, nullptr, g_gdiCache.bits, width * 4, 0);
             hr = RenderTextureToCanvas(g_sourceD3D11Texture.Get(), width, height);
         }
 
-        SelectObject(memoryDc, oldBitmap);
-        DeleteObject(dib);
-        DeleteDC(memoryDc);
-        ReleaseDC(g_captureTargetHwnd, windowDc);
         return hr;
     }
 
@@ -1069,36 +1091,36 @@ namespace BuiltInCaptureProducer
         return S_OK;
     }
 
-    void ProcessFrame()
+    bool ProcessFrame()
     {
-        if (!g_isCapturing) return;
+        if (!g_isCapturing) return false;
 
         if (g_captureBackend == CaptureBackend::PrintWindow) {
-            if (FAILED(CapturePrintWindowFrame())) return;
+            if (FAILED(CapturePrintWindowFrame())) return false;
         } else if (g_captureBackend == CaptureBackend::BitBlt) {
-            if (FAILED(CaptureBitBltFrame())) return;
+            if (FAILED(CaptureBitBltFrame())) return false;
         } else {
             // WGC path
-            if (!g_framePool) return;
+            if (!g_framePool) return false;
 
             ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFrame> frame;
             if (FAILED(g_framePool->TryGetNextFrame(frame.ReleaseAndGetAddressOf())) || !frame) {
-                return;
+                return false;
             }
 
             ComPtr<ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface> surface;
             if (FAILED(frame->get_Surface(surface.ReleaseAndGetAddressOf())) || !surface) {
-                return;
+                return false;
             }
 
             ComPtr<IDirect3DDxgiInterfaceAccess> surfaceAccess;
             if (FAILED(surface.As(&surfaceAccess)) || !surfaceAccess) {
-                return;
+                return false;
             }
 
             ComPtr<ID3D11Texture2D> frameTexture;
             if (FAILED(surfaceAccess->GetInterface(IID_PPV_ARGS(&frameTexture))) || !frameTexture) {
-                return;
+                return false;
             }
 
             D3D11_TEXTURE2D_DESC frameDesc = {};
@@ -1109,7 +1131,7 @@ namespace BuiltInCaptureProducer
                 VirtuaCamLog::LogLine(std::format(L"WGC source resized: {}x{}", g_captureWidth, g_captureHeight));
             }
             if (FAILED(RenderTextureToCanvas(frameTexture.Get(), frameDesc.Width, frameDesc.Height))) {
-                return;
+                return false;
             }
         }
 
@@ -1130,6 +1152,7 @@ namespace BuiltInCaptureProducer
                 newFenceValue));
             g_loggedFirstFrame = true;
         }
+        return true;
     }
 
     void ShutdownProducer()
@@ -2006,25 +2029,25 @@ namespace BuiltInCameraProducer
         return S_OK;
     }
 
-    void ProcessFrame()
+    bool ProcessFrame()
     {
-        if (!g_isCapturing || !g_sourceReader) return;
+        if (!g_isCapturing || !g_sourceReader) return false;
 
         ComPtr<IMFSample> sample;
         DWORD streamFlags = 0;
         LONGLONG timestamp = 0;
         HRESULT hr = g_sourceReader->ReadSample((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, NULL, &streamFlags, &timestamp, &sample);
-        if (FAILED(hr) || !sample) return;
+        if (FAILED(hr) || !sample) return false;
 
         ComPtr<IMFMediaBuffer> buffer;
-        if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer) return;
+        if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer) return false;
 
         BYTE* data = nullptr;
         DWORD length = 0;
-        if (FAILED(buffer->Lock(&data, NULL, &length)) || !data) return;
+        if (FAILED(buffer->Lock(&data, NULL, &length)) || !data) return false;
         if (FAILED(EnsureCameraSourceTexture(static_cast<UINT>(g_videoWidth), static_cast<UINT>(g_videoHeight)))) {
             (void)buffer->Unlock();
-            return;
+            return false;
         }
         g_d3d11Context->UpdateSubresource(g_sourceD3D11Texture.Get(), 0, NULL, data, g_videoWidth * 4, 0);
         (void)buffer->Unlock();
@@ -2032,7 +2055,7 @@ namespace BuiltInCameraProducer
                 g_sourceD3D11Texture.Get(),
                 static_cast<UINT>(g_videoWidth),
                 static_cast<UINT>(g_videoHeight)))) {
-            return;
+            return false;
         }
 
         UINT64 newFenceValue = g_fenceValue.fetch_add(1) + 1;
@@ -2049,6 +2072,7 @@ namespace BuiltInCameraProducer
                 newFenceValue));
             g_loggedFirstFrame = true;
         }
+        return true;
     }
 
     void ShutdownProducer()
@@ -2197,6 +2221,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
     VirtuaCamLog::LogLine(std::format(L"InitializeProducer success: type={} args={}", producerType, producerArgs));
     
     MSG msg = {};
+    ULONGLONG nextProcessTick = GetTickCount64();
+    DWORD processIntervalMs = kProducerFrameIntervalMs;
     while (msg.message != WM_QUIT)
     {
         if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
@@ -2206,14 +2232,28 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
         }
         else
         {
+            const ULONGLONG now = GetTickCount64();
+            const DWORD waitMs = (now >= nextProcessTick)
+                ? 0
+                : static_cast<DWORD>(std::min<ULONGLONG>(
+                    nextProcessTick - now,
+                    processIntervalMs));
             DWORD waitResult = MsgWaitForMultipleObjectsEx(
                 0,
                 nullptr,
-                kProducerIdleWaitMs,
+                waitMs,
                 QS_ALLINPUT,
                 MWMO_INPUTAVAILABLE);
             if (waitResult == WAIT_TIMEOUT) {
-                module.Process();
+                const ULONGLONG processNow = GetTickCount64();
+                if (processNow < nextProcessTick) {
+                    continue;
+                }
+                const bool producedFrame = module.Process();
+                processIntervalMs = producedFrame
+                    ? kProducerFrameIntervalMs
+                    : std::min<DWORD>(kProducerIdleBackoffMaxMs, std::max<DWORD>(kProducerFrameIntervalMs, processIntervalMs * 2));
+                nextProcessTick = processNow + processIntervalMs;
             }
         }
     }

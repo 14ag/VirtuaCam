@@ -38,6 +38,15 @@ static HANDLE g_sharedFenceHandle_Out = nullptr;
 static std::vector<DWORD> g_producerPriorityList;
 static std::mutex g_producerListMutex;
 static bool g_isGridMode = false;
+static std::vector<VirtuaCam::DiscoveredSharedStream> g_cachedStreams;
+static std::vector<VirtuaCam::DiscoveredSharedStream> g_streamsToMux;
+static bool g_haveDiscoverySnapshot = false;
+static bool g_forceDiscovery = true;
+static bool g_forceComposite = true;
+static ULONGLONG g_nextDiscoveryTickMs = 0;
+static ULONGLONG g_nextDefaultRefreshTickMs = 0;
+static constexpr ULONGLONG kDiscoveryIntervalMs = 1000;
+static constexpr ULONGLONG kDefaultRefreshMs = 1000;
 
 static BrokerState g_brokerState = BrokerState::Searching;
 static BrokerState g_lastLoggedBrokerState = static_cast<BrokerState>(-1);
@@ -163,6 +172,13 @@ extern "C" {
         ShutdownSharing();
         if (g_multiplexer) g_multiplexer->Shutdown();
         if (g_discovery) g_discovery->Teardown();
+        g_cachedStreams.clear();
+        g_streamsToMux.clear();
+        g_haveDiscoverySnapshot = false;
+        g_forceDiscovery = true;
+        g_forceComposite = true;
+        g_nextDiscoveryTickMs = 0;
+        g_nextDefaultRefreshTickMs = 0;
         g_device.Reset();
         g_multiplexer.reset();
         g_discovery.reset();
@@ -174,47 +190,69 @@ extern "C" {
     BROKER_API void UpdateProducerPriorityList(const DWORD* pids, int count) {
         std::lock_guard<std::mutex> lock(g_producerListMutex);
         g_producerPriorityList.assign(pids, pids + count);
+        g_forceDiscovery = true;
+        g_forceComposite = true;
     }
     
     BROKER_API void SetCompositingMode(bool isGrid) {
+        if (g_isGridMode != isGrid) {
+            g_forceComposite = true;
+        }
         g_isGridMode = isGrid;
     }
 
     BROKER_API void RenderBrokerFrame() {
         if (!g_discovery || !g_multiplexer || !g_pManifestView_Out) return;
         
-        g_discovery->DiscoverStreams();
-        const auto& allStreams = g_discovery->GetDiscoveredStreams();
+        const ULONGLONG now = GetTickCount64();
+        if (g_forceDiscovery || !g_haveDiscoverySnapshot || now >= g_nextDiscoveryTickMs) {
+            g_discovery->DiscoverStreams();
+            g_cachedStreams = g_discovery->GetDiscoveredStreams();
+            g_haveDiscoverySnapshot = true;
+            g_forceDiscovery = false;
+            g_nextDiscoveryTickMs = now + kDiscoveryIntervalMs;
+        }
+        const auto& allStreams = g_cachedStreams;
         
-        std::vector<VirtuaCam::DiscoveredSharedStream> streamsToMux;
+        g_streamsToMux.clear();
         size_t activeProducerPidCount = 0;
+        bool isGridMode = false;
+        bool forceComposite = false;
         
         {
             std::lock_guard<std::mutex> lock(g_producerListMutex);
-            if (g_isGridMode) {
-                streamsToMux = allStreams;
+            isGridMode = g_isGridMode;
+            forceComposite = g_forceComposite;
+            g_forceComposite = false;
+            if (isGridMode) {
+                g_streamsToMux = allStreams;
                 activeProducerPidCount = allStreams.size();
             } else {
-                streamsToMux.reserve(g_producerPriorityList.size());
+                g_streamsToMux.reserve(g_producerPriorityList.size());
                 for (DWORD pid : g_producerPriorityList) {
                     if (pid == 0) {
-                        streamsToMux.push_back({});
+                        g_streamsToMux.push_back({});
                     } else {
                         auto it = std::find_if(allStreams.begin(), allStreams.end(), 
                             [pid](const auto& s){ return s.processId == pid; });
                         
                         if (it != allStreams.end()) {
-                            streamsToMux.push_back(*it);
+                            g_streamsToMux.push_back(*it);
                             activeProducerPidCount++;
                         } else {
-                            streamsToMux.push_back({});
+                            g_streamsToMux.push_back({});
                         }
                     }
                 }
             }
         }
 
-        if(!streamsToMux.empty() && std::any_of(streamsToMux.begin(), streamsToMux.end(), [](const auto& s){ return s.processId != 0;})) {
+        const bool hasActiveProducer = !g_streamsToMux.empty() && std::any_of(
+            g_streamsToMux.begin(),
+            g_streamsToMux.end(),
+            [](const auto& s) { return s.processId != 0; });
+
+        if(hasActiveProducer) {
             g_brokerState = BrokerState::Connected;
         } else if (!allStreams.empty()) {
              g_brokerState = BrokerState::Searching;
@@ -223,8 +261,15 @@ extern "C" {
         }
 
         LogBrokerStateTransition(g_brokerState, allStreams.size(), activeProducerPidCount);
-        
-        g_multiplexer->CompositeFrames(streamsToMux, g_isGridMode);
+
+        if (!hasActiveProducer && now >= g_nextDefaultRefreshTickMs) {
+            forceComposite = true;
+            g_nextDefaultRefreshTickMs = now + kDefaultRefreshMs;
+        }
+
+        if (!g_multiplexer->CompositeFrames(g_streamsToMux, isGridMode, forceComposite)) {
+            return;
+        }
 
         ComPtr<ID3D11DeviceContext> context;
         g_device->GetImmediateContext(&context);
@@ -239,7 +284,7 @@ extern "C" {
             VirtuaCamLog::LogLine(std::format(
                 L"Broker first composite after Connected: frameValue={} muxInputs={}",
                 frameValue,
-                streamsToMux.size()));
+                g_streamsToMux.size()));
             g_loggedFirstCompositeAfterConnect = true;
         }
         
@@ -253,6 +298,16 @@ extern "C" {
             return g_sharedTex_Out.Get();
         }
         return nullptr;
+    }
+
+    BROKER_API UINT64 GetBrokerFrameValue() {
+        if (!g_pManifestView_Out) {
+            return 0;
+        }
+        return static_cast<UINT64>(InterlockedCompareExchange64(
+            reinterpret_cast<volatile LONGLONG*>(&g_pManifestView_Out->frameValue),
+            0,
+            0));
     }
 
     BROKER_API BrokerState GetBrokerState() {

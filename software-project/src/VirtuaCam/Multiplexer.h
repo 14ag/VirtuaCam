@@ -14,7 +14,7 @@ public:
 
     HRESULT Initialize(Microsoft::WRL::ComPtr<ID3D11Device> device);
     void Shutdown();
-    void CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedStream>& producers, bool isGridMode);
+    bool CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedStream>& producers, bool isGridMode, bool forceComposite);
     ID3D11Texture2D* GetOutputTexture();
     ID3D11Fence* GetOutputFence();
     UINT64 GetOutputFrameValue();
@@ -32,8 +32,12 @@ private:
         Microsoft::WRL::ComPtr<ID3D11Fence> sharedFence;
         Microsoft::WRL::ComPtr<ID3D11Texture2D> privateTexture;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> privateSRV;
+        HANDLE manifestHandle = nullptr;
+        BroadcastManifest* manifestView = nullptr;
         UINT64 lastSeenFrame = 0;
     };
+
+    void ReleaseProducerResource(ProducerGpuResources& res);
     
     Microsoft::WRL::ComPtr<ID3D11Device> m_device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_context;
@@ -49,6 +53,9 @@ private:
     ShaderModule m_offModeShader; // <-- ADDED
 
     std::vector<ProducerGpuResources> m_producerResources;
+    std::vector<DWORD> m_lastCompositePids;
+    bool m_lastCompositeGridMode = false;
+    bool m_haveCompositeLayout = false;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> m_outputTexture;
     Microsoft::WRL::ComPtr<ID3D11Fence> m_outputFence;

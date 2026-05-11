@@ -38,6 +38,9 @@ HRESULT Multiplexer::Initialize(Microsoft::WRL::ComPtr<ID3D11Device> device)
 
 void Multiplexer::Shutdown()
 {
+    for (auto& res : m_producerResources) {
+        ReleaseProducerResource(res);
+    }
     m_offModeShader.Shutdown();
     m_device.Reset();
     m_context.Reset();
@@ -50,6 +53,8 @@ void Multiplexer::Shutdown()
     m_blitPS.Reset();
     m_blitSampler.Reset();
     m_producerResources.clear();
+    m_lastCompositePids.clear();
+    m_haveCompositeLayout = false;
 }
 
 ID3D11Texture2D* Multiplexer::GetOutputTexture()
@@ -109,8 +114,28 @@ HRESULT Multiplexer::CreateResources()
     return S_OK;
 }
 
+void Multiplexer::ReleaseProducerResource(ProducerGpuResources& res)
+{
+    if (res.manifestView) {
+        UnmapViewOfFile(res.manifestView);
+        res.manifestView = nullptr;
+    }
+    if (res.manifestHandle) {
+        CloseHandle(res.manifestHandle);
+        res.manifestHandle = nullptr;
+    }
+}
+
 void Multiplexer::PruneConnections(const std::vector<VirtuaCam::DiscoveredSharedStream>& currentProducers)
 {
+    for (auto& res : m_producerResources) {
+        auto it = std::find_if(currentProducers.begin(), currentProducers.end(),
+            [&](const auto& p) { return p.processId == res.pid; });
+        if (it == currentProducers.end()) {
+            ReleaseProducerResource(res);
+        }
+    }
+
     m_producerResources.erase(std::remove_if(m_producerResources.begin(), m_producerResources.end(),
         [&](const ProducerGpuResources& res) {
             auto it = std::find_if(currentProducers.begin(), currentProducers.end(), 
@@ -180,6 +205,30 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
     RETURN_IF_FAILED(m_device->CreateTexture2D(&sharedDesc, nullptr, &newRes.privateTexture));
     RETURN_IF_FAILED(m_device->CreateShaderResourceView(newRes.privateTexture.Get(), nullptr, &newRes.privateSRV));
 
+    newRes.manifestHandle = OpenFileMappingW(FILE_MAP_READ, FALSE, streamInfo.manifestName.c_str());
+    if (!newRes.manifestHandle) {
+        const DWORD err = GetLastError();
+        VirtuaCamLog::LogWin32(std::format(
+            L"UpdateProducerConnection failed to open manifest: pid={} name='{}'",
+            streamInfo.processId,
+            streamInfo.manifestName),
+            err);
+        return HRESULT_FROM_WIN32(err);
+    }
+
+    newRes.manifestView = static_cast<BroadcastManifest*>(
+        MapViewOfFile(newRes.manifestHandle, FILE_MAP_READ, 0, 0, sizeof(BroadcastManifest)));
+    if (!newRes.manifestView) {
+        const DWORD err = GetLastError();
+        ReleaseProducerResource(newRes);
+        VirtuaCamLog::LogWin32(std::format(
+            L"UpdateProducerConnection failed to map manifest: pid={} name='{}'",
+            streamInfo.processId,
+            streamInfo.manifestName),
+            err);
+        return HRESULT_FROM_WIN32(err);
+    }
+
     newRes.connected = true;
     m_producerResources.push_back(std::move(newRes));
     VirtuaCamLog::LogLine(std::format(
@@ -192,14 +241,29 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
     return S_OK;
 }
 
-void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedStream>& producers, bool isGridMode)
+bool Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedStream>& producers, bool isGridMode, bool forceComposite)
 {
     // 1. Update connections and sync GPU resources for all active producers
     std::vector<VirtuaCam::DiscoveredSharedStream> activeProducers;
     std::copy_if(producers.begin(), producers.end(), std::back_inserter(activeProducers),
         [](const auto& p) { return p.processId != 0; });
 
+    std::vector<DWORD> currentPids;
+    currentPids.reserve(producers.size());
+    for (const auto& producer : producers) {
+        currentPids.push_back(producer.processId);
+    }
+    if (!m_haveCompositeLayout ||
+        isGridMode != m_lastCompositeGridMode ||
+        currentPids != m_lastCompositePids) {
+        forceComposite = true;
+        m_lastCompositeGridMode = isGridMode;
+        m_lastCompositePids = std::move(currentPids);
+        m_haveCompositeLayout = true;
+    }
+
     PruneConnections(activeProducers);
+    bool inputFrameChanged = false;
     for (const auto& p : activeProducers) {
         const HRESULT hrConnection = UpdateProducerConnection(p);
         if (FAILED(hrConnection)) {
@@ -211,18 +275,19 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
     }
 
     for (auto& res : m_producerResources) {
-        wil::unique_handle hManifest(OpenFileMappingW(FILE_MAP_READ, FALSE, GetProducerManifestName(res.pid).c_str()));
-        if (!hManifest) continue;
-        BroadcastManifest* pView = (BroadcastManifest*)MapViewOfFile(hManifest.get(), FILE_MAP_READ, 0, 0, sizeof(BroadcastManifest));
-        if (!pView) continue;
+        if (!res.manifestView) continue;
 
-        UINT64 latestFrame = pView->frameValue;
+        UINT64 latestFrame = res.manifestView->frameValue;
         if (latestFrame > res.lastSeenFrame) {
             m_context4->Wait(res.sharedFence.Get(), latestFrame);
             m_context->CopyResource(res.privateTexture.Get(), res.sharedTexture.Get());
             res.lastSeenFrame = latestFrame;
+            inputFrameChanged = true;
         }
-        UnmapViewOfFile(pView);
+    }
+
+    if (!forceComposite && !inputFrameChanged) {
+        return false;
     }
 
     // 2. Prepare for rendering
@@ -339,4 +404,5 @@ void Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
     m_context->CopyResource(m_outputTexture.Get(), m_compositeTexture.Get());
     m_outputFrameValue++;
     m_context4->Signal(m_outputFence.Get(), m_outputFrameValue);
+    return true;
 }

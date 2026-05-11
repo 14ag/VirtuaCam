@@ -3,7 +3,7 @@
 #include <string>
 
 typedef HRESULT (*PFN_InitializeProducer)(const WCHAR* args);
-typedef void (*PFN_ProcessFrame)();
+typedef bool (*PFN_ProcessFrame)();
 typedef void (*PFN_ShutdownProducer)();
 
 struct ProducerModule {

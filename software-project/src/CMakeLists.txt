@@ -50,7 +50,7 @@ add_library(DirectPortBroker SHARED
     "${CMAKE_CURRENT_BINARY_DIR}/DirectPortBroker.def"
 )
 set(DEF_BROKER "${CMAKE_CURRENT_BINARY_DIR}/DirectPortBroker.def")
-file(WRITE ${DEF_BROKER} "LIBRARY DirectPortBroker\nEXPORTS\n    InitializeBroker\n    ShutdownBroker\n    UpdateProducerPriorityList\n    SetCompositingMode\n    RenderBrokerFrame\n    GetSharedTexture\n    GetBrokerState\n")
+file(WRITE ${DEF_BROKER} "LIBRARY DirectPortBroker\nEXPORTS\n    InitializeBroker\n    ShutdownBroker\n    UpdateProducerPriorityList\n    SetCompositingMode\n    RenderBrokerFrame\n    GetSharedTexture\n    GetBrokerState\n    GetBrokerFrameValue\n")
 set_target_properties(DirectPortBroker PROPERTIES OUTPUT_NAME "DirectPortBroker")
 target_link_libraries(DirectPortBroker PRIVATE VirtuaCamCommon)
 target_link_libraries(DirectPortBroker PRIVATE ${VCAM_MF_LIBS})

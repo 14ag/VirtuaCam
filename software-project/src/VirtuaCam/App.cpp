@@ -27,6 +27,7 @@ typedef void (*PFN_ShutdownBroker)();
 typedef void (*PFN_RenderBrokerFrame)();
 typedef ID3D11Texture2D* (*PFN_GetSharedTexture)();
 typedef BrokerState (*PFN_GetBrokerState)();
+typedef UINT64 (*PFN_GetBrokerFrameValue)();
 typedef void (*PFN_UpdateProducerPriorityList)(const DWORD*, int);
 typedef void (*PFN_SetCompositingMode)(bool);
 
@@ -36,6 +37,7 @@ static PFN_ShutdownBroker g_pfnShutdownBroker = nullptr;
 static PFN_RenderBrokerFrame g_pfnRenderBrokerFrame = nullptr;
 static PFN_GetSharedTexture g_pfnGetSharedTexture = nullptr;
 static PFN_GetBrokerState g_pfnGetBrokerState = nullptr;
+static PFN_GetBrokerFrameValue g_pfnGetBrokerFrameValue = nullptr;
 static PFN_UpdateProducerPriorityList g_pfnUpdateProducerPriorityList = nullptr;
 static PFN_SetCompositingMode g_pfnSetCompositingMode = nullptr;
 
@@ -51,6 +53,8 @@ static bool g_showPipTR = false;
 static bool g_showPipBL = false;
 static AspectRatioMode g_aspectRatioMode = AspectRatioMode::R16_9;
 static ULONG g_allowedAspectRatioMask = ASPECT_RATIO_MASK_ALL;
+static constexpr ULONGLONG kAppFrameIntervalMs = 33;
+static constexpr ULONGLONG kDefaultFeedRefreshMs = 1000;
 
 const wchar_t* SourceModeToString(SourceMode mode)
 {
@@ -81,7 +85,7 @@ HRESULT LoadBroker();
 void ShutdownSystem();
 void RequestDriverDisconnect();
 void OnIdle();
-void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerState);
+void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerState, UINT64 brokerFrameValue);
 void InformBroker();
 void LoadSettings();
 void SaveSettings();
@@ -600,6 +604,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 }
 
 void OnIdle() {
+    static ULONGLONG s_nextFrameTick = 0;
+    static BrokerState s_lastBrokerState = BrokerState::Searching;
+    static bool s_lastDriverActive = false;
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG frameIntervalMs = (s_lastDriverActive && s_lastBrokerState == BrokerState::Connected)
+        ? kAppFrameIntervalMs
+        : kDefaultFeedRefreshMs;
+    if (s_nextFrameTick != 0 && now < s_nextFrameTick) {
+        return;
+    }
+    s_nextFrameTick = now + frameIntervalMs;
+
     BrokerState brokerState = BrokerState::Searching;
     const bool brokerFrameRendered = (g_pfnRenderBrokerFrame != nullptr);
     if (brokerFrameRendered) {
@@ -608,16 +624,23 @@ void OnIdle() {
 
     if (g_pfnGetBrokerState) {
         brokerState = g_pfnGetBrokerState();
-        UpdateTelemetry(brokerState, GetDriverBridgeStatus());
+        const bool driverActive = GetDriverBridgeStatus();
+        UpdateTelemetry(brokerState, driverActive);
+        s_lastBrokerState = brokerState;
+        s_lastDriverActive = driverActive;
     }
-    TrySendBrokerFrameToDriver(brokerFrameRendered, brokerState);
+    const UINT64 brokerFrameValue = g_pfnGetBrokerFrameValue ? g_pfnGetBrokerFrameValue() : 0;
+    TrySendBrokerFrameToDriver(brokerFrameRendered, brokerState, brokerFrameValue);
 }
 
-void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerState) {
+void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerState, UINT64 brokerFrameValue) {
     static bool s_loggedNullTexture = false;
     static bool s_loggedFirstTexture = false;
     static bool s_loggedDefaultFeed = false;
     static UINT s_driverWarmupRetryLogCount = 0;
+    static bool s_hasSentFrame = false;
+    static UINT64 s_lastSentFrameValue = 0;
+    static ULONGLONG s_lastDefaultFeedSendTick = 0;
 
     if (!brokerFrameRendered || !g_driverBridge || !g_driverBridge->IsActive() || !g_pfnGetSharedTexture) {
         return;
@@ -628,9 +651,19 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
             VirtuaCamLog::LogLine(L"Broker has no live producer; sending generated default feed to DriverBridge");
             s_loggedDefaultFeed = true;
         }
+        const ULONGLONG now = GetTickCount64();
+        if (s_hasSentFrame &&
+            brokerFrameValue == s_lastSentFrameValue &&
+            s_lastDefaultFeedSendTick != 0 &&
+            now - s_lastDefaultFeedSendTick < kDefaultFeedRefreshMs) {
+            return;
+        }
     }
     else {
         s_loggedDefaultFeed = false;
+        if (s_hasSentFrame && brokerFrameValue != 0 && brokerFrameValue == s_lastSentFrameValue) {
+            return;
+        }
     }
 
     wil::com_ptr_nothrow<ID3D11Texture2D> sharedTexture;
@@ -661,6 +694,11 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
         }
     } else {
         s_driverWarmupRetryLogCount = 0;
+        s_hasSentFrame = true;
+        s_lastSentFrameValue = brokerFrameValue;
+        if (brokerState != BrokerState::Connected) {
+            s_lastDefaultFeedSendTick = GetTickCount64();
+        }
     }
 }
 
@@ -713,9 +751,10 @@ HRESULT LoadBroker() {
     g_pfnRenderBrokerFrame = (PFN_RenderBrokerFrame)GetProcAddress(g_hBrokerDll, "RenderBrokerFrame");
     g_pfnGetSharedTexture = (PFN_GetSharedTexture)GetProcAddress(g_hBrokerDll, "GetSharedTexture");
     g_pfnGetBrokerState = (PFN_GetBrokerState)GetProcAddress(g_hBrokerDll, "GetBrokerState");
+    g_pfnGetBrokerFrameValue = (PFN_GetBrokerFrameValue)GetProcAddress(g_hBrokerDll, "GetBrokerFrameValue");
     g_pfnUpdateProducerPriorityList = (PFN_UpdateProducerPriorityList)GetProcAddress(g_hBrokerDll, "UpdateProducerPriorityList");
     g_pfnSetCompositingMode = (PFN_SetCompositingMode)GetProcAddress(g_hBrokerDll, "SetCompositingMode");
-    if (!g_pfnInitializeBroker || !g_pfnShutdownBroker || !g_pfnRenderBrokerFrame || !g_pfnGetSharedTexture || !g_pfnGetBrokerState || !g_pfnUpdateProducerPriorityList || !g_pfnSetCompositingMode) {
+    if (!g_pfnInitializeBroker || !g_pfnShutdownBroker || !g_pfnRenderBrokerFrame || !g_pfnGetSharedTexture || !g_pfnGetBrokerState || !g_pfnGetBrokerFrameValue || !g_pfnUpdateProducerPriorityList || !g_pfnSetCompositingMode) {
         VirtuaCamLog::LogLine(L"DirectPortBroker.dll missing expected exports");
         return E_FAIL;
     }

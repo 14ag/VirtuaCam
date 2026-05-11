@@ -36,6 +36,16 @@ namespace
     constexpr const wchar_t* kCaptureCategoryGuid = L"{65e8773d-8f56-11d0-a3b9-00a0c9223196}";
     constexpr ULONG kIoctlKsProperty = CTL_CODE(FILE_DEVICE_KS, 0x000, METHOD_NEITHER, FILE_ANY_ACCESS);
 
+    bool DriverFrameDumpEnabled()
+    {
+        static int s_enabled = -1;
+        if (s_enabled < 0) {
+            const wchar_t* cmdLine = GetCommandLineW();
+            s_enabled = (cmdLine && (wcsstr(cmdLine, L"-debug") || wcsstr(cmdLine, L"/debug"))) ? 1 : 0;
+        }
+        return s_enabled != 0;
+    }
+
     ULONG AspectRatioModeToDriverValue(AspectRatioMode mode)
     {
         switch (mode) {
@@ -534,7 +544,7 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
         }
     }
 
-    if ((n == 1 || n == 90) && !m_rgbBuffer.empty()) {
+    if (DriverFrameDumpEnabled() && (n == 1 || n == 90) && !m_rgbBuffer.empty()) {
         const BYTE* topLeft = m_rgbBuffer.data();
         const size_t centerOffset =
             ((static_cast<size_t>(m_outputHeight / 2) * m_outputWidth) + (m_outputWidth / 2)) * kDriverBytesPerPixel;

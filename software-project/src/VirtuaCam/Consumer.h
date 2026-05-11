@@ -12,7 +12,7 @@ extern "C" {
 #endif
 
 PRODUCER_API HRESULT InitializeProducer(const wchar_t* args);
-PRODUCER_API void ProcessFrame();
+PRODUCER_API bool ProcessFrame();
 PRODUCER_API void ShutdownProducer();
 
 #ifdef __cplusplus

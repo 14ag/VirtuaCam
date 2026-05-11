@@ -139,14 +139,14 @@ PRODUCER_API HRESULT InitializeProducer(const wchar_t* args)
     return S_OK;
 }
 
-PRODUCER_API void ProcessFrame()
+PRODUCER_API bool ProcessFrame()
 {
-    if (!g_inputConnected) { FindAndConnectInput(); return; }
+    if (!g_inputConnected) { FindAndConnectInput(); return false; }
 
     wil::unique_handle hManifest(OpenFileMappingW(FILE_MAP_READ, FALSE, g_inputStream.manifestName.c_str()));
-    if(!hManifest) { g_inputConnected = false; return; }
+    if(!hManifest) { g_inputConnected = false; return false; }
     BroadcastManifest* pView = (BroadcastManifest*)MapViewOfFile(hManifest.get(), FILE_MAP_READ, 0, 0, sizeof(BroadcastManifest));
-    if(!pView) { g_inputConnected = false; return; }
+    if(!pView) { g_inputConnected = false; return false; }
 
     UINT64 latest = pView->frameValue;
     UnmapViewOfFile(pView);
@@ -154,6 +154,8 @@ PRODUCER_API void ProcessFrame()
         g_context4->Wait(g_inputSharedFence.Get(), latest);
         g_context->CopyResource(g_inputPrivateTexture.Get(), g_inputSharedTexture.Get());
         g_lastSeenFrame = latest;
+    } else {
+        return false;
     }
     
     D3D11_VIEWPORT vp = {0,0,1920,1080,0,1};
@@ -172,6 +174,7 @@ PRODUCER_API void ProcessFrame()
     if (g_pManifestViewOut) {
         InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestViewOut->frameValue), g_sharedOutFrameValue);
     }
+    return true;
 }
 
 PRODUCER_API void ShutdownProducer()
