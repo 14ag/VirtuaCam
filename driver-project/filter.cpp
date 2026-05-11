@@ -302,6 +302,37 @@ SetPreferredAspect(
 
 NTSTATUS
 CCaptureFilter::
+SetAllowedAspects(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    UNREFERENCED_PARAMETER(Request);
+    PAGED_CODE();
+
+    PIO_STACK_LOCATION pIrpStack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG bufferLength = pIrpStack->Parameters.DeviceIoControl.InputBufferLength;
+    if (pIrpStack->Parameters.DeviceIoControl.OutputBufferLength > bufferLength) {
+        bufferLength = pIrpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    }
+    if (!Data || bufferLength < sizeof(ULONG)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ULONG allowedMask = *reinterpret_cast<PULONG>(Data);
+    allowedMask &= VIRTUACAM_ASPECT_MASK_ALL;
+    if (allowedMask == 0) {
+        allowedMask = VIRTUACAM_ASPECT_MASK_ALL;
+    }
+
+    VirtuaCamSetAspectPolicy(MAXULONG, allowedMask);
+    Irp->IoStatus.Information = sizeof(ULONG);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+CCaptureFilter::
 GetStatus(
     _In_ PIRP Irp,
     _In_ PKSIDENTIFIER Request,
@@ -487,6 +518,18 @@ DEFINE_KSPROPERTY_TABLE(CustomPropertyTable)
         (ULONG)sizeof(KSPROPERTY),                        //MinProperty
         (ULONG)sizeof(ULONG),                             //MinData
         (PFNKSHANDLER)&CCaptureFilter::SetPreferredAspect,//SetPropertyHandler
+        (PKSPROPERTY_VALUES)NULL,                         //Values
+        0,                                                //RelationsCount
+        (PKSPROPERTY)NULL,                                //Relations
+        (PFNKSHANDLER)NULL,                               //SupportHandler
+        (ULONG)0                                          //SerializedSize
+    },
+    {
+        VIRTUACAM_PROP_ALLOWED_ASPECTS,                   //PropertyId
+        (PFNKSHANDLER)NULL,                               //GetPropertyHandler
+        (ULONG)sizeof(KSPROPERTY),                        //MinProperty
+        (ULONG)sizeof(ULONG),                             //MinData
+        (PFNKSHANDLER)&CCaptureFilter::SetAllowedAspects, //SetPropertyHandler
         (PKSPROPERTY_VALUES)NULL,                         //Values
         0,                                                //RelationsCount
         (PKSPROPERTY)NULL,                                //Relations

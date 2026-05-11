@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <map>
+#include <cmath>
 
 using namespace Microsoft::WRL;
 
@@ -48,6 +49,7 @@ static bool g_showPipTL = false;
 static bool g_showPipTR = false;
 static bool g_showPipBL = false;
 static AspectRatioMode g_aspectRatioMode = AspectRatioMode::R16_9;
+static ULONG g_allowedAspectRatioMask = ASPECT_RATIO_MASK_ALL;
 
 const wchar_t* SourceModeToString(SourceMode mode)
 {
@@ -85,6 +87,164 @@ void SaveSettings();
 bool HasArg(const std::wstring& cmdLine, const wchar_t* arg);
 bool TryGetArgU64(const std::wstring& cmdLine, const wchar_t* arg, UINT64& outValue);
 
+ULONG AspectRatioMask(AspectRatioMode mode)
+{
+    switch (mode) {
+    case AspectRatioMode::R9_16: return ASPECT_RATIO_MASK_9_16;
+    case AspectRatioMode::R4_3: return ASPECT_RATIO_MASK_4_3;
+    case AspectRatioMode::R3_4: return ASPECT_RATIO_MASK_3_4;
+    case AspectRatioMode::R16_9:
+    default: return ASPECT_RATIO_MASK_16_9;
+    }
+}
+
+bool IsAspectRatioAllowed(AspectRatioMode mode)
+{
+    return (g_allowedAspectRatioMask & AspectRatioMask(mode)) != 0;
+}
+
+AspectRatioMode FirstAspectRatioFromMask(ULONG mask)
+{
+    if (mask & ASPECT_RATIO_MASK_16_9) return AspectRatioMode::R16_9;
+    if (mask & ASPECT_RATIO_MASK_9_16) return AspectRatioMode::R9_16;
+    if (mask & ASPECT_RATIO_MASK_4_3) return AspectRatioMode::R4_3;
+    if (mask & ASPECT_RATIO_MASK_3_4) return AspectRatioMode::R3_4;
+    return AspectRatioMode::R16_9;
+}
+
+bool SizeMatchesAspect(UINT32 width, UINT32 height, AspectRatioMode mode)
+{
+    if (width == 0 || height == 0) {
+        return false;
+    }
+
+    const double observed = static_cast<double>(width) / static_cast<double>(height);
+    const double target = static_cast<double>(VirtuaCamConfig::AspectRatioValue(mode));
+    return std::abs(observed - target) <= (target * 0.02);
+}
+
+bool TryGetAspectFromSize(UINT32 width, UINT32 height, AspectRatioMode& mode)
+{
+    const AspectRatioMode modes[] = {
+        AspectRatioMode::R16_9,
+        AspectRatioMode::R9_16,
+        AspectRatioMode::R4_3,
+        AspectRatioMode::R3_4
+    };
+
+    for (const AspectRatioMode candidate : modes) {
+        if (SizeMatchesAspect(width, height, candidate)) {
+            mode = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TryScanCameraAspectMask(const wchar_t* devicePath, ULONG& outMask, AspectRatioMode& outFirstMode)
+{
+    outMask = 0;
+    outFirstMode = AspectRatioMode::R16_9;
+    if (!devicePath || !*devicePath) {
+        return false;
+    }
+
+    ComPtr<IMFAttributes> attributes;
+    if (FAILED(MFCreateAttributes(&attributes, 1))) {
+        return false;
+    }
+    if (FAILED(attributes->SetGUID(
+            MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+            MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID))) {
+        return false;
+    }
+
+    IMFActivate** devices = nullptr;
+    UINT32 count = 0;
+    HRESULT hr = MFEnumDeviceSources(attributes.Get(), &devices, &count);
+    if (FAILED(hr) || !devices || count == 0) {
+        if (devices) CoTaskMemFree(devices);
+        return false;
+    }
+
+    ComPtr<IMFMediaSource> source;
+    for (UINT32 i = 0; i < count; ++i) {
+        wil::unique_cotaskmem_string symbolicLink;
+        if (SUCCEEDED(devices[i]->GetAllocatedString(
+                MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+                &symbolicLink,
+                nullptr)) &&
+            symbolicLink.get() &&
+            _wcsicmp(symbolicLink.get(), devicePath) == 0) {
+            hr = devices[i]->ActivateObject(IID_PPV_ARGS(&source));
+            break;
+        }
+    }
+
+    for (UINT32 i = 0; i < count; ++i) {
+        devices[i]->Release();
+    }
+    CoTaskMemFree(devices);
+
+    if (!source) {
+        return false;
+    }
+
+    ComPtr<IMFAttributes> readerAttributes;
+    if (FAILED(MFCreateAttributes(&readerAttributes, 1)) ||
+        FAILED(readerAttributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE))) {
+        return false;
+    }
+
+    ComPtr<IMFSourceReader> reader;
+    if (FAILED(MFCreateSourceReaderFromMediaSource(source.Get(), readerAttributes.Get(), &reader))) {
+        return false;
+    }
+
+    for (DWORD i = 0;; ++i) {
+        ComPtr<IMFMediaType> nativeType;
+        hr = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, i, &nativeType);
+        if (hr == MF_E_NO_MORE_TYPES) {
+            break;
+        }
+        if (FAILED(hr)) {
+            return false;
+        }
+
+        UINT32 width = 0;
+        UINT32 height = 0;
+        if (FAILED(MFGetAttributeSize(nativeType.Get(), MF_MT_FRAME_SIZE, &width, &height))) {
+            continue;
+        }
+
+        AspectRatioMode mode = AspectRatioMode::R16_9;
+        if (TryGetAspectFromSize(width, height, mode)) {
+            const ULONG bit = AspectRatioMask(mode);
+            if ((outMask & bit) == 0 && outMask == 0) {
+                outFirstMode = mode;
+            }
+            outMask |= bit;
+        }
+    }
+
+    outMask &= ASPECT_RATIO_MASK_ALL;
+    return outMask != 0;
+}
+
+void SetAllowedAspectRatioMask(ULONG mask, const wchar_t* reason)
+{
+    mask &= ASPECT_RATIO_MASK_ALL;
+    if (mask == 0) {
+        mask = ASPECT_RATIO_MASK_ALL;
+    }
+
+    g_allowedAspectRatioMask = mask;
+    VirtuaCamLog::LogLine(std::format(
+        L"Allowed aspect ratio mask: 0x{:X} reason={}",
+        g_allowedAspectRatioMask,
+        reason ? reason : L""));
+}
+
 bool GetPipTlEnabled() { return g_showPipTL; }
 bool GetPipTrEnabled() { return g_showPipTR; }
 bool GetPipBlEnabled() { return g_showPipBL; }
@@ -92,15 +252,16 @@ void TogglePipTl() { g_showPipTL = !g_showPipTL; SaveSettings(); }
 void TogglePipTr() { g_showPipTR = !g_showPipTR; SaveSettings(); }
 void TogglePipBl() { g_showPipBL = !g_showPipBL; SaveSettings(); }
 AspectRatioMode GetAspectRatioMode() { return g_aspectRatioMode; }
-void ApplyDriverPreferredAspectRatio()
+ULONG GetAllowedAspectRatioMask() { return g_allowedAspectRatioMask; }
+void ApplyDriverAspectPolicy()
 {
     if (!g_driverBridge || !g_driverBridge->IsActive()) {
         return;
     }
 
-    HRESULT hr = g_driverBridge->SetPreferredAspectRatio(g_aspectRatioMode);
+    HRESULT hr = g_driverBridge->SetAspectPolicy(g_aspectRatioMode, g_allowedAspectRatioMask);
     if (FAILED(hr)) {
-        VirtuaCamLog::LogHr(L"DriverBridge::SetPreferredAspectRatio failed", hr);
+        VirtuaCamLog::LogHr(L"DriverBridge::SetAspectPolicy failed", hr);
         return;
     }
 
@@ -111,6 +272,14 @@ void ApplyDriverPreferredAspectRatio()
 }
 void SetAspectRatioMode(AspectRatioMode mode)
 {
+    if (!IsAspectRatioAllowed(mode)) {
+        VirtuaCamLog::LogLine(std::format(
+            L"Aspect ratio ignored because it is disabled by current source: {} allowedMask=0x{:X}",
+            VirtuaCamConfig::AspectRatioName(mode),
+            g_allowedAspectRatioMask));
+        return;
+    }
+
     if (g_aspectRatioMode == mode) {
         return;
     }
@@ -121,7 +290,7 @@ void SetAspectRatioMode(AspectRatioMode mode)
         L"Aspect ratio changed: {} config={}",
         VirtuaCamConfig::AspectRatioName(g_aspectRatioMode),
         VirtuaCamConfig::GetConfigPath().wstring()));
-    ApplyDriverPreferredAspectRatio();
+    ApplyDriverAspectPolicy();
 }
 
 const VirtuaCam::Discovery* GetGlobalDiscovery() { return g_discovery.get(); }
@@ -228,10 +397,28 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
         case SourceMode::Camera:
             g_mainSourceState.cameraIndex = static_cast<int>(context);
             if (const wchar_t* devicePath = UI_GetCameraDevicePath(g_mainSourceState.cameraIndex)) {
+                ULONG cameraMask = 0;
+                AspectRatioMode firstSupportedAspect = AspectRatioMode::R16_9;
+                if (TryScanCameraAspectMask(devicePath, cameraMask, firstSupportedAspect)) {
+                    SetAllowedAspectRatioMask(cameraMask, L"main camera passthrough");
+                    if ((cameraMask & AspectRatioMask(g_aspectRatioMode)) == 0) {
+                        g_aspectRatioMode = firstSupportedAspect;
+                        SaveSettings();
+                        VirtuaCamLog::LogLine(std::format(
+                            L"Aspect ratio auto-selected for camera passthrough: {} allowedMask=0x{:X}",
+                            VirtuaCamConfig::AspectRatioName(g_aspectRatioMode),
+                            cameraMask));
+                    }
+                } else {
+                    SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main camera scan failed");
+                    VirtuaCamLog::LogLine(L"Camera aspect scan failed; allowing all VirtuaCam ratios");
+                }
+
                 g_mainSourceState.pid = LaunchProducer(
                     L"main_camera",
                     std::format(L"--type camera --device-path \"{}\"", devicePath));
             } else {
+                SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main camera no device path");
                 // Fallback: old index-based selection (best-effort).
                 g_mainSourceState.pid = LaunchProducer(
                     L"main_camera",
@@ -239,16 +426,19 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
             }
             break;
         case SourceMode::Window:
+            SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main window source");
             if (!TryLaunchWindowProducer(L"main_window", context, g_mainSourceState.pid, g_mainSourceState.hwnd)) {
                 newMode = SourceMode::Off;
             }
             break;
         case SourceMode::Discovered:
         case SourceMode::Consumer:
+            SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main non-camera source");
             g_mainSourceState.pid = static_cast<DWORD>(context);
             break;
         case SourceMode::Off:
         default:
+            SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main source off");
             break;
     }
     g_mainSourceState.mode = newMode;
@@ -259,6 +449,7 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
         g_mainSourceState.cameraIndex,
         static_cast<UINT64>(reinterpret_cast<UINT_PTR>(g_mainSourceState.hwnd))));
     InformBroker();
+    ApplyDriverAspectPolicy();
 }
 
 void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
@@ -396,7 +587,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             VirtuaCamLog::ShowAndLogError(g_hMainWnd, message.c_str(), L"Error", hrDriver);
         }
     } else {
-        ApplyDriverPreferredAspectRatio();
+        ApplyDriverAspectPolicy();
     }
 
     VirtuaCamLog::LogLine(L"Entering message loop.");

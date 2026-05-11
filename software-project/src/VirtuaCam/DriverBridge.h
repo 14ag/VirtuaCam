@@ -21,6 +21,7 @@ public:
     HRESULT Connect();
     HRESULT Disconnect();
     HRESULT SetPreferredAspectRatio(AspectRatioMode mode);
+    HRESULT SetAspectPolicy(AspectRatioMode preferredMode, ULONG allowedMask);
     HRESULT SendFrame(ID3D11Texture2D* sourceTexture);
 
 private:

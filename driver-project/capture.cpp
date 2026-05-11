@@ -2173,68 +2173,103 @@ VirtuaCamSetPreferredAspect (
     _In_ ULONG AspectMode
     )
 {
-    PKSDATARANGE orderedRanges[CAPTURE_PIN_DATA_RANGE_COUNT] = {};
+    VirtuaCamSetAspectPolicy(AspectMode, MAXULONG);
+}
 
-    switch (AspectMode) {
-    case VIRTUACAM_ASPECT_9_16:
-        orderedRanges[0] = (PKSDATARANGE)&FormatYUY2_9x16_Capture;
-        orderedRanges[1] = (PKSDATARANGE)&FormatNV12_9x16_Capture;
-        orderedRanges[2] = (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture;
-        orderedRanges[3] = (PKSDATARANGE)&FormatYUY2_Capture;
-        orderedRanges[4] = (PKSDATARANGE)&FormatNV12_Capture;
-        orderedRanges[5] = (PKSDATARANGE)&FormatRGB32Bpp_Capture;
-        orderedRanges[6] = (PKSDATARANGE)&FormatYUY2_480p_Capture;
-        orderedRanges[7] = (PKSDATARANGE)&FormatNV12_480p_Capture;
-        orderedRanges[8] = (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture;
-        orderedRanges[9] = (PKSDATARANGE)&FormatYUY2_3x4_Capture;
-        orderedRanges[10] = (PKSDATARANGE)&FormatNV12_3x4_Capture;
-        orderedRanges[11] = (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture;
-        break;
-    case VIRTUACAM_ASPECT_4_3:
-        orderedRanges[0] = (PKSDATARANGE)&FormatYUY2_480p_Capture;
-        orderedRanges[1] = (PKSDATARANGE)&FormatNV12_480p_Capture;
-        orderedRanges[2] = (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture;
-        orderedRanges[3] = (PKSDATARANGE)&FormatYUY2_Capture;
-        orderedRanges[4] = (PKSDATARANGE)&FormatNV12_Capture;
-        orderedRanges[5] = (PKSDATARANGE)&FormatRGB32Bpp_Capture;
-        orderedRanges[6] = (PKSDATARANGE)&FormatYUY2_9x16_Capture;
-        orderedRanges[7] = (PKSDATARANGE)&FormatNV12_9x16_Capture;
-        orderedRanges[8] = (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture;
-        orderedRanges[9] = (PKSDATARANGE)&FormatYUY2_3x4_Capture;
-        orderedRanges[10] = (PKSDATARANGE)&FormatNV12_3x4_Capture;
-        orderedRanges[11] = (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture;
-        break;
-    case VIRTUACAM_ASPECT_3_4:
-        orderedRanges[0] = (PKSDATARANGE)&FormatYUY2_3x4_Capture;
-        orderedRanges[1] = (PKSDATARANGE)&FormatNV12_3x4_Capture;
-        orderedRanges[2] = (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture;
-        orderedRanges[3] = (PKSDATARANGE)&FormatYUY2_Capture;
-        orderedRanges[4] = (PKSDATARANGE)&FormatNV12_Capture;
-        orderedRanges[5] = (PKSDATARANGE)&FormatRGB32Bpp_Capture;
-        orderedRanges[6] = (PKSDATARANGE)&FormatYUY2_480p_Capture;
-        orderedRanges[7] = (PKSDATARANGE)&FormatNV12_480p_Capture;
-        orderedRanges[8] = (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture;
-        orderedRanges[9] = (PKSDATARANGE)&FormatYUY2_9x16_Capture;
-        orderedRanges[10] = (PKSDATARANGE)&FormatNV12_9x16_Capture;
-        orderedRanges[11] = (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture;
-        break;
-    case VIRTUACAM_ASPECT_16_9:
-    default:
-        orderedRanges[0] = (PKSDATARANGE)&FormatYUY2_Capture;
-        orderedRanges[1] = (PKSDATARANGE)&FormatNV12_Capture;
-        orderedRanges[2] = (PKSDATARANGE)&FormatRGB32Bpp_Capture;
-        orderedRanges[3] = (PKSDATARANGE)&FormatYUY2_480p_Capture;
-        orderedRanges[4] = (PKSDATARANGE)&FormatNV12_480p_Capture;
-        orderedRanges[5] = (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture;
-        orderedRanges[6] = (PKSDATARANGE)&FormatYUY2_9x16_Capture;
-        orderedRanges[7] = (PKSDATARANGE)&FormatNV12_9x16_Capture;
-        orderedRanges[8] = (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture;
-        orderedRanges[9] = (PKSDATARANGE)&FormatYUY2_3x4_Capture;
-        orderedRanges[10] = (PKSDATARANGE)&FormatNV12_3x4_Capture;
-        orderedRanges[11] = (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture;
-        break;
+namespace
+{
+    ULONG g_PreferredAspectMode = VIRTUACAM_ASPECT_16_9;
+    ULONG g_AllowedAspectMask = VIRTUACAM_ASPECT_MASK_ALL;
+
+    typedef struct _VIRTUACAM_ASPECT_RANGES {
+        ULONG AspectMode;
+        ULONG AspectMask;
+        PKSDATARANGE Ranges[3];
+    } VIRTUACAM_ASPECT_RANGES;
+
+    const VIRTUACAM_ASPECT_RANGES kAspectRanges[] = {
+        { VIRTUACAM_ASPECT_16_9, VIRTUACAM_ASPECT_MASK_16_9,
+            { (PKSDATARANGE)&FormatYUY2_Capture, (PKSDATARANGE)&FormatNV12_Capture, (PKSDATARANGE)&FormatRGB32Bpp_Capture } },
+        { VIRTUACAM_ASPECT_9_16, VIRTUACAM_ASPECT_MASK_9_16,
+            { (PKSDATARANGE)&FormatYUY2_9x16_Capture, (PKSDATARANGE)&FormatNV12_9x16_Capture, (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture } },
+        { VIRTUACAM_ASPECT_4_3, VIRTUACAM_ASPECT_MASK_4_3,
+            { (PKSDATARANGE)&FormatYUY2_480p_Capture, (PKSDATARANGE)&FormatNV12_480p_Capture, (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture } },
+        { VIRTUACAM_ASPECT_3_4, VIRTUACAM_ASPECT_MASK_3_4,
+            { (PKSDATARANGE)&FormatYUY2_3x4_Capture, (PKSDATARANGE)&FormatNV12_3x4_Capture, (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture } }
+    };
+
+    bool AppendAspectRanges(_In_ const VIRTUACAM_ASPECT_RANGES& AspectRanges, _Inout_ PKSDATARANGE* OrderedRanges, _Inout_ ULONG& Index)
+    {
+        if (Index + 3 > CAPTURE_PIN_DATA_RANGE_COUNT) {
+            return false;
+        }
+
+        for (ULONG i = 0; i < 3; ++i) {
+            OrderedRanges[Index++] = AspectRanges.Ranges[i];
+        }
+        return true;
+    }
+
+    const VIRTUACAM_ASPECT_RANGES* FindAspectRanges(_In_ ULONG AspectMode)
+    {
+        for (ULONG i = 0; i < SIZEOF_ARRAY(kAspectRanges); ++i) {
+            if (kAspectRanges[i].AspectMode == AspectMode) {
+                return &kAspectRanges[i];
+            }
+        }
+        return &kAspectRanges[0];
+    }
+}
+
+extern "C"
+void
+VirtuaCamSetAspectPolicy (
+    _In_ ULONG PreferredAspect,
+    _In_ ULONG AllowedAspectMask
+    )
+{
+    if (PreferredAspect <= VIRTUACAM_ASPECT_3_4) {
+        g_PreferredAspectMode = PreferredAspect;
+    }
+
+    if (AllowedAspectMask != MAXULONG) {
+        g_AllowedAspectMask = AllowedAspectMask & VIRTUACAM_ASPECT_MASK_ALL;
+        if (g_AllowedAspectMask == 0) {
+            g_AllowedAspectMask = VIRTUACAM_ASPECT_MASK_ALL;
+        }
+    }
+
+    if ((FindAspectRanges(g_PreferredAspectMode)->AspectMask & g_AllowedAspectMask) == 0) {
+        for (ULONG i = 0; i < SIZEOF_ARRAY(kAspectRanges); ++i) {
+            if ((kAspectRanges[i].AspectMask & g_AllowedAspectMask) != 0) {
+                g_PreferredAspectMode = kAspectRanges[i].AspectMode;
+                break;
+            }
+        }
+    }
+
+    PKSDATARANGE orderedRanges[CAPTURE_PIN_DATA_RANGE_COUNT] = {};
+    ULONG index = 0;
+    const VIRTUACAM_ASPECT_RANGES* preferred = FindAspectRanges(g_PreferredAspectMode);
+    if ((preferred->AspectMask & g_AllowedAspectMask) != 0) {
+        AppendAspectRanges(*preferred, orderedRanges, index);
+    }
+
+    for (ULONG i = 0; i < SIZEOF_ARRAY(kAspectRanges); ++i) {
+        if (kAspectRanges[i].AspectMode != g_PreferredAspectMode &&
+            (kAspectRanges[i].AspectMask & g_AllowedAspectMask) != 0) {
+            AppendAspectRanges(kAspectRanges[i], orderedRanges, index);
+        }
+    }
+
+    ULONG fillIndex = 0;
+    while (index < CAPTURE_PIN_DATA_RANGE_COUNT) {
+        if (orderedRanges[fillIndex] != NULL) {
+            orderedRanges[index++] = orderedRanges[fillIndex];
+        }
+        fillIndex = (fillIndex + 1) % CAPTURE_PIN_DATA_RANGE_COUNT;
     }
 
     RtlCopyMemory(CapturePinDataRanges, orderedRanges, sizeof(CapturePinDataRanges));
-    DbgPrint("[avshws] Preferred aspect mode=%lu applied to capture data range order\n", AspectMode);
+    DbgPrint("[avshws] Aspect policy preferred=%lu allowed=0x%lx applied to capture data range order\n", g_PreferredAspectMode, g_AllowedAspectMask);
 }

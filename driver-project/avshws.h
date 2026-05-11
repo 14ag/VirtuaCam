@@ -168,6 +168,13 @@ VirtuaCamSetPreferredAspect (
     _In_ ULONG AspectMode
     );
 
+extern "C"
+void
+VirtuaCamSetAspectPolicy (
+    _In_ ULONG PreferredAspect,
+    _In_ ULONG AllowedAspectMask
+    );
+
 /*************************************************
 
     Enums / Typedefs

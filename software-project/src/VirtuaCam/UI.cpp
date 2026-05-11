@@ -38,6 +38,7 @@ extern void TogglePipTr();
 extern void TogglePipBl();
 extern AspectRatioMode GetAspectRatioMode();
 extern void SetAspectRatioMode(AspectRatioMode mode);
+extern ULONG GetAllowedAspectRatioMask();
 
 namespace
 {
@@ -646,10 +647,11 @@ void ShowContextMenu(HWND hwnd) {
         HMENU aspectMenu = CreatePopupMenu();
         if (aspectMenu) {
             const AspectRatioMode currentAspect = GetAspectRatioMode();
-            AddNativeMenuItem(aspectMenu, L"16:9", ID_ASPECT_RATIO_16_9, currentAspect == AspectRatioMode::R16_9);
-            AddNativeMenuItem(aspectMenu, L"9:16", ID_ASPECT_RATIO_9_16, currentAspect == AspectRatioMode::R9_16);
-            AddNativeMenuItem(aspectMenu, L"4:3", ID_ASPECT_RATIO_4_3, currentAspect == AspectRatioMode::R4_3);
-            AddNativeMenuItem(aspectMenu, L"3:4", ID_ASPECT_RATIO_3_4, currentAspect == AspectRatioMode::R3_4);
+            const ULONG allowedAspectMask = GetAllowedAspectRatioMask();
+            AddNativeMenuItem(aspectMenu, L"16:9", ID_ASPECT_RATIO_16_9, currentAspect == AspectRatioMode::R16_9, (allowedAspectMask & ASPECT_RATIO_MASK_16_9) != 0);
+            AddNativeMenuItem(aspectMenu, L"9:16", ID_ASPECT_RATIO_9_16, currentAspect == AspectRatioMode::R9_16, (allowedAspectMask & ASPECT_RATIO_MASK_9_16) != 0);
+            AddNativeMenuItem(aspectMenu, L"4:3", ID_ASPECT_RATIO_4_3, currentAspect == AspectRatioMode::R4_3, (allowedAspectMask & ASPECT_RATIO_MASK_4_3) != 0);
+            AddNativeMenuItem(aspectMenu, L"3:4", ID_ASPECT_RATIO_3_4, currentAspect == AspectRatioMode::R3_4, (allowedAspectMask & ASPECT_RATIO_MASK_3_4) != 0);
             AppendMenuW(settingsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(aspectMenu), L"Aspect Ratio");
         }
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(settingsMenu), L"Settings");

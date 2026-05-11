@@ -26,6 +26,7 @@ namespace
     constexpr ULONG kDriverPropertyIdStatus = 3;
     constexpr ULONG kDriverPropertyIdRegisterEvent = 4;
     constexpr ULONG kDriverPropertyIdPreferredAspect = 5;
+    constexpr ULONG kDriverPropertyIdAllowedAspects = 6;
     constexpr ULONG kDriverHardwareStateRunning = 2;
     constexpr ULONG kDriverSetDataRejectNotRunning = 1;
     constexpr ULONG kDriverSetDataRejectNotConnected = 3;
@@ -912,15 +913,38 @@ HRESULT DriverBridge::RegisterClientRequestEvent(HANDLE eventHandle)
 
 HRESULT DriverBridge::SetPreferredAspectRatio(AspectRatioMode mode)
 {
+    return SetAspectPolicy(mode, ASPECT_RATIO_MASK_ALL);
+}
+
+HRESULT DriverBridge::SetAspectPolicy(AspectRatioMode preferredMode, ULONG allowedMask)
+{
     RETURN_HR_IF(E_UNEXPECTED, !m_active);
 
-    ULONG aspectMode = AspectRatioModeToDriverValue(mode);
-    HRESULT hr = SetDriverProperty(kDriverPropertyIdPreferredAspect, &aspectMode, sizeof(aspectMode));
+    allowedMask &= ASPECT_RATIO_MASK_ALL;
+    if (allowedMask == 0) {
+        allowedMask = ASPECT_RATIO_MASK_ALL;
+    }
+
+    HRESULT hr = SetDriverProperty(kDriverPropertyIdAllowedAspects, &allowedMask, sizeof(allowedMask));
+    if (FAILED(hr)) {
+        DWORD supportFlags = 0;
+        const bool supportKnown = IsPropertySetSupported(kDriverPropertyIdAllowedAspects, &supportFlags);
+        VirtuaCamLog::LogLine(std::format(
+            L"DriverBridge::SetAspectPolicy allowed property {} failed hr=0x{:08X} supportKnown={} supportFlags=0x{:08X}",
+            kDriverPropertyIdAllowedAspects,
+            static_cast<unsigned>(hr),
+            supportKnown ? 1 : 0,
+            supportFlags));
+        return hr;
+    }
+
+    ULONG aspectMode = AspectRatioModeToDriverValue(preferredMode);
+    hr = SetDriverProperty(kDriverPropertyIdPreferredAspect, &aspectMode, sizeof(aspectMode));
     if (FAILED(hr)) {
         DWORD supportFlags = 0;
         const bool supportKnown = IsPropertySetSupported(kDriverPropertyIdPreferredAspect, &supportFlags);
         VirtuaCamLog::LogLine(std::format(
-            L"DriverBridge::SetPreferredAspectRatio property {} failed hr=0x{:08X} supportKnown={} supportFlags=0x{:08X}",
+            L"DriverBridge::SetAspectPolicy preferred property {} failed hr=0x{:08X} supportKnown={} supportFlags=0x{:08X}",
             kDriverPropertyIdPreferredAspect,
             static_cast<unsigned>(hr),
             supportKnown ? 1 : 0,
@@ -929,8 +953,9 @@ HRESULT DriverBridge::SetPreferredAspectRatio(AspectRatioMode mode)
     }
 
     VirtuaCamLog::LogLine(std::format(
-        L"DriverBridge preferred aspect set: {}",
-        VirtuaCamConfig::AspectRatioName(mode)));
+        L"DriverBridge aspect policy set: preferred={} allowedMask=0x{:X}",
+        VirtuaCamConfig::AspectRatioName(preferredMode),
+        allowedMask));
     return S_OK;
 }
 
