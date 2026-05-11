@@ -42,4 +42,5 @@ private:
     wil::unique_handle m_hShutdownEvent;
     wil::unique_handle m_hAudioEvent;
     bool m_isCapturing = false;
+    bool m_loggedFirstPacket = false;
 };

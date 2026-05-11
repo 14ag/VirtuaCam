@@ -23,6 +23,14 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
     return g_texture.Sample(g_sampler, uv);
 })";
 
+namespace
+{
+    HANDLE ProducerFenceHandleValue(UINT64 value)
+    {
+        return reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(value));
+    }
+}
+
 Multiplexer::Multiplexer() {}
 Multiplexer::~Multiplexer() {}
 
@@ -178,11 +186,34 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
 
     wil::unique_handle namedFenceHandle(GetHandleFromName(streamInfo.fenceName.c_str(), GENERIC_READ | GENERIC_WRITE));
     if (!namedFenceHandle) {
-        VirtuaCamLog::LogLine(std::format(
-            L"UpdateProducerConnection failed to open shared fence by name: pid={} name='{}'",
-            streamInfo.processId,
-            streamInfo.fenceName));
-        return E_FAIL;
+        if (streamInfo.sharedFenceHandleValue != 0) {
+            wil::unique_handle producerProcess(OpenProcess(PROCESS_DUP_HANDLE, FALSE, streamInfo.processId));
+            if (producerProcess) {
+                HANDLE duplicatedFence = nullptr;
+                if (DuplicateHandle(
+                        producerProcess.get(),
+                        ProducerFenceHandleValue(streamInfo.sharedFenceHandleValue),
+                        GetCurrentProcess(),
+                        &duplicatedFence,
+                        0,
+                        FALSE,
+                        DUPLICATE_SAME_ACCESS)) {
+                    namedFenceHandle.reset(duplicatedFence);
+                    VirtuaCamLog::LogLine(std::format(
+                        L"UpdateProducerConnection duplicated verified shared fence: pid={} name='{}'",
+                        streamInfo.processId,
+                        streamInfo.fenceName));
+                }
+            }
+        }
+
+        if (!namedFenceHandle) {
+            VirtuaCamLog::LogLine(std::format(
+                L"UpdateProducerConnection failed to open shared fence by name or verified duplicate: pid={} name='{}'",
+                streamInfo.processId,
+                streamInfo.fenceName));
+            return E_FAIL;
+        }
     }
 
     newRes.importedFenceHandle = std::move(namedFenceHandle);

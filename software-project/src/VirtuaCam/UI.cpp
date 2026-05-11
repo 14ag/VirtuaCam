@@ -95,7 +95,9 @@ std::vector<std::wstring> EnumerateCameras() {
     // Keep a parallel list of device paths so the app can launch camera producers
     // using a stable identifier.
     extern std::vector<std::wstring> g_cameraDevicePaths;
+    extern std::vector<std::wstring> g_cameraDeviceNamesCache;
     g_cameraDevicePaths.clear();
+    g_cameraDeviceNamesCache.clear();
 
     ComPtr<ICreateDevEnum> devEnum;
     if (FAILED(CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&devEnum)))) {
@@ -142,6 +144,7 @@ std::vector<std::wstring> EnumerateCameras() {
             std::wstring name(friendlyName.bstrVal);
             if (name.find(L"VirtuaCam") == std::wstring::npos) {
                 cameraNames.push_back(name);
+                g_cameraDeviceNamesCache.push_back(name);
                 g_cameraDevicePaths.push_back(devicePathStr);
             }
         }
@@ -159,6 +162,7 @@ static WCHAR g_windowClass[MAX_LOADSTRING];
 static std::function<void(int)> g_audioSelectionCallback;
 static std::vector<std::wstring> g_captureDeviceNames;
 std::vector<std::wstring> g_cameraDevicePaths;
+std::vector<std::wstring> g_cameraDeviceNamesCache;
 static int g_currentAudioDevice = ID_AUDIO_DEVICE_NONE;
 static PFN_GetSharedTexture g_pfnGetSharedTexture = nullptr;
 static std::function<void()> g_onIdle;
@@ -307,6 +311,21 @@ void UI_SetAudioSelectionCallback(std::function<void(int)> callback) {
     g_audioSelectionCallback = callback;
 }
 
+void UI_SetCurrentAudioDeviceId(int id)
+{
+    g_currentAudioDevice = id;
+}
+
+int UI_GetCurrentAudioDeviceId()
+{
+    return g_currentAudioDevice;
+}
+
+std::vector<std::wstring> UI_RefreshCameraDeviceList()
+{
+    return EnumerateCameras();
+}
+
 const wchar_t* UI_GetCameraDevicePath(int index)
 {
     if (index < 0 || static_cast<size_t>(index) >= g_cameraDevicePaths.size()) {
@@ -316,6 +335,14 @@ const wchar_t* UI_GetCameraDevicePath(int index)
         return nullptr;
     }
     return g_cameraDevicePaths[index].c_str();
+}
+
+const wchar_t* UI_GetCameraDeviceName(int index)
+{
+    if (index < 0 || static_cast<size_t>(index) >= g_cameraDeviceNamesCache.size()) {
+        return nullptr;
+    }
+    return g_cameraDeviceNamesCache[index].c_str();
 }
 
 ATOM MyRegisterClass(HINSTANCE instance) {
@@ -595,7 +622,7 @@ void ShowContextMenu(HWND hwnd) {
     SetCursor(LoadCursor(nullptr, IDC_ARROW));
     EnableNativeDarkMenus(hwnd);
 
-    const auto cameras = EnumerateCameras();
+    const auto cameras = UI_RefreshCameraDeviceList();
     const auto windows = EnumerateWindows();
 
     HMENU menu = CreatePopupMenu();

@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "WASAPI.h"
 #include "App.h"
+#include "RuntimeLog.h"
 #include <propkey.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <avrt.h>
@@ -83,12 +84,15 @@ HRESULT WASAPICapture::StartCapture(int deviceIndex, bool isLoopback) {
     StopCapture();
 
     wil::com_ptr_nothrow<IMMDevice> device;
+    std::wstring deviceName;
     if (isLoopback) {
         if (deviceIndex < 0 || deviceIndex >= m_renderDevices.size()) return E_INVALIDARG;
         device = m_renderDevices[deviceIndex];
+        deviceName = m_renderDeviceNames[deviceIndex];
     } else {
         if (deviceIndex < 0 || deviceIndex >= m_captureDevices.size()) return E_INVALIDARG;
         device = m_captureDevices[deviceIndex];
+        deviceName = m_captureDeviceNames[deviceIndex];
     }
 
     RETURN_IF_FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&m_audioClient));
@@ -113,6 +117,7 @@ HRESULT WASAPICapture::StartCapture(int deviceIndex, bool isLoopback) {
     RETURN_IF_FAILED(m_audioClient->GetService(IID_PPV_ARGS(&m_captureClient)));
 
     ResetEvent(m_hShutdownEvent.get());
+    m_loggedFirstPacket = false;
     m_hCaptureThread.reset(CreateThread(NULL, 0, CaptureThread, this, 0, NULL));
     RETURN_HR_IF_NULL(E_FAIL, m_hCaptureThread.get());
 
@@ -123,6 +128,10 @@ HRESULT WASAPICapture::StartCapture(int deviceIndex, bool isLoopback) {
         return hrStart;
     }
 
+    VirtuaCamLog::LogLine(std::format(
+        L"Audio capture started: device={} loopback={}",
+        deviceName,
+        isLoopback ? 1 : 0));
     return S_OK;
 }
 
@@ -169,6 +178,13 @@ void WASAPICapture::CaptureThreadImpl() {
         HRESULT hr = m_captureClient->GetBuffer(&pData, &numFramesAvailable, &flags, NULL, NULL);
 
         if (SUCCEEDED(hr) && numFramesAvailable > 0) {
+            if (!m_loggedFirstPacket) {
+                m_loggedFirstPacket = true;
+                VirtuaCamLog::LogLine(std::format(
+                    L"Audio capture packet: frames={} silent={}",
+                    numFramesAvailable,
+                    (flags & AUDCLNT_BUFFERFLAGS_SILENT) ? 1 : 0));
+            }
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
                 // Audio is silent, no data to process.
             } else {

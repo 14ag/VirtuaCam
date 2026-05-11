@@ -23,6 +23,7 @@
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <cmath>
+#include <cwctype>
 
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
@@ -131,6 +132,48 @@ namespace
         if (!(end && end != s.c_str())) return false;
         outValue = static_cast<int>(v);
         return true;
+    }
+
+    std::wstring ToLowerInvariant(std::wstring value)
+    {
+        std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
+        });
+        return value;
+    }
+
+    std::wstring NormalizeCameraDeviceLink(std::wstring value)
+    {
+        value = ToLowerInvariant(value);
+        constexpr wchar_t pnpPrefix[] = L"@device:pnp:";
+        if (value.rfind(pnpPrefix, 0) == 0) {
+            value.erase(0, ARRAYSIZE(pnpPrefix) - 1);
+        }
+
+        const size_t devicePathStart = value.find(L"\\\\?\\");
+        if (devicePathStart != std::wstring::npos) {
+            value.erase(0, devicePathStart);
+        }
+
+        const size_t interfaceGuidStart = value.find(L"#{");
+        if (interfaceGuidStart != std::wstring::npos) {
+            value.erase(interfaceGuidStart);
+        }
+
+        return value;
+    }
+
+    bool CameraDeviceLinksMatch(const std::wstring& lhs, const std::wstring& rhs)
+    {
+        if (_wcsicmp(lhs.c_str(), rhs.c_str()) == 0) {
+            return true;
+        }
+
+        const std::wstring normalizedLhs = NormalizeCameraDeviceLink(lhs);
+        const std::wstring normalizedRhs = NormalizeCameraDeviceLink(rhs);
+        return !normalizedLhs.empty() &&
+            !normalizedRhs.empty() &&
+            normalizedLhs == normalizedRhs;
     }
 
     bool HasArg(const std::wstring& cmdLine, const wchar_t* arg)
@@ -870,6 +913,8 @@ namespace BuiltInCaptureProducer
         g_sharedD3D11Texture.As(&r1);
         RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, texName.c_str(), &g_hSharedTextureHandle));
         RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_hSharedFenceHandle));
+        g_pManifestView->sharedFenceHandleValue = static_cast<UINT64>(
+            reinterpret_cast<UINT_PTR>(g_hSharedFenceHandle));
 
         return S_OK;
     }
@@ -2052,6 +2097,8 @@ namespace BuiltInCameraProducer
         g_sharedD3D11Texture.As(&r1);
         RETURN_IF_FAILED(r1->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, texName.c_str(), &g_hSharedTextureHandle));
         RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_hSharedFenceHandle));
+        g_pManifestView->sharedFenceHandleValue = static_cast<UINT64>(
+            reinterpret_cast<UINT_PTR>(g_hSharedFenceHandle));
 
         return S_OK;
     }
@@ -2084,7 +2131,7 @@ namespace BuiltInCameraProducer
                 wil::unique_cotaskmem_string symbolicLink;
                 if (SUCCEEDED(devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &symbolicLink, nullptr)) &&
                     symbolicLink.get() &&
-                    _wcsicmp(symbolicLink.get(), devicePath.c_str()) == 0) {
+                    CameraDeviceLinksMatch(symbolicLink.get(), devicePath)) {
                     chosen = static_cast<int>(i);
                     break;
                 }

@@ -147,6 +147,8 @@ HRESULT CreateSharingResources(UINT width, UINT height, DXGI_FORMAT format) {
         g_adapterLuid,
         textureName,
         fenceName));
+    g_pManifestView_Out->sharedFenceHandleValue = static_cast<UINT64>(
+        reinterpret_cast<UINT_PTR>(g_sharedFenceHandle_Out));
     g_pManifestView_Out->command = VCamCommand::None;
     return S_OK;
 }

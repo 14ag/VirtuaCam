@@ -90,6 +90,16 @@ namespace VirtuaCamConfig
             path.c_str());
         settings.aspectRatio = ParseAspectRatio(aspectRatio);
 
+        wchar_t audioCaptureDeviceName[256] = {};
+        GetPrivateProfileStringW(
+            kSectionName,
+            L"AudioCaptureDeviceName",
+            L"Stereo Mix",
+            audioCaptureDeviceName,
+            ARRAYSIZE(audioCaptureDeviceName),
+            path.c_str());
+        settings.audioCaptureDeviceName = audioCaptureDeviceName;
+
         if (!std::filesystem::exists(path)) {
             (void)SaveSettings(settings);
         }
@@ -114,7 +124,8 @@ namespace VirtuaCamConfig
             WritePrivateProfileStringW(kSectionName, L"ShowPipTopLeft", settings.showPipTopLeft ? L"1" : L"0", path.c_str()) &&
             WritePrivateProfileStringW(kSectionName, L"ShowPipTopRight", settings.showPipTopRight ? L"1" : L"0", path.c_str()) &&
             WritePrivateProfileStringW(kSectionName, L"ShowPipBottomLeft", settings.showPipBottomLeft ? L"1" : L"0", path.c_str()) &&
-            WritePrivateProfileStringW(kSectionName, L"AspectRatio", AspectRatioConfigValue(settings.aspectRatio), path.c_str());
+            WritePrivateProfileStringW(kSectionName, L"AspectRatio", AspectRatioConfigValue(settings.aspectRatio), path.c_str()) &&
+            WritePrivateProfileStringW(kSectionName, L"AudioCaptureDeviceName", settings.audioCaptureDeviceName.c_str(), path.c_str());
 
         if (!ok) {
             VirtuaCamLog::LogWin32(std::format(L"Write config failed: {}", path.wstring()), GetLastError());

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <map>
 #include <cmath>
+#include <cwctype>
 
 using namespace Microsoft::WRL;
 
@@ -55,6 +56,7 @@ static bool g_showPipTR = false;
 static bool g_showPipBL = false;
 static AspectRatioMode g_aspectRatioMode = AspectRatioMode::R16_9;
 static ULONG g_allowedAspectRatioMask = ASPECT_RATIO_MASK_ALL;
+static std::wstring g_audioCaptureDeviceName = L"Stereo Mix";
 static constexpr ULONGLONG kAppFrameIntervalMs = 33;
 static constexpr ULONGLONG kDefaultFeedRefreshMs = 1000;
 
@@ -91,6 +93,8 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
 void InformBroker();
 void LoadSettings();
 void SaveSettings();
+void InitializeAudio();
+void SelectAudioForCameraPassthrough(int cameraIndex);
 bool HasArg(const std::wstring& cmdLine, const wchar_t* arg);
 bool TryGetArgU64(const std::wstring& cmdLine, const wchar_t* arg, UINT64& outValue);
 
@@ -313,6 +317,207 @@ const SourceState& GetPipSourceState(PipPosition pos) {
     return g_pip_br_state;
 }
 
+std::wstring ToLowerInvariant(std::wstring value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(ch));
+    });
+    return value;
+}
+
+bool ContainsText(const std::wstring& value, const std::wstring& needle)
+{
+    if (needle.empty()) {
+        return true;
+    }
+    return ToLowerInvariant(value).find(ToLowerInvariant(needle)) != std::wstring::npos;
+}
+
+int FindAudioCaptureDeviceByName(const std::wstring& requestedName)
+{
+    if (!g_audioCapture || requestedName.empty()) {
+        return -1;
+    }
+
+    const auto& names = g_audioCapture->GetCaptureDeviceNames();
+    const std::wstring requestedLower = ToLowerInvariant(requestedName);
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (ToLowerInvariant(names[i]) == requestedLower) {
+            return static_cast<int>(i);
+        }
+    }
+
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (ContainsText(names[i], requestedName) || ContainsText(requestedName, names[i])) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+int FindStereoMixAudioDevice()
+{
+    if (!g_audioCapture) {
+        return -1;
+    }
+
+    const auto& names = g_audioCapture->GetCaptureDeviceNames();
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (ContainsText(names[i], L"Stereo Mix")) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool LooksLikeUsbCamera(const wchar_t* cameraName, const wchar_t* devicePath)
+{
+    const std::wstring name = cameraName ? cameraName : L"";
+    const std::wstring path = devicePath ? devicePath : L"";
+    return ContainsText(name, L"USB") || ContainsText(path, L"usb#") || ContainsText(path, L"vid_");
+}
+
+int FindCameraMicrophoneDevice(const wchar_t* cameraName, const wchar_t* devicePath)
+{
+    if (!g_audioCapture) {
+        return -1;
+    }
+
+    const std::wstring camera = cameraName ? cameraName : L"";
+    const auto& names = g_audioCapture->GetCaptureDeviceNames();
+
+    if (!camera.empty()) {
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (ContainsText(names[i], camera)) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+
+    if (LooksLikeUsbCamera(cameraName, devicePath)) {
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (ContainsText(names[i], L"microphone") &&
+                ContainsText(names[i], L"usb") &&
+                ContainsText(names[i], L"camera")) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+
+    return -1;
+}
+
+void SelectAudioCaptureDevice(int captureIndex, bool save, const wchar_t* reason)
+{
+    if (!g_audioCapture) {
+        return;
+    }
+
+    const auto& names = g_audioCapture->GetCaptureDeviceNames();
+    if (captureIndex < 0 || static_cast<size_t>(captureIndex) >= names.size()) {
+        g_audioCapture->StopCapture();
+        g_audioCaptureDeviceName.clear();
+        UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_NONE);
+        if (save) {
+            SaveSettings();
+        }
+        VirtuaCamLog::LogLine(std::format(
+            L"Audio source selected: None reason={}",
+            reason ? reason : L""));
+        return;
+    }
+
+    HRESULT hr = g_audioCapture->StartCapture(captureIndex, false);
+    if (FAILED(hr)) {
+        UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_NONE);
+        VirtuaCamLog::LogHr(std::format(
+            L"Audio source failed: {} reason={}",
+            names[captureIndex],
+            reason ? reason : L""),
+            hr);
+        return;
+    }
+
+    g_audioCaptureDeviceName = names[captureIndex];
+    UI_SetCurrentAudioDeviceId(ID_AUDIO_CAPTURE_FIRST + captureIndex);
+    if (save) {
+        SaveSettings();
+    }
+    VirtuaCamLog::LogLine(std::format(
+        L"Audio source selected: {} reason={}",
+        g_audioCaptureDeviceName,
+        reason ? reason : L""));
+}
+
+void SelectAudioMenuId(int id, bool save, const wchar_t* reason)
+{
+    if (id == ID_AUDIO_DEVICE_NONE) {
+        SelectAudioCaptureDevice(-1, save, reason);
+        return;
+    }
+
+    if (id >= ID_AUDIO_CAPTURE_FIRST) {
+        SelectAudioCaptureDevice(id - ID_AUDIO_CAPTURE_FIRST, save, reason);
+    }
+}
+
+void ApplySavedAudioSelection()
+{
+    if (!g_audioCapture) {
+        return;
+    }
+
+    int index = FindAudioCaptureDeviceByName(g_audioCaptureDeviceName);
+    if (index < 0 && !g_audioCaptureDeviceName.empty()) {
+        VirtuaCamLog::LogLine(std::format(
+            L"Saved audio source missing: {}; falling back to Stereo Mix",
+            g_audioCaptureDeviceName));
+    }
+    if (index < 0) {
+        index = FindStereoMixAudioDevice();
+    }
+    SelectAudioCaptureDevice(index, true, L"startup default");
+}
+
+void InitializeAudio()
+{
+    g_audioCapture = std::make_unique<WASAPICapture>();
+    if (FAILED(g_audioCapture->EnumerateCaptureDevices())) {
+        VirtuaCamLog::LogLine(L"Audio capture enumeration failed");
+        g_audioCapture.reset();
+        return;
+    }
+
+    UI_UpdateAudioDeviceLists(g_audioCapture->GetCaptureDeviceNames());
+    UI_SetAudioSelectionCallback([](int id) {
+        SelectAudioMenuId(id, true, L"menu");
+    });
+    ApplySavedAudioSelection();
+}
+
+void SelectAudioForCameraPassthrough(int cameraIndex)
+{
+    if (!g_audioCapture) {
+        return;
+    }
+
+    const wchar_t* cameraName = UI_GetCameraDeviceName(cameraIndex);
+    const wchar_t* devicePath = UI_GetCameraDevicePath(cameraIndex);
+    if (!LooksLikeUsbCamera(cameraName, devicePath)) {
+        return;
+    }
+
+    const int micIndex = FindCameraMicrophoneDevice(cameraName, devicePath);
+    if (micIndex < 0) {
+        VirtuaCamLog::LogLine(std::format(
+            L"Camera passthrough audio: no matching USB webcam mic found for {}",
+            cameraName ? cameraName : L""));
+        return;
+    }
+
+    SelectAudioCaptureDevice(micIndex, true, L"camera passthrough");
+}
+
 void TerminateProducer(const std::wstring& key)
 {
     if (g_producerProcesses.count(key))
@@ -452,6 +657,7 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
                     L"main_camera",
                     L"--type camera --device " + std::to_wstring(g_mainSourceState.cameraIndex));
             }
+            SelectAudioForCameraPassthrough(g_mainSourceState.cameraIndex);
             break;
         case SourceMode::Window:
             SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main window source");
@@ -580,11 +786,28 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         ShutdownSystem(); CoUninitialize(); return FALSE;
     }
 
+    InitializeAudio();
     SetTimer(g_hMainWnd, 1, 1000, nullptr);
     UINT64 startupWindowHwnd = 0;
+    UINT64 startupCameraIndex = 0;
     if (TryGetArgU64(cmdLine, L"--source-window-hwnd", startupWindowHwnd)) {
         VirtuaCamLog::LogLine(std::format(L"Startup source: window hwnd={}", startupWindowHwnd));
         SetSourceMode(SourceMode::Window, static_cast<DWORD_PTR>(startupWindowHwnd));
+    } else if (TryGetArgU64(cmdLine, L"--source-camera-index", startupCameraIndex)) {
+        const auto cameras = UI_RefreshCameraDeviceList();
+        if (startupCameraIndex < cameras.size()) {
+            VirtuaCamLog::LogLine(std::format(
+                L"Startup source: camera index={} name={}",
+                startupCameraIndex,
+                cameras[static_cast<size_t>(startupCameraIndex)]));
+            SetSourceMode(SourceMode::Camera, static_cast<DWORD_PTR>(startupCameraIndex));
+        } else {
+            VirtuaCamLog::LogLine(std::format(
+                L"Startup source camera index out of range: {} cameraCount={}",
+                startupCameraIndex,
+                cameras.size()));
+            SetSourceMode(SourceMode::Consumer, 0);
+        }
     } else if (HasArg(cmdLine, L"--source-consumer")) {
         VirtuaCamLog::LogLine(L"Startup source: consumer");
         SetSourceMode(SourceMode::Consumer, 0);
@@ -593,15 +816,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         SetSourceMode(SourceMode::Consumer, 0);
     }
     InformBroker();
-
-    g_audioCapture = std::make_unique<WASAPICapture>();
-    if (SUCCEEDED(g_audioCapture->EnumerateCaptureDevices())) {
-        UI_UpdateAudioDeviceLists(g_audioCapture->GetCaptureDeviceNames());
-        UI_SetAudioSelectionCallback([](int id) {
-            if (id == ID_AUDIO_DEVICE_NONE) g_audioCapture->StopCapture();
-            else if (id >= ID_AUDIO_CAPTURE_FIRST) g_audioCapture->StartCapture(id - ID_AUDIO_CAPTURE_FIRST, false);
-        });
-    }
 
     g_driverBridge = std::make_unique<DriverBridge>();
     HRESULT hrDriver = g_driverBridge->Initialize();
@@ -863,11 +1077,13 @@ void LoadSettings() {
     g_showPipTR = settings.showPipTopRight;
     g_showPipBL = settings.showPipBottomLeft;
     g_aspectRatioMode = settings.aspectRatio;
+    g_audioCaptureDeviceName = settings.audioCaptureDeviceName;
 
     VirtuaCamLog::LogLine(std::format(
-        L"Settings loaded: config={} aspect={}",
+        L"Settings loaded: config={} aspect={} audio={}",
         VirtuaCamConfig::GetConfigPath().wstring(),
-        VirtuaCamConfig::AspectRatioName(g_aspectRatioMode)));
+        VirtuaCamConfig::AspectRatioName(g_aspectRatioMode),
+        g_audioCaptureDeviceName.empty() ? L"None" : g_audioCaptureDeviceName));
 }
 
 void SaveSettings() {
@@ -876,6 +1092,7 @@ void SaveSettings() {
     settings.showPipTopRight = g_showPipTR;
     settings.showPipBottomLeft = g_showPipBL;
     settings.aspectRatio = g_aspectRatioMode;
+    settings.audioCaptureDeviceName = g_audioCaptureDeviceName;
     (void)VirtuaCamConfig::SaveSettings(settings);
 }
 

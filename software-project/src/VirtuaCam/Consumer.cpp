@@ -96,6 +96,8 @@ HRESULT InitOutputResources()
         g_adapterLuid,
         textureName,
         fenceName));
+    g_pManifestViewOut->sharedFenceHandleValue = static_cast<UINT64>(
+        reinterpret_cast<UINT_PTR>(g_sharedOutFenceHandle));
     
     ComPtr<ID3DBlob> vsBlob, psBlob;
     D3DCompile(g_vertexShader, strlen(g_vertexShader), nullptr, nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsBlob, nullptr);
