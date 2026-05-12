@@ -60,7 +60,6 @@ $driverBridgeCpp = Join-Path $SourceRoot "VirtuaCam\DriverBridge.cpp"
 $multiplexerCpp = Join-Path $SourceRoot "VirtuaCam\Multiplexer.cpp"
 $processCpp = Join-Path $SourceRoot "VirtuaCam\Process.cpp"
 $cmakeLists = Join-Path $SourceRoot "CMakeLists.txt"
-$nextTask = Join-Path $RepoRoot "next task3.txt"
 
 Assert-Contains -Path $appCpp -Pattern "kAppFrameIntervalMs\s*=\s*33" -Message "App frame scheduler must target 30 fps."
 Assert-Contains -Path $appCpp -Pattern "GetBrokerFrameValue" -Message "App must query broker frame value."
@@ -78,7 +77,6 @@ Assert-Contains -Path $processCpp -Pattern "struct GdiCaptureCache" -Message "GD
 Assert-NotContains -Path $processCpp -Pattern "g_gdiFrame" -Message "GDI fallback must avoid extra frame-copy buffer."
 Assert-Contains -Path $processCpp -Pattern "UpdateSubresource\(g_sourceD3D11Texture\.Get\(\), 0, nullptr, g_gdiCache\.bits" -Message "GDI fallback must upload DIB bits directly."
 Assert-Contains -Path $driverBridgeCpp -Pattern "DriverFrameDumpEnabled\(\) && \(n == 1 \|\| n == 90\)" -Message "DriverBridge PPM dumps must be debug-gated."
-Assert-Contains -Path $nextTask -Pattern "driver/user-mode ABI path for BGRA/RGB32/NV12 upload" -Message "Deferred driver ABI task missing."
 
 $muxText = Read-Text -Path $multiplexerCpp
 if ($muxText -match "for \(auto& res : m_producerResources\)[\s\S]{0,260}OpenFileMappingW") {

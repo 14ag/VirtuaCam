@@ -17,6 +17,8 @@ $consolePath = Join-Path $runDir "host-webcam-html-console.log"
 $nodeScriptPath = Join-Path $runnerDir "host-webcam-html-proof.cjs"
 $hwndPath = Join-Path $runDir "source-window.hwnd.txt"
 $pidPath = Join-Path $runDir "source-window.pid.txt"
+$panelStdOut = Join-Path $runDir "show-proof-panel.stdout.log"
+$panelStdErr = Join-Path $runDir "show-proof-panel.stderr.log"
 $attemptId = "host-html-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 $marker = "VIRTUACAM HTML SMOKE | attempt=$attemptId | utc=$((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))"
 
@@ -47,19 +49,24 @@ try {
 
     $panelArgs = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-STA",
         "-File", (Join-Path $PSScriptRoot "show-proof-panel.ps1"),
         "-HwndPath", $hwndPath,
         "-PidPath", $pidPath,
         "-AttemptId", $attemptId,
-        "-MarkerText", $marker
+        "-MarkerText", ($marker -replace '\s+', '_')
     )
-    $panelProc = Start-Process -FilePath "powershell.exe" -ArgumentList $panelArgs -PassThru
+    $panelProc = Start-Process -FilePath "powershell.exe" -ArgumentList $panelArgs -RedirectStandardOutput $panelStdOut -RedirectStandardError $panelStdErr -PassThru
 
     $deadline = (Get-Date).AddSeconds(20)
     while ((Get-Date) -lt $deadline -and -not (Test-Path -LiteralPath $hwndPath)) {
         Start-Sleep -Milliseconds 250
     }
     if (-not (Test-Path -LiteralPath $hwndPath)) {
+        $panelError = if (Test-Path -LiteralPath $panelStdErr) { (Get-Content -LiteralPath $panelStdErr -Raw -ErrorAction SilentlyContinue).Trim() } else { "" }
+        if ($panelError) {
+            throw "Proof source window did not publish hwnd. stderr: $panelError"
+        }
         throw "Proof source window did not publish hwnd."
     }
     $sourceHwnd = [Int64](Get-Content -LiteralPath $hwndPath -Raw).Trim()

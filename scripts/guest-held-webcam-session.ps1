@@ -547,7 +547,7 @@ try {
 
     Start-Sleep -Seconds 6
 
-    $guestIp = (Get-NetIPAddress -AddressFamily IPv4 |
+    $guestIp = [string](Get-NetIPAddress -AddressFamily IPv4 |
         Where-Object { $_.IPAddress -notlike "169.254*" -and $_.IPAddress -ne "127.0.0.1" } |
         Sort-Object InterfaceMetric |
         Select-Object -First 1 -ExpandProperty IPAddress)
