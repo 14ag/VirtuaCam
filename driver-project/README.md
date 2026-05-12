@@ -35,13 +35,7 @@ Use the repository root build script:
 .\scripts\build-all.ps1
 ```
 
-For driver-only iteration, still use the same script:
-
-```powershell
-.\scripts\build-all.ps1 -SkipSoftware
-```
-
-Staged artifacts land in `output/`.
+The script runs a clean build by default and stages the full package in `output/`.
 
 The staged INF uses `PnpLockdown=1`, DIRID `13`, and `ServiceBinary=%13%\avshws.sys` for current package-isolation validation.
 

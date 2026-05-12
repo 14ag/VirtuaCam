@@ -343,7 +343,8 @@ Return Value:
 
     if (!m_Device -> Started) {
         // Create the Filter for the device
-        WCHAR filterFactoryName[] = L"GLOBAL";
+        WCHAR filterFactoryName[] = L"{6B2F0F9A-4FCB-4C93-9580-2152A76E2D44}";
+        PKSFILTERFACTORY filterFactory = NULL;
         KsAcquireDevice(m_Device);
         Status = KsCreateFilterFactory( m_Device->FunctionalDeviceObject,
                                         &CaptureFilterDescriptor,
@@ -352,8 +353,12 @@ Return Value:
                                         KSCREATE_ITEM_FREEONSTOP,
                                         NULL,
                                         NULL,
-                                        NULL );
+                                        &filterFactory );
         KsReleaseDevice(m_Device);
+
+        if (NT_SUCCESS(Status)) {
+            Status = VirtuaCamPublishCameraProfiles(filterFactory);
+        }
 
     }
     //

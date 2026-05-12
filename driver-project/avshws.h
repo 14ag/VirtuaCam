@@ -95,7 +95,7 @@ const ULONG DebugLevel = DEBUGLVL_TERSE;
 //
 // The number of ranges supported on the capture pin.
 //
-#define CAPTURE_PIN_DATA_RANGE_COUNT 12
+#define CAPTURE_PIN_DATA_RANGE_COUNT 24
 
 //
 // CAPTURE_FILTER_PIN_COUNT:
@@ -130,6 +130,11 @@ extern
 const
 KSFILTER_DESCRIPTOR
 CaptureFilterDescriptor;
+
+NTSTATUS
+VirtuaCamPublishCameraProfiles (
+    _In_ PKSFILTERFACTORY FilterFactory
+    );
 
 extern
 const

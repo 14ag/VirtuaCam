@@ -105,6 +105,169 @@ namespace
             frameInfo->FrameCompletionNumber = static_cast<ULONGLONG>(*frameNumber);
         }
     }
+
+    ULONG BitmapHeightAbs(_In_ LONG Height)
+    {
+        if (Height == MINLONG) {
+            return 0;
+        }
+
+        return static_cast<ULONG>(Height < 0 ? -Height : Height);
+    }
+
+    bool ComputeVideoImageSize(
+        _In_ const KS_BITMAPINFOHEADER& Header,
+        _Out_ ULONG* ImageSize)
+    {
+        if (!ImageSize || Header.biWidth <= 0) {
+            return false;
+        }
+
+        const ULONG width = static_cast<ULONG>(Header.biWidth);
+        const ULONG height = BitmapHeightAbs(Header.biHeight);
+        if (height == 0) {
+            return false;
+        }
+
+        ULONGLONG size = 0;
+        if (Header.biCompression == FOURCC_NV12) {
+            size = (static_cast<ULONGLONG>(width) * height * 3ull) / 2ull;
+        } else if (Header.biBitCount == 16 || Header.biBitCount == 24 || Header.biBitCount == 32) {
+            size = static_cast<ULONGLONG>(width) *
+                height *
+                static_cast<ULONGLONG>(Header.biBitCount / 8);
+        } else {
+            return false;
+        }
+
+        if (size == 0 || size > MAXULONG) {
+            return false;
+        }
+
+        *ImageSize = static_cast<ULONG>(size);
+        return true;
+    }
+
+    bool IsAlignedToGranularity(_In_ ULONG Value, _In_ ULONG Minimum, _In_ ULONG Granularity)
+    {
+        if (Granularity == 0) {
+            return true;
+        }
+
+        if (Value < Minimum) {
+            return false;
+        }
+
+        return (((Value - Minimum) % Granularity) == 0);
+    }
+
+    bool IsBitmapHeaderSupportedByCaps(
+        _In_ const KS_BITMAPINFOHEADER& Header,
+        _In_ LONGLONG AvgTimePerFrame,
+        _In_ const KS_BITMAPINFOHEADER& RangeHeader,
+        _In_ const KS_VIDEO_STREAM_CONFIG_CAPS& Caps,
+        _Out_ ULONG* RequiredImageSize)
+    {
+        if (Header.biPlanes != 1 ||
+            Header.biCompression != RangeHeader.biCompression ||
+            Header.biBitCount != RangeHeader.biBitCount) {
+            return false;
+        }
+
+        ULONG imageSize = 0;
+        if (!ComputeVideoImageSize(Header, &imageSize)) {
+            return false;
+        }
+
+        const ULONG width = static_cast<ULONG>(Header.biWidth);
+        const ULONG height = BitmapHeightAbs(Header.biHeight);
+        if (width < static_cast<ULONG>(Caps.MinOutputSize.cx) ||
+            width > static_cast<ULONG>(Caps.MaxOutputSize.cx) ||
+            height < static_cast<ULONG>(Caps.MinOutputSize.cy) ||
+            height > static_cast<ULONG>(Caps.MaxOutputSize.cy) ||
+            !IsAlignedToGranularity(width,
+                static_cast<ULONG>(Caps.MinOutputSize.cx),
+                static_cast<ULONG>(Caps.OutputGranularityX)) ||
+            !IsAlignedToGranularity(height,
+                static_cast<ULONG>(Caps.MinOutputSize.cy),
+                static_cast<ULONG>(Caps.OutputGranularityY))) {
+            return false;
+        }
+
+        if (AvgTimePerFrame != 0 &&
+            (AvgTimePerFrame < Caps.MinFrameInterval ||
+                AvgTimePerFrame > Caps.MaxFrameInterval)) {
+            return false;
+        }
+
+        if (RequiredImageSize) {
+            *RequiredImageSize = imageSize;
+        }
+
+        return true;
+    }
+
+    bool IsVideoInfoSupportedByRange(
+        _In_ const KS_VIDEOINFOHEADER& Requested,
+        _In_ const KS_DATARANGE_VIDEO& Range,
+        _Out_ ULONG* RequiredImageSize)
+    {
+        return IsBitmapHeaderSupportedByCaps(
+            Requested.bmiHeader,
+            Requested.AvgTimePerFrame,
+            Range.VideoInfoHeader.bmiHeader,
+            Range.ConfigCaps,
+            RequiredImageSize);
+    }
+
+    bool IsVideoInfo2SupportedByRange(
+        _In_ const KS_VIDEOINFOHEADER2& Requested,
+        _In_ const KS_DATARANGE_VIDEO2& Range,
+        _Out_ ULONG* RequiredImageSize)
+    {
+        const ULONG validInterlaceFlags =
+            KS_INTERLACE_IsInterlaced |
+            KS_INTERLACE_1FieldPerSample |
+            KS_INTERLACE_Field1First |
+            KS_INTERLACE_FieldPatternMask |
+            KS_INTERLACE_DisplayModeMask;
+        const ULONG validControlFlags =
+            KS_AMCONTROL_USED |
+            KS_AMCONTROL_PAD_TO_4x3 |
+            KS_AMCONTROL_PAD_TO_16x9 |
+            KS_AMCONTROL_COLORINFO_PRESENT;
+
+        if ((Requested.dwInterlaceFlags & ~validInterlaceFlags) != 0 ||
+            Requested.dwCopyProtectFlags != 0 ||
+            (Requested.dwControlFlags & ~validControlFlags) != 0 ||
+            Requested.dwReserved2 != 0) {
+            return false;
+        }
+
+        return IsBitmapHeaderSupportedByCaps(
+            Requested.bmiHeader,
+            Requested.AvgTimePerFrame,
+            Range.VideoInfoHeader.bmiHeader,
+            Range.ConfigCaps,
+            RequiredImageSize);
+    }
+
+    void CopyVideoInfo2ToVideoInfo(
+        _Out_writes_bytes_(HeaderSize) PKS_VIDEOINFOHEADER Destination,
+        _In_ ULONG HeaderSize,
+        _In_ const KS_VIDEOINFOHEADER2& Source)
+    {
+        RtlZeroMemory(Destination, HeaderSize);
+        Destination->rcSource = Source.rcSource;
+        Destination->rcTarget = Source.rcTarget;
+        Destination->dwBitRate = Source.dwBitRate;
+        Destination->dwBitErrorRate = Source.dwBitErrorRate;
+        Destination->AvgTimePerFrame = Source.AvgTimePerFrame;
+        RtlCopyMemory(
+            &Destination->bmiHeader,
+            &Source.bmiHeader,
+            Source.bmiHeader.biSize);
+    }
 }
 
 /**************************************************************************
@@ -354,12 +517,31 @@ Return Value:
 --*/
 
 {
-    PKS_VIDEOINFOHEADER ConnectionHeader =
-        &((reinterpret_cast <PKS_DATAFORMAT_VIDEOINFOHEADER> 
-            (m_Pin -> ConnectionFormat)) -> 
-            VideoInfoHeader);
+    const GUID VideoInfoSpecifier = 
+        {STATICGUIDOF(KSDATAFORMAT_SPECIFIER_VIDEOINFO)};
+    const GUID VideoInfo2Specifier =
+        {STATICGUIDOF(KSDATAFORMAT_SPECIFIER_VIDEOINFO2)};
 
-    ULONG headerSize = KS_SIZE_VIDEOHEADER (ConnectionHeader);
+    PKSDATAFORMAT ConnectionFormat = m_Pin -> ConnectionFormat;
+    bool useVideoInfo2 =
+        IsEqualGUID(ConnectionFormat->Specifier, VideoInfo2Specifier) != FALSE;
+    ULONG headerSize = 0;
+
+    if (useVideoInfo2) {
+        PKS_DATAFORMAT_VIDEOINFOHEADER2 ConnectionHeader2 =
+            reinterpret_cast <PKS_DATAFORMAT_VIDEOINFOHEADER2> (ConnectionFormat);
+        headerSize =
+            FIELD_OFFSET(KS_VIDEOINFOHEADER, bmiHeader) +
+            ConnectionHeader2->VideoInfoHeader2.bmiHeader.biSize;
+    } else if (IsEqualGUID(ConnectionFormat->Specifier, VideoInfoSpecifier)) {
+        PKS_VIDEOINFOHEADER ConnectionHeader =
+            &((reinterpret_cast <PKS_DATAFORMAT_VIDEOINFOHEADER>
+                (ConnectionFormat)) ->
+                VideoInfoHeader);
+        headerSize = KS_SIZE_VIDEOHEADER(ConnectionHeader);
+    } else {
+        return NULL;
+    }
 
     if (m_VideoInfoHeader) {
         if (headerSize > m_VideoInfoHeaderSize) {
@@ -370,11 +552,24 @@ Return Value:
             return NULL;
         }
 
-        RtlCopyMemory (
-            m_VideoInfoHeader,
-            ConnectionHeader,
-            headerSize
-            );
+        if (useVideoInfo2) {
+            PKS_DATAFORMAT_VIDEOINFOHEADER2 ConnectionHeader2 =
+                reinterpret_cast <PKS_DATAFORMAT_VIDEOINFOHEADER2> (ConnectionFormat);
+            CopyVideoInfo2ToVideoInfo(
+                m_VideoInfoHeader,
+                headerSize,
+                ConnectionHeader2->VideoInfoHeader2);
+        } else {
+            PKS_VIDEOINFOHEADER ConnectionHeader =
+                &((reinterpret_cast <PKS_DATAFORMAT_VIDEOINFOHEADER>
+                    (ConnectionFormat)) ->
+                    VideoInfoHeader);
+            RtlCopyMemory (
+                m_VideoInfoHeader,
+                ConnectionHeader,
+                headerSize
+                );
+        }
 
         DbgPrint("[avshws] CaptureVideoInfoHeader reuse header=%p size=%lu irql=%lu\n",
             m_VideoInfoHeader,
@@ -424,11 +619,24 @@ Return Value:
         // Copy the connection format video info header into the newly 
         // allocated "captured" video info header.
         //
-        RtlCopyMemory (
-            m_VideoInfoHeader,
-            ConnectionHeader,
-            headerSize
-            );
+        if (useVideoInfo2) {
+            PKS_DATAFORMAT_VIDEOINFOHEADER2 ConnectionHeader2 =
+                reinterpret_cast <PKS_DATAFORMAT_VIDEOINFOHEADER2> (ConnectionFormat);
+            CopyVideoInfo2ToVideoInfo(
+                m_VideoInfoHeader,
+                headerSize,
+                ConnectionHeader2->VideoInfoHeader2);
+        } else {
+            PKS_VIDEOINFOHEADER ConnectionHeader =
+                &((reinterpret_cast <PKS_DATAFORMAT_VIDEOINFOHEADER>
+                    (ConnectionFormat)) ->
+                    VideoInfoHeader);
+            RtlCopyMemory (
+                m_VideoInfoHeader,
+                ConnectionHeader,
+                headerSize
+                );
+        }
 
         m_VideoInfoHeaderSize = headerSize;
         DbgPrint("[avshws] CaptureVideoInfoHeader alloc header=%p size=%lu irql=%lu\n",
@@ -902,6 +1110,8 @@ Return Value:
 
     const GUID VideoInfoSpecifier = 
         {STATICGUIDOF(KSDATAFORMAT_SPECIFIER_VIDEOINFO)};
+    const GUID VideoInfo2Specifier =
+        {STATICGUIDOF(KSDATAFORMAT_SPECIFIER_VIDEOINFO2)};
     
     NT_ASSERT(Filter);
     NT_ASSERT(Irp);
@@ -936,11 +1146,7 @@ Return Value:
             (callerDataRange->StreamDescriptionFlags != 
                 descriptorDataRange->StreamDescriptionFlags) ||
             (callerDataRange->MemoryAllocationFlags != 
-                descriptorDataRange->MemoryAllocationFlags) ||
-            (RtlCompareMemory (&callerDataRange->ConfigCaps,
-                    &descriptorDataRange->ConfigCaps,
-                    sizeof (KS_VIDEO_STREAM_CONFIG_CAPS)) != 
-                    sizeof (KS_VIDEO_STREAM_CONFIG_CAPS))) 
+                descriptorDataRange->MemoryAllocationFlags))
         {
             return STATUS_NO_MATCH;
         }
@@ -1043,22 +1249,17 @@ Return Value:
         // Note that for compressed sizes, this calculation will probably not
         // be just width * height * bitdepth
         //
-        if (FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biCompression == FOURCC_NV12) {
-            const ULONG width = (ULONG)FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biWidth;
-            const ULONG height = (ULONG)abs(FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biHeight);
-            ULONGLONG imageSize =
-                (static_cast<ULONGLONG>(width) * static_cast<ULONGLONG>(height) * 3ull) / 2ull;
-            if (imageSize > MAXULONG) {
-                return STATUS_INVALID_PARAMETER;
-            }
-            FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biSizeImage =
-                FormatVideoInfoHeader->DataFormat.SampleSize =
-                static_cast<ULONG>(imageSize);
-        } else {
-            FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biSizeImage =
-                FormatVideoInfoHeader->DataFormat.SampleSize =
-                KS_DIBSIZE (FormatVideoInfoHeader->VideoInfoHeader.bmiHeader);
+        ULONG imageSize = 0;
+        if (!IsVideoInfoSupportedByRange(
+            FormatVideoInfoHeader->VideoInfoHeader,
+            *descriptorDataRange,
+            &imageSize)) {
+            return STATUS_NO_MATCH;
         }
+
+        FormatVideoInfoHeader->VideoInfoHeader.bmiHeader.biSizeImage =
+            FormatVideoInfoHeader->DataFormat.SampleSize =
+            imageSize;
 
         //
         // REVIEW - Perform other validation such as cropping and scaling checks
@@ -1067,6 +1268,98 @@ Return Value:
         return STATUS_SUCCESS;
         
     } // End of VIDEOINFOHEADER specifier
+
+    //
+    // Specifier FORMAT_VideoInfo2 for VIDEOINFOHEADER2.
+    //
+    if (IsEqualGUID(CallerDataRange->Specifier, VideoInfo2Specifier) &&
+        CallerDataRange -> FormatSize >= sizeof (KS_DATARANGE_VIDEO2)) {
+
+        PKS_DATARANGE_VIDEO2 callerDataRange =
+            reinterpret_cast <PKS_DATARANGE_VIDEO2> (CallerDataRange);
+
+        PKS_DATARANGE_VIDEO2 descriptorDataRange =
+            reinterpret_cast <PKS_DATARANGE_VIDEO2> (DescriptorDataRange);
+
+        PKS_DATAFORMAT_VIDEOINFOHEADER2 FormatVideoInfoHeader2;
+
+        if ((callerDataRange->bFixedSizeSamples !=
+                descriptorDataRange->bFixedSizeSamples) ||
+            (callerDataRange->bTemporalCompression !=
+                descriptorDataRange->bTemporalCompression) ||
+            (callerDataRange->StreamDescriptionFlags !=
+                descriptorDataRange->StreamDescriptionFlags) ||
+            (callerDataRange->MemoryAllocationFlags !=
+                descriptorDataRange->MemoryAllocationFlags))
+        {
+            return STATUS_NO_MATCH;
+        }
+
+        ULONG VideoHeaderSize =
+            FIELD_OFFSET(KS_VIDEOINFOHEADER2, bmiHeader) +
+            callerDataRange->VideoInfoHeader.bmiHeader.biSize;
+
+        ULONG DataRangeSize =
+            FIELD_OFFSET(KS_DATARANGE_VIDEO2, VideoInfoHeader) +
+            VideoHeaderSize;
+
+        if (VideoHeaderSize < callerDataRange->
+                VideoInfoHeader.bmiHeader.biSize ||
+            DataRangeSize < VideoHeaderSize ||
+            DataRangeSize > callerDataRange -> DataRange.FormatSize) {
+
+            return STATUS_INVALID_PARAMETER;
+
+        }
+
+        DataFormatSize =
+            sizeof (KSDATAFORMAT) +
+            VideoHeaderSize;
+
+        if (BufferSize == 0) {
+
+            *DataSize = DataFormatSize;
+            return STATUS_BUFFER_OVERFLOW;
+
+        }
+
+        if (BufferSize < DataFormatSize)
+        {
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+
+        *DataSize = DataFormatSize;
+
+        FormatVideoInfoHeader2 = PKS_DATAFORMAT_VIDEOINFOHEADER2( Data );
+
+        RtlCopyMemory (
+            &FormatVideoInfoHeader2->DataFormat,
+            DescriptorDataRange,
+            sizeof (KSDATAFORMAT));
+
+        FormatVideoInfoHeader2->DataFormat.FormatSize = DataFormatSize;
+
+        RtlCopyMemory (
+            &FormatVideoInfoHeader2->VideoInfoHeader2,
+            &callerDataRange->VideoInfoHeader,
+            VideoHeaderSize
+            );
+
+        ULONG imageSize = 0;
+        if (!IsVideoInfo2SupportedByRange(
+            FormatVideoInfoHeader2->VideoInfoHeader2,
+            *descriptorDataRange,
+            &imageSize)) {
+            return STATUS_NO_MATCH;
+        }
+
+        FormatVideoInfoHeader2->VideoInfoHeader2.bmiHeader.biSizeImage =
+            FormatVideoInfoHeader2->DataFormat.SampleSize =
+            imageSize;
+
+        return STATUS_SUCCESS;
+
+    } // End of VIDEOINFOHEADER2 specifier
     
     return STATUS_NO_MATCH;
 }
@@ -1192,6 +1485,8 @@ Return Value:
 
     const GUID VideoInfoSpecifier = 
         {STATICGUIDOF(KSDATAFORMAT_SPECIFIER_VIDEOINFO)};
+    const GUID VideoInfo2Specifier =
+        {STATICGUIDOF(KSDATAFORMAT_SPECIFIER_VIDEOINFO2)};
 
     CCapturePin *CapPin = NULL;
 
@@ -1245,98 +1540,23 @@ Return Value:
 
         }
 
-        //
-        // Check that the format is a match for the selected range. 
-        //
-        else if (
-            (ConnectionFormat -> VideoInfoHeader.bmiHeader.biWidth !=
-                VIRange -> VideoInfoHeader.bmiHeader.biWidth) ||
-
-            (ConnectionFormat -> VideoInfoHeader.bmiHeader.biHeight !=
-                VIRange -> VideoInfoHeader.bmiHeader.biHeight) ||
-
-            (ConnectionFormat -> VideoInfoHeader.bmiHeader.biCompression !=
-                VIRange -> VideoInfoHeader.bmiHeader.biCompression) 
-            ||
-            (ConnectionFormat -> VideoInfoHeader.bmiHeader.biBitCount !=
-                VIRange -> VideoInfoHeader.bmiHeader.biBitCount)
-
-            ) {
-
-            Status = STATUS_NO_MATCH;
-
-        } else {
+        else {
+            ULONG ImageSize = 0;
 
             //
-            // Compute the minimum size of our buffers to validate against.
-            // The image synthesis routines synthesize |biHeight| rows of
-            // biWidth pixels in either RGB24 or UYVY.  In order to ensure
-            // safe synthesis into the buffer, we need to know how large an
-            // image this will produce.
+            // Check that the requested VIDEOINFOHEADER is in the selected range.
             //
-            // I do this explicitly because of the method that the data is
-            // synthesized.  A variation of this may or may not be necessary
-            // depending on the mechanism the driver in question fills the 
-            // capture buffers.  The important thing is to ensure that they
-            // aren't overrun during capture.
-            //
-            ULONG ImageSize;
+            if (!IsVideoInfoSupportedByRange(
+                    ConnectionFormat->VideoInfoHeader,
+                    *VIRange,
+                    &ImageSize)) {
 
-            if (!MultiplyCheckOverflow (
-                (ULONG)ConnectionFormat->VideoInfoHeader.bmiHeader.biWidth,
-                (ULONG)abs (ConnectionFormat->
-                    VideoInfoHeader.bmiHeader.biHeight),
-                &ImageSize
-                )) {
-
-                Status = STATUS_INVALID_PARAMETER;
-            }
-
-            else if (ConnectionFormat->VideoInfoHeader.bmiHeader.biCompression == FOURCC_NV12) {
-                ULONGLONG nv12Size =
-                    (static_cast<ULONGLONG>(ImageSize) * 3ull) / 2ull;
-                if (nv12Size > MAXULONG) {
-                    Status = STATUS_INVALID_PARAMETER;
-                } else {
-                    ImageSize = static_cast<ULONG>(nv12Size);
-                    Status = STATUS_SUCCESS;
-                }
-            }
-
-            //
-            // We only support fixed-size packed RGB/YUY2 formats here, so
-            // this is valid for those formats.
-            //
-            else if (!MultiplyCheckOverflow (
-                ImageSize,
-                (ULONG)(ConnectionFormat->
-                    VideoInfoHeader.bmiHeader.biBitCount / 8),
-                &ImageSize
-                )) {
-
-                Status = STATUS_INVALID_PARAMETER;
+                Status = STATUS_NO_MATCH;
 
             } else {
 
-                Status = STATUS_SUCCESS;
-
-            }
-
-            //
-            // Valid for the formats we use.  Otherwise, this would be
-            // checked later.
-            //
-            if (!NT_SUCCESS(Status)) {
-
-                ;
-
-            } else if (ConnectionFormat->VideoInfoHeader.bmiHeader.biSizeImage <
-                    ImageSize) {
-
-                Status = STATUS_INVALID_PARAMETER;
-
-            } else {
-
+                ConnectionFormat->VideoInfoHeader.bmiHeader.biSizeImage = ImageSize;
+                ConnectionFormat->DataFormat.SampleSize = ImageSize;
                 //
                 // We can accept the format. 
                 //
@@ -1349,15 +1569,17 @@ Return Value:
                 // not handle dynamic format changes.
                 //
                 // If something changes while we're in the stop state, we're 
-                // fine to handle it since we haven't "configured the hardware"
-                // yet.
+                // fine to handle it since we haven't entered RUN. AVStream can
+                // also send a second set-format before RUN with actual surface
+                // parameters.
                 //
                 if (OldFormat) {
                     //
-                    // If we're in the stop state, we can handle just about any
-                    // change.  We don't support dynamic format changes. 
+                    // If we're not yet running, we can capture whatever format
+                    // was last successfully selected. We don't support dynamic
+                    // format changes while streaming.
                     //
-                    if (Pin -> DeviceState == KSSTATE_STOP) {
+                    if (CapPin && Pin -> DeviceState != KSSTATE_RUN) {
                         if (!CapPin -> CaptureVideoInfoHeader ()) {
                             Status = STATUS_INSUFFICIENT_RESOURCES;
                         }
@@ -1371,7 +1593,68 @@ Return Value:
                 }
 
             }
+        }
 
+    }
+    else if (IsEqualGUID (Pin -> ConnectionFormat -> Specifier,
+            VideoInfo2Specifier) &&
+        Pin -> ConnectionFormat -> FormatSize >=
+            sizeof (KS_DATAFORMAT_VIDEOINFOHEADER2)) {
+
+        PKS_DATAFORMAT_VIDEOINFOHEADER2 ConnectionFormat =
+            reinterpret_cast <PKS_DATAFORMAT_VIDEOINFOHEADER2>
+                (Pin -> ConnectionFormat);
+
+        const KS_DATARANGE_VIDEO2 *VIRange =
+            reinterpret_cast <const KS_DATARANGE_VIDEO2 *>
+                (DataRange);
+
+        ULONG VideoHeaderSize =
+            FIELD_OFFSET(KS_VIDEOINFOHEADER2, bmiHeader) +
+            ConnectionFormat->VideoInfoHeader2.bmiHeader.biSize;
+
+        ULONG DataFormatSize = FIELD_OFFSET (
+            KS_DATAFORMAT_VIDEOINFOHEADER2, VideoInfoHeader2
+            ) + VideoHeaderSize;
+
+        if (
+            VideoHeaderSize < ConnectionFormat->
+                VideoInfoHeader2.bmiHeader.biSize ||
+            DataFormatSize < VideoHeaderSize ||
+            DataFormatSize > ConnectionFormat -> DataFormat.FormatSize
+            ) {
+
+            Status = STATUS_INVALID_PARAMETER;
+
+        }
+
+        else {
+            ULONG ImageSize = 0;
+
+            if (!IsVideoInfo2SupportedByRange(
+                    ConnectionFormat->VideoInfoHeader2,
+                    *VIRange,
+                    &ImageSize)) {
+
+                Status = STATUS_NO_MATCH;
+
+            } else {
+
+                ConnectionFormat->VideoInfoHeader2.bmiHeader.biSizeImage = ImageSize;
+                ConnectionFormat->DataFormat.SampleSize = ImageSize;
+                Status = STATUS_SUCCESS;
+
+                if (OldFormat) {
+                    if (CapPin && Pin -> DeviceState != KSSTATE_RUN) {
+                        if (!CapPin -> CaptureVideoInfoHeader ()) {
+                            Status = STATUS_INSUFFICIENT_RESOURCES;
+                        }
+                    } else {
+                        Status = STATUS_INVALID_DEVICE_STATE;
+                    }
+                }
+
+            }
         }
 
     }
@@ -2138,12 +2421,83 @@ const KS_DATARANGE_VIDEO Name = { \
       (WidthValue) * (HeightValue) * 4, 0, 0, 0, 0 } \
 }
 
+#define DEFINE_YUY2_CAPTURE_RANGE2(Name, WidthValue, HeightValue, AspectXValue, AspectYValue) \
+const KS_DATARANGE_VIDEO2 Name = { \
+    { sizeof (KS_DATARANGE_VIDEO2), 0, (WidthValue) * (HeightValue) * 2, 0, \
+      STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO), \
+      0x32595559, 0x0000, 0x0010, 0x80, 0x00, \
+      0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71, \
+      STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO2) }, \
+    TRUE, FALSE, 0, 0, \
+    { STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO2 ), KS_AnalogVideo_None, \
+      (WidthValue), (HeightValue), (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 1, 8, 1, (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 1, 0, 0, 0, 0, 333667, 640000000, \
+      8 * 2 * 30 * (WidthValue) * (HeightValue), \
+      8 * 2 * 30 * (WidthValue) * (HeightValue) }, \
+    { 0,0,0,0, 0,0,0,0, (WidthValue) * (HeightValue) * 2 * 8 * 30, 0L, 333667, \
+      0, 0, (AspectXValue), (AspectYValue), 0, 0, \
+      sizeof (KS_BITMAPINFOHEADER), (WidthValue), (HeightValue), 1, 16, FOURCC_YUY2, \
+      (WidthValue) * (HeightValue) * 2, 0, 0, 0, 0 } \
+}
+
+#define DEFINE_NV12_CAPTURE_RANGE2(Name, WidthValue, HeightValue, AspectXValue, AspectYValue) \
+const KS_DATARANGE_VIDEO2 Name = { \
+    { sizeof (KS_DATARANGE_VIDEO2), 0, ((WidthValue) * (HeightValue) * 3) / 2, 0, \
+      STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO), \
+      0x3231564e, 0x0000, 0x0010, 0x80, 0x00, \
+      0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71, \
+      STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO2) }, \
+    TRUE, FALSE, 0, 0, \
+    { STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO2 ), KS_AnalogVideo_None, \
+      (WidthValue), (HeightValue), (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 2, 8, 2, (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 2, 0, 0, 0, 0, 333667, 640000000, \
+      12 * 30 * (WidthValue) * (HeightValue), \
+      12 * 30 * (WidthValue) * (HeightValue) }, \
+    { 0,0,0,0, 0,0,0,0, 12 * 30 * (WidthValue) * (HeightValue), 0L, 333667, \
+      0, 0, (AspectXValue), (AspectYValue), 0, 0, \
+      sizeof (KS_BITMAPINFOHEADER), (WidthValue), (HeightValue), 1, 12, FOURCC_NV12, \
+      ((WidthValue) * (HeightValue) * 3) / 2, 0, 0, 0, 0 } \
+}
+
+#define DEFINE_RGB32_CAPTURE_RANGE2(Name, WidthValue, HeightValue, AspectXValue, AspectYValue) \
+const KS_DATARANGE_VIDEO2 Name = { \
+    { sizeof (KS_DATARANGE_VIDEO2), 0, (WidthValue) * (HeightValue) * 4, 0, \
+      STATICGUIDOF (KSDATAFORMAT_TYPE_VIDEO), \
+      0xe436eb7e, 0x524f, 0x11ce, 0x9f, 0x53, 0x00, 0x20, \
+      0xaf, 0x0b, 0xa7, 0x70, STATICGUIDOF (KSDATAFORMAT_SPECIFIER_VIDEOINFO2) }, \
+    TRUE, FALSE, 0, 0, \
+    { STATICGUIDOF( KSDATAFORMAT_SPECIFIER_VIDEOINFO2 ), KS_AnalogVideo_None, \
+      (WidthValue), (HeightValue), (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 1, 8, 1, (WidthValue), (HeightValue), (WidthValue), (HeightValue), \
+      8, 1, 0, 0, 0, 0, 333667, 640000000, \
+      8 * 4 * 30 * (WidthValue) * (HeightValue), \
+      8 * 4 * 30 * (WidthValue) * (HeightValue) }, \
+    { 0,0,0,0, 0,0,0,0, (WidthValue) * (HeightValue) * 4 * 8 * 30, 0L, 333667, \
+      0, 0, (AspectXValue), (AspectYValue), 0, 0, \
+      sizeof (KS_BITMAPINFOHEADER), (WidthValue), -(HeightValue), 1, 32, KS_BI_RGB, \
+      (WidthValue) * (HeightValue) * 4, 0, 0, 0, 0 } \
+}
+
 DEFINE_YUY2_CAPTURE_RANGE(FormatYUY2_9x16_Capture, D_9X16_X, D_9X16_Y);
 DEFINE_NV12_CAPTURE_RANGE(FormatNV12_9x16_Capture, D_9X16_X, D_9X16_Y);
 DEFINE_RGB32_CAPTURE_RANGE(FormatRGB32Bpp_9x16_Capture, D_9X16_X, D_9X16_Y);
 DEFINE_YUY2_CAPTURE_RANGE(FormatYUY2_3x4_Capture, D_3X4_X, D_3X4_Y);
 DEFINE_NV12_CAPTURE_RANGE(FormatNV12_3x4_Capture, D_3X4_X, D_3X4_Y);
 DEFINE_RGB32_CAPTURE_RANGE(FormatRGB32Bpp_3x4_Capture, D_3X4_X, D_3X4_Y);
+DEFINE_YUY2_CAPTURE_RANGE2(FormatYUY2_Capture2, DMAX_X, DMAX_Y, 16, 9);
+DEFINE_NV12_CAPTURE_RANGE2(FormatNV12_Capture2, D_X, D_Y, 16, 9);
+DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_Capture2, D_X, D_Y, 16, 9);
+DEFINE_YUY2_CAPTURE_RANGE2(FormatYUY2_480p_Capture2, D_480P_X, D_480P_Y, 4, 3);
+DEFINE_NV12_CAPTURE_RANGE2(FormatNV12_480p_Capture2, D_480P_X, D_480P_Y, 4, 3);
+DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_480p_Capture2, D_480P_X, D_480P_Y, 4, 3);
+DEFINE_YUY2_CAPTURE_RANGE2(FormatYUY2_9x16_Capture2, D_9X16_X, D_9X16_Y, 9, 16);
+DEFINE_NV12_CAPTURE_RANGE2(FormatNV12_9x16_Capture2, D_9X16_X, D_9X16_Y, 9, 16);
+DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_9x16_Capture2, D_9X16_X, D_9X16_Y, 9, 16);
+DEFINE_YUY2_CAPTURE_RANGE2(FormatYUY2_3x4_Capture2, D_3X4_X, D_3X4_Y, 3, 4);
+DEFINE_NV12_CAPTURE_RANGE2(FormatNV12_3x4_Capture2, D_3X4_X, D_3X4_Y, 3, 4);
+DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_3x4_Capture2, D_3X4_X, D_3X4_Y, 3, 4);
 
 //
 // CapturePinDataRanges:
@@ -2164,7 +2518,19 @@ CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
     (PKSDATARANGE) &FormatRGB32Bpp_9x16_Capture,
     (PKSDATARANGE) &FormatYUY2_3x4_Capture,
     (PKSDATARANGE) &FormatNV12_3x4_Capture,
-    (PKSDATARANGE) &FormatRGB32Bpp_3x4_Capture
+    (PKSDATARANGE) &FormatRGB32Bpp_3x4_Capture,
+    (PKSDATARANGE) &FormatYUY2_Capture2,
+    (PKSDATARANGE) &FormatNV12_Capture2,
+    (PKSDATARANGE) &FormatRGB32Bpp_Capture2,
+    (PKSDATARANGE) &FormatYUY2_480p_Capture2,
+    (PKSDATARANGE) &FormatNV12_480p_Capture2,
+    (PKSDATARANGE) &FormatRGB32Bpp_480p_Capture2,
+    (PKSDATARANGE) &FormatYUY2_9x16_Capture2,
+    (PKSDATARANGE) &FormatNV12_9x16_Capture2,
+    (PKSDATARANGE) &FormatRGB32Bpp_9x16_Capture2,
+    (PKSDATARANGE) &FormatYUY2_3x4_Capture2,
+    (PKSDATARANGE) &FormatNV12_3x4_Capture2,
+    (PKSDATARANGE) &FormatRGB32Bpp_3x4_Capture2
 };
 
 extern "C"
@@ -2184,27 +2550,31 @@ namespace
     typedef struct _VIRTUACAM_ASPECT_RANGES {
         ULONG AspectMode;
         ULONG AspectMask;
-        PKSDATARANGE Ranges[3];
+        PKSDATARANGE Ranges[6];
     } VIRTUACAM_ASPECT_RANGES;
 
     const VIRTUACAM_ASPECT_RANGES kAspectRanges[] = {
         { VIRTUACAM_ASPECT_16_9, VIRTUACAM_ASPECT_MASK_16_9,
-            { (PKSDATARANGE)&FormatYUY2_Capture, (PKSDATARANGE)&FormatNV12_Capture, (PKSDATARANGE)&FormatRGB32Bpp_Capture } },
+            { (PKSDATARANGE)&FormatYUY2_Capture, (PKSDATARANGE)&FormatNV12_Capture, (PKSDATARANGE)&FormatRGB32Bpp_Capture,
+              (PKSDATARANGE)&FormatYUY2_Capture2, (PKSDATARANGE)&FormatNV12_Capture2, (PKSDATARANGE)&FormatRGB32Bpp_Capture2 } },
         { VIRTUACAM_ASPECT_9_16, VIRTUACAM_ASPECT_MASK_9_16,
-            { (PKSDATARANGE)&FormatYUY2_9x16_Capture, (PKSDATARANGE)&FormatNV12_9x16_Capture, (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture } },
+            { (PKSDATARANGE)&FormatYUY2_9x16_Capture, (PKSDATARANGE)&FormatNV12_9x16_Capture, (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture,
+              (PKSDATARANGE)&FormatYUY2_9x16_Capture2, (PKSDATARANGE)&FormatNV12_9x16_Capture2, (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture2 } },
         { VIRTUACAM_ASPECT_4_3, VIRTUACAM_ASPECT_MASK_4_3,
-            { (PKSDATARANGE)&FormatYUY2_480p_Capture, (PKSDATARANGE)&FormatNV12_480p_Capture, (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture } },
+            { (PKSDATARANGE)&FormatYUY2_480p_Capture, (PKSDATARANGE)&FormatNV12_480p_Capture, (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture,
+              (PKSDATARANGE)&FormatYUY2_480p_Capture2, (PKSDATARANGE)&FormatNV12_480p_Capture2, (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture2 } },
         { VIRTUACAM_ASPECT_3_4, VIRTUACAM_ASPECT_MASK_3_4,
-            { (PKSDATARANGE)&FormatYUY2_3x4_Capture, (PKSDATARANGE)&FormatNV12_3x4_Capture, (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture } }
+            { (PKSDATARANGE)&FormatYUY2_3x4_Capture, (PKSDATARANGE)&FormatNV12_3x4_Capture, (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture,
+              (PKSDATARANGE)&FormatYUY2_3x4_Capture2, (PKSDATARANGE)&FormatNV12_3x4_Capture2, (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture2 } }
     };
 
     bool AppendAspectRanges(_In_ const VIRTUACAM_ASPECT_RANGES& AspectRanges, _Inout_ PKSDATARANGE* OrderedRanges, _Inout_ ULONG& Index)
     {
-        if (Index + 3 > CAPTURE_PIN_DATA_RANGE_COUNT) {
+        if (Index + SIZEOF_ARRAY(AspectRanges.Ranges) > CAPTURE_PIN_DATA_RANGE_COUNT) {
             return false;
         }
 
-        for (ULONG i = 0; i < 3; ++i) {
+        for (ULONG i = 0; i < SIZEOF_ARRAY(AspectRanges.Ranges); ++i) {
             OrderedRanges[Index++] = AspectRanges.Ranges[i];
         }
         return true;

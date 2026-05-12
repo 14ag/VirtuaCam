@@ -33,6 +33,48 @@
 
 namespace
 {
+    const GUID VirtuaCamFilterReferenceGuid =
+        { 0x6b2f0f9a, 0x4fcb, 0x4c93, { 0x95, 0x80, 0x21, 0x52, 0xa7, 0x6e, 0x2d, 0x44 } };
+
+    const GUID VirtuaCamCustomProfileGuid =
+        { 0x0bb8a130, 0x17c4, 0x40a4, { 0xa1, 0x7a, 0x7c, 0xb4, 0x43, 0x7f, 0x90, 0xe2 } };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileMediaInfos[] = {
+        { { 1280, 720 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 720, 1280 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+    };
+
+    KSCAMERA_PROFILE_PININFO CameraProfilePins[] = {
+        {
+            STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
+            { 0, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileMediaInfos)
+        },
+        {
+            STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
+            { 1, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileMediaInfos)
+        }
+    };
+
+    const GUID CameraProfileIds[] = {
+        STATICGUIDOF(KSCAMERAPROFILE_VideoConferencing),
+        STATICGUIDOF(KSCAMERAPROFILE_VideoRecording),
+        STATICGUIDOF(KSCAMERAPROFILE_HighQualityPhoto),
+        STATICGUIDOF(KSCAMERAPROFILE_BalancedVideoAndPhoto),
+        VirtuaCamCustomProfileGuid
+    };
+
+    KSCAMERA_EXTENDEDPROP_PROFILE CurrentCameraProfile = {
+        STATICGUIDOF(KSCAMERAPROFILE_Legacy),
+        0,
+        0
+    };
+
     ULONG GetPropertyDataLength(_In_ PIRP Irp)
     {
         PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
@@ -148,6 +190,43 @@ namespace
             return STATUS_INVALID_BUFFER_SIZE;
         }
         return CopyPropertyDataFromCaller(Irp, Data, sizeof(HANDLE), value, __alignof(HANDLE));
+    }
+
+    bool IsPublishedCameraProfile(_In_ const GUID& ProfileId)
+    {
+        if (IsEqualGUID(ProfileId, KSCAMERAPROFILE_Legacy)) {
+            return true;
+        }
+
+        for (ULONG i = 0; i < SIZEOF_ARRAY(CameraProfileIds); ++i) {
+            if (IsEqualGUID(ProfileId, CameraProfileIds[i])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void WriteCameraProfilePayload(
+        _Out_ PKSCAMERA_EXTENDEDPROP_HEADER Header,
+        _In_ const KSCAMERA_EXTENDEDPROP_PROFILE& Profile
+        )
+    {
+        RtlZeroMemory(
+            Header,
+            sizeof(KSCAMERA_EXTENDEDPROP_HEADER) +
+            sizeof(KSCAMERA_EXTENDEDPROP_PROFILE));
+        Header->Version = 1;
+        Header->PinId = KSCAMERA_EXTENDEDPROP_FILTERSCOPE;
+        Header->Size =
+            sizeof(KSCAMERA_EXTENDEDPROP_HEADER) +
+            sizeof(KSCAMERA_EXTENDEDPROP_PROFILE);
+        Header->Result = 0;
+        Header->Flags = 0;
+        Header->Capability = KSCAMERA_EXTENDEDPROP_CAPS_ASYNCCONTROL;
+
+        PKSCAMERA_EXTENDEDPROP_PROFILE Payload =
+            reinterpret_cast<PKSCAMERA_EXTENDEDPROP_PROFILE>(Header + 1);
+        *Payload = Profile;
     }
 }
 
@@ -643,6 +722,75 @@ GetVideoControlCaps(
     return STATUS_SUCCESS;
 }
 
+NTSTATUS
+CCaptureFilter::
+GetCameraProfile(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    PAGED_CODE();
+    UNREFERENCED_PARAMETER(Request);
+
+    const ULONG payloadSize =
+        sizeof(KSCAMERA_EXTENDEDPROP_HEADER) +
+        sizeof(KSCAMERA_EXTENDEDPROP_PROFILE);
+
+    if (!Data || GetPropertyDataLength(Irp) < payloadSize) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    WriteCameraProfilePayload(
+        reinterpret_cast<PKSCAMERA_EXTENDEDPROP_HEADER>(Data),
+        CurrentCameraProfile);
+
+    Irp->IoStatus.Information = payloadSize;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+CCaptureFilter::
+SetCameraProfile(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    PAGED_CODE();
+    UNREFERENCED_PARAMETER(Request);
+
+    const ULONG payloadSize =
+        sizeof(KSCAMERA_EXTENDEDPROP_HEADER) +
+        sizeof(KSCAMERA_EXTENDEDPROP_PROFILE);
+
+    if (!Data || GetPropertyDataLength(Irp) < payloadSize) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    PKSCAMERA_EXTENDEDPROP_HEADER Header =
+        reinterpret_cast<PKSCAMERA_EXTENDEDPROP_HEADER>(Data);
+    PKSCAMERA_EXTENDEDPROP_PROFILE Payload =
+        reinterpret_cast<PKSCAMERA_EXTENDEDPROP_PROFILE>(Header + 1);
+
+    if (Header->PinId != KSCAMERA_EXTENDEDPROP_FILTERSCOPE ||
+        Header->Size != payloadSize ||
+        Header->Flags != 0 ||
+        Payload->Index != 0 ||
+        Payload->Reserved != 0 ||
+        !IsPublishedCameraProfile(Payload->ProfileId)) {
+        Header->Result = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
+        Irp->IoStatus.Information = payloadSize;
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    CurrentCameraProfile = *Payload;
+    WriteCameraProfilePayload(Header, CurrentCameraProfile);
+
+    Irp->IoStatus.Information = payloadSize;
+    return STATUS_SUCCESS;
+}
+
 /**************************************************************************
 
 	PROPERTY TABLE STUFF
@@ -777,9 +925,26 @@ DEFINE_KSPROPERTY_TABLE(FilterVidcapPropertyTable)
     )
 };
 
+DEFINE_KSPROPERTY_TABLE(ExtendedCameraControlPropertyTable)
+{
+    DEFINE_KSPROPERTY_ITEM(
+        KSPROPERTY_CAMERACONTROL_EXTENDED_PROFILE,
+        CCaptureFilter::GetCameraProfile,
+        sizeof(KSPROPERTY),
+        sizeof(KSCAMERA_EXTENDEDPROP_HEADER) + sizeof(KSCAMERA_EXTENDEDPROP_PROFILE),
+        CCaptureFilter::SetCameraProfile,
+        NULL,
+        0,
+        NULL,
+        NULL,
+        0
+    )
+};
+
 DEFINE_KSPROPERTY_SET_TABLE(PropertySetTable)
 {
     DEFINE_STD_PROPERTY_SET(PROPSETID_VIDCAP_VIDEOCONTROL, FilterVidcapPropertyTable),
+    DEFINE_STD_PROPERTY_SET(KSPROPERTYSETID_ExtendedCameraControl, ExtendedCameraControlPropertyTable),
 	DEFINE_STD_PROPERTY_SET(PROPSETID_VIDCAP_CUSTOMCONTROL, CustomPropertyTable)
 };
 
@@ -799,6 +964,50 @@ DEFINE_KSAUTOMATION_TABLE(AvsFilterAutomationTable)
 
 GUID g_PINNAME_VIDEO_PREVIEW = {STATIC_PINNAME_VIDEO_PREVIEW};
 GUID g_PINNAME_VIDEO_CAPTURE = {STATIC_PINNAME_VIDEO_CAPTURE};
+
+NTSTATUS
+VirtuaCamPublishCameraProfiles (
+    _In_ PKSFILTERFACTORY FilterFactory
+    )
+{
+    PAGED_CODE();
+
+    if (!FilterFactory) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    NTSTATUS Status = KsInitializeDeviceProfile(FilterFactory);
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[avshws] KsInitializeDeviceProfile failed status=0x%08X\n", Status);
+        return Status;
+    }
+
+    for (ULONG i = 0; i < SIZEOF_ARRAY(CameraProfileIds); ++i) {
+        KSDEVICE_PROFILE_INFO ProfileInfo = {};
+        ProfileInfo.Type = KSDEVICE_PROFILE_TYPE_CAMERA;
+        ProfileInfo.Size = sizeof(ProfileInfo);
+        ProfileInfo.Camera.Info.ProfileId = CameraProfileIds[i];
+        ProfileInfo.Camera.Info.Index = 0;
+        ProfileInfo.Camera.Info.PinCount = SIZEOF_ARRAY(CameraProfilePins);
+        ProfileInfo.Camera.Info.Pins = CameraProfilePins;
+        ProfileInfo.Camera.Reserved = 0;
+        ProfileInfo.Camera.ConcurrencyCount = 0;
+        ProfileInfo.Camera.Concurrency = NULL;
+
+        Status = KsPublishDeviceProfile(FilterFactory, &ProfileInfo);
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[avshws] KsPublishDeviceProfile index=%lu status=0x%08X\n", i, Status);
+            return Status;
+        }
+    }
+
+    Status = KsPersistDeviceProfile(FilterFactory);
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[avshws] KsPersistDeviceProfile failed status=0x%08X\n", Status);
+    }
+
+    return Status;
+}
 
 //
 // CaptureFilterCategories:
@@ -909,8 +1118,8 @@ CaptureFilterDescriptor = {
     &CaptureFilterDispatch,                 // Dispatch Table
     &AvsFilterAutomationTable,              // Automation Table
     KSFILTER_DESCRIPTOR_VERSION,            // Version
-    0,                                      // Flags
-    &KSNAME_Filter,                         // Reference GUID
+    KSFILTER_FLAG_PRIORITIZE_REFERENCEGUID, // Flags
+    &VirtuaCamFilterReferenceGuid,          // Reference GUID
     DEFINE_KSFILTER_PIN_DESCRIPTORS (CaptureFilterPinDescriptors),
     DEFINE_KSFILTER_CATEGORIES (CaptureFilterCategories),
     0,

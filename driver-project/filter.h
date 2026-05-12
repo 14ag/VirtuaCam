@@ -95,6 +95,7 @@ public:
     DECLARE_PROPERTY_SET_HANDLER(RegisterEvent)
     DECLARE_PROPERTY_HANDLERS(VideoControlMode)
     DECLARE_PROPERTY_GET_HANDLER(VideoControlCaps)
+    DECLARE_PROPERTY_HANDLERS(CameraProfile)
 
 };
 
