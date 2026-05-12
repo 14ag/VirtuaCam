@@ -32,11 +32,8 @@ namespace
 
     constexpr int IDC_STATUS = 1001;
     constexpr int IDC_CHECKS = 1002;
-    constexpr int IDC_INSTALL = 1003;
-    constexpr int IDC_REPAIR = 1004;
-    constexpr int IDC_UNINSTALL = 1005;
-    constexpr int IDC_VERIFY = 1006;
-    constexpr int IDC_CLOSE = 1007;
+    constexpr int IDC_VERIFY = 1003;
+    constexpr int IDC_CLOSE = 1004;
 
     struct CheckResult
     {
@@ -154,6 +151,18 @@ namespace
     bool ContainsNoCase(const std::wstring& text, const std::wstring& needle)
     {
         return ToLower(text).find(ToLower(needle)) != std::wstring::npos;
+    }
+
+    bool EqualsNoCase(const std::wstring& left, const std::wstring& right)
+    {
+        return _wcsicmp(left.c_str(), right.c_str()) == 0;
+    }
+
+    bool IsVirtuaCamDeviceName(const std::wstring& name)
+    {
+        return EqualsNoCase(name, L"VirtuaCam") ||
+            EqualsNoCase(name, L"Virtual Camera Driver") ||
+            EqualsNoCase(name, L"Virtual Camera Source");
     }
 
     std::wstring Utf8ToWide(const std::string& value)
@@ -282,24 +291,6 @@ namespace
         }
     }
 
-    bool IsAdministrator()
-    {
-        BOOL isAdmin = FALSE;
-        SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
-        PSID adminGroup = nullptr;
-        if (AllocateAndInitializeSid(
-                &ntAuthority,
-                2,
-                SECURITY_BUILTIN_DOMAIN_RID,
-                DOMAIN_ALIAS_RID_ADMINS,
-                0, 0, 0, 0, 0, 0,
-                &adminGroup)) {
-            CheckTokenMembership(nullptr, adminGroup, &isAdmin);
-            FreeSid(adminGroup);
-        }
-        return isAdmin != FALSE;
-    }
-
     std::wstring SystemToolPath(const wchar_t* fileName)
     {
         wchar_t systemDir[MAX_PATH] = {};
@@ -392,16 +383,6 @@ namespace
             exitCode = ERROR_TIMEOUT;
         }
         return exitCode == 0;
-    }
-
-    bool RunPowerShellScript(const std::filesystem::path& script, const std::wstring& args, DWORD& exitCode, std::wstring& output)
-    {
-        std::wstring command = std::format(
-            L"\"{}\" -NoProfile -ExecutionPolicy Bypass -File \"{}\" {}",
-            SystemToolPath(L"WindowsPowerShell\\v1.0\\powershell.exe"),
-            script.wstring(),
-            args);
-        return RunProcessCapture(command, INFINITE, exitCode, output);
     }
 
     void WriteRunJson(const RunResult& result)
@@ -536,8 +517,10 @@ namespace
             result.detail = std::format(L"pnputil exit={} {}", exitCode, output.substr(0, std::min<size_t>(160, output.size())));
             return result;
         }
-        result.success = ContainsNoCase(output, L"Status:") && ContainsNoCase(output, L"OK");
-        result.detail = result.success ? instanceId + L" status OK" : L"Device not OK or not present";
+        result.success = ContainsNoCase(output, L"Status:") &&
+            (ContainsNoCase(output, L"Status:                     Started") ||
+             ContainsNoCase(output, L"Status:                     OK"));
+        result.detail = result.success ? instanceId + L" status started" : L"Device not started or not present";
         return result;
     }
 
@@ -560,7 +543,7 @@ namespace
         const BOOL ok = QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&status), sizeof(status), &needed);
         CloseServiceHandle(service);
         CloseServiceHandle(manager);
-        result.success = ok != FALSE;
+        result.success = ok != FALSE && status.dwCurrentState == SERVICE_RUNNING;
         result.detail = ok ? std::format(L"State={}", status.dwCurrentState) : std::format(L"Query failed: {}", GetLastError());
         return result;
     }
@@ -592,7 +575,7 @@ namespace
     {
         const auto names = EnumerateVideoDevices();
         for (const auto& name : names) {
-            if (ContainsNoCase(name, L"VirtuaCam") || ContainsNoCase(name, L"Virtual Camera")) {
+            if (IsVirtuaCamDeviceName(name)) {
                 return { L"Camera enumeration", true, name };
             }
         }
@@ -619,7 +602,7 @@ namespace
             UINT32 cch = 0;
             const bool gotName = SUCCEEDED(devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &friendly, &cch)) && friendly;
             const std::wstring name = gotName ? friendly : L"";
-            if (ContainsNoCase(name, L"VirtuaCam") || ContainsNoCase(name, L"Virtual Camera")) {
+            if (IsVirtuaCamDeviceName(name)) {
                 ComPtr<IMFMediaSource> source;
                 const HRESULT hr = devices[i]->ActivateObject(IID_PPV_ARGS(&source));
                 result.success = SUCCEEDED(hr);
@@ -657,7 +640,7 @@ namespace
             UINT32 cch = 0;
             const bool gotName = SUCCEEDED(devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &friendly, &cch)) && friendly;
             const std::wstring candidate = gotName ? friendly : L"";
-            if (ContainsNoCase(candidate, L"VirtuaCam") || ContainsNoCase(candidate, L"Virtual Camera")) {
+            if (IsVirtuaCamDeviceName(candidate)) {
                 const HRESULT hr = devices[i]->ActivateObject(IID_PPV_ARGS(&source));
                 result.success = SUCCEEDED(hr);
                 result.detail = result.success ? (L"Opened " + candidate) : std::format(L"ActivateObject failed: 0x{:08X}", static_cast<unsigned>(hr));
@@ -855,62 +838,6 @@ namespace
         return result;
     }
 
-    bool LaunchElevatedSelf(const wchar_t* action)
-    {
-        std::wstring params = action;
-        SHELLEXECUTEINFOW sei = {};
-        sei.cbSize = sizeof(sei);
-        sei.lpVerb = L"runas";
-        const std::filesystem::path exe = ExePath();
-        sei.lpFile = exe.c_str();
-        sei.lpParameters = params.c_str();
-        sei.nShow = SW_SHOWNORMAL;
-        return ShellExecuteExW(&sei) != FALSE;
-    }
-
-    RunResult RunScriptAction(const std::wstring& mode, const std::wstring& scriptArgs, const std::filesystem::path& jsonPath)
-    {
-        RunResult result;
-        result.mode = mode;
-        result.jsonPath = jsonPath.empty() ? DefaultJsonPath(mode) : jsonPath;
-        result.success = false;
-
-        if ((mode == L"install" || mode == L"repair" || mode == L"uninstall") && !IsAdministrator()) {
-            result.checks.push_back({ L"Elevation", false, L"Run install, repair, or uninstall from an elevated token" });
-            WriteRunJson(result);
-            return result;
-        }
-
-        const std::filesystem::path script = FindRepoRoot() / L"scripts" / L"install-all.ps1";
-        if (!std::filesystem::exists(script)) {
-            result.checks.push_back({ L"Install script", false, script.wstring() });
-            WriteRunJson(result);
-            return result;
-        }
-
-        DWORD exitCode = 0;
-        std::wstring output;
-        SetStatusText(std::format(L"Running {}...", mode));
-        const bool ok = RunPowerShellScript(script, scriptArgs, exitCode, output);
-        result.checks.push_back({
-            L"Install script",
-            ok,
-            ok ? L"Completed" : std::format(L"Exit={} {}", exitCode, output.substr(0, std::min<size_t>(220, output.size())))
-        });
-        result.success = ok;
-
-        if (ok && mode != L"uninstall") {
-            result = RunFirstRunChecks(mode, result.jsonPath);
-        } else {
-            CheckResult cleanup = DeleteLegacySettings();
-            result.checks.push_back(cleanup);
-            result.success = result.success && cleanup.success;
-            WriteRunJson(result);
-        }
-
-        return result;
-    }
-
     std::filesystem::path GetJsonArg(const std::vector<std::wstring>& args)
     {
         for (size_t i = 0; i + 1 < args.size(); ++i) {
@@ -945,15 +872,6 @@ namespace
         if (mode == L"verify-only") {
             return RunFirstRunChecks(mode, jsonPath);
         }
-        if (mode == L"install") {
-            return RunScriptAction(mode, L"", jsonPath);
-        }
-        if (mode == L"repair") {
-            return RunScriptAction(mode, L"-ForceDriverRebind", jsonPath);
-        }
-        if (mode == L"uninstall") {
-            return RunScriptAction(mode, L"-Uninstall", jsonPath);
-        }
         RunResult result;
         result.mode = mode;
         result.jsonPath = jsonPath.empty() ? DefaultJsonPath(mode) : jsonPath;
@@ -976,7 +894,7 @@ namespace
         MoveWindow(g_checks, pad, pad + statusH + 8, rc.right - pad * 2, buttonY - (pad + statusH + 16), TRUE);
 
         int x = pad;
-        for (int id : { IDC_INSTALL, IDC_REPAIR, IDC_UNINSTALL, IDC_VERIFY, IDC_CLOSE }) {
+        for (int id : { IDC_VERIFY, IDC_CLOSE }) {
             HWND child = GetDlgItem(hwnd, id);
             MoveWindow(child, x, buttonY, buttonW, buttonH, TRUE);
             x += buttonW + 8;
@@ -992,16 +910,6 @@ namespace
 
     void RunUiAction(const std::wstring& mode)
     {
-        if ((mode == L"install" || mode == L"repair" || mode == L"uninstall") && !IsAdministrator()) {
-            const wchar_t* arg = mode == L"install" ? L"--install" : (mode == L"repair" ? L"--repair" : L"--uninstall");
-            if (LaunchElevatedSelf(arg)) {
-                SetStatusText(L"Elevated setup launched.");
-            } else {
-                SetStatusText(std::format(L"Elevation failed: {}", GetLastError()));
-            }
-            return;
-        }
-
         ClearChecks();
         const RunResult result = RunMode(mode, {});
         SetStatusText(std::format(
@@ -1018,7 +926,7 @@ namespace
         {
             g_status = CreateWindowW(
                 L"STATIC",
-                L"Choose install, repair, uninstall, or verify.",
+                L"Choose verify to check the current VirtuaCam install.",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                 0, 0, 0, 0,
                 hwnd,
@@ -1034,13 +942,10 @@ namespace
                 ControlId(IDC_CHECKS),
                 g_instance,
                 nullptr);
-            CreateWindowW(L"BUTTON", L"&Install", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_INSTALL), g_instance, nullptr);
-            CreateWindowW(L"BUTTON", L"&Repair", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_REPAIR), g_instance, nullptr);
-            CreateWindowW(L"BUTTON", L"&Uninstall", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_UNINSTALL), g_instance, nullptr);
             CreateWindowW(L"BUTTON", L"&Verify", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_VERIFY), g_instance, nullptr);
             CreateWindowW(L"BUTTON", L"E&xit", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_CLOSE), g_instance, nullptr);
             ResizeControls(hwnd);
-            SetFocus(GetDlgItem(hwnd, IDC_INSTALL));
+            SetFocus(GetDlgItem(hwnd, IDC_VERIFY));
             return 0;
         }
         case WM_SIZE:
@@ -1048,9 +953,6 @@ namespace
             return 0;
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
-            case IDC_INSTALL: RunUiAction(L"install"); return 0;
-            case IDC_REPAIR: RunUiAction(L"repair"); return 0;
-            case IDC_UNINSTALL: RunUiAction(L"uninstall"); return 0;
             case IDC_VERIFY: RunUiAction(L"verify-only"); return 0;
             case IDC_CLOSE: DestroyWindow(hwnd); return 0;
             default: break;
@@ -1129,10 +1031,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     const std::vector<std::wstring> args = ParseArgs();
     const bool quiet = HasArg(args, L"--quiet") || HasArg(args, L"/quiet");
     std::wstring mode;
-    if (HasArg(args, L"--install") || HasArg(args, L"/install")) mode = L"install";
-    else if (HasArg(args, L"--repair") || HasArg(args, L"/repair")) mode = L"repair";
-    else if (HasArg(args, L"--uninstall") || HasArg(args, L"/uninstall")) mode = L"uninstall";
-    else if (HasArg(args, L"--verify-only") || HasArg(args, L"/verify")) mode = L"verify-only";
+    if (HasArg(args, L"--verify-only") || HasArg(args, L"/verify")) mode = L"verify-only";
 
     int exitCode = 0;
     if (!mode.empty()) {
