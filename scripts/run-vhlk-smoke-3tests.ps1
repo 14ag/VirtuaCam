@@ -4,14 +4,15 @@ param(
     [string]$DutVmName = "driver-test",
     [string]$ProjectName = "VirtuaCam",
     [string]$PlaylistPath = "C:\Users\Administrator\Desktop\Compat Playlists\HLK Version 2004 CompatPlaylist x86 x64 ARM64.xml",
-    [int]$MonitorIntervalSeconds = 15,
-    [int]$NoStartTimeoutMinutes = 20,
-    [int]$TimeoutMinutes = 0,
+    [int]$TestLimit = 3,
+    [int]$TimeoutMinutes = 5,
+    [int]$MonitorIntervalSeconds = 5,
+    [string]$TestNamePattern = "",
     [int]$MaxHeartbeatAgeMinutes = 10,
-    [switch]$NoCleanResults,
     [switch]$NoReloadPlaylist,
+    [switch]$NoCleanResults,
     [switch]$NoSetDutReady,
-    [switch]$StopOnFirstFailure,
+    [switch]$AllowStaleDutHeartbeat,
     [switch]$DryRun
 )
 
@@ -59,9 +60,8 @@ function New-CredentialFromEnv {
         throw "Missing $UserKey or $PasswordKey in .env"
     }
 
-    return [System.Management.Automation.PSCredential]::new(
-        $user,
-        (ConvertTo-SecureString $password -AsPlainText -Force))
+    $secure = ConvertTo-SecureString $password -AsPlainText -Force
+    return [System.Management.Automation.PSCredential]::new($user, $secure)
 }
 
 function Write-LiveLine {
@@ -76,12 +76,12 @@ function Write-LiveLine {
     catch {
         $width = 120
     }
+
     if ($Message.Length -gt $width) {
         $Message = $Message.Substring(0, $width - 3) + "..."
     }
 
-    $padded = $Message.PadRight($width)
-    Write-Host ("`r{0}" -f $padded) -NoNewline -ForegroundColor $Color
+    Write-Host ("`r{0}" -f $Message.PadRight($width)) -NoNewline -ForegroundColor $Color
 }
 
 function Write-DoneLine {
@@ -98,30 +98,40 @@ function Invoke-Vhlk {
     Invoke-Command -Session $Session -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
 }
 
-$artifactDir = Join-Path $repoRoot ("test-reports\vhlk-oneclick-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+$artifactDir = Join-Path $repoRoot ("test-reports\vhlk-smoke-3tests-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
 $null = New-Item -ItemType Directory -Force -Path $artifactDir
 $logPath = Join-Path $artifactDir "hyperv.log"
 $transcriptPath = Join-Path $artifactDir "runner-transcript.log"
-$session = $null
+$vhlkSession = $null
 $dutSession = $null
+$exitCode = 1
 
 Start-Transcript -LiteralPath $transcriptPath -Force | Out-Null
 try {
-    $envMap = Read-DotEnv -Path (Join-Path $repoRoot ".env")
-    $cred = New-CredentialFromEnv -EnvMap $envMap -UserKey "vhlk_VM_USERNAME" -PasswordKey "vhlk_VM_PASSWORD"
-    $dutCred = New-CredentialFromEnv -EnvMap $envMap -UserKey "DRIVER_TEST_VM_USERNAME" -PasswordKey "DRIVER_TEST_VM_PASSWORD"
-
+    if ($TestLimit -lt 1) {
+        throw "TestLimit must be at least 1."
+    }
+    if ($TimeoutMinutes -lt 1) {
+        throw "TimeoutMinutes must be at least 1."
+    }
     if ($MaxHeartbeatAgeMinutes -lt 1) {
         throw "MaxHeartbeatAgeMinutes must be at least 1."
     }
 
-    Write-LiveLine "[0/?] - connecting to vHLK controller VM '$VhlkVmName'"
-    $session = Wait-HvPowerShellDirect -VmName $VhlkVmName -Credential $cred -TimeoutSeconds 180 -LogPath $logPath 6>$null
+    $envMap = Read-DotEnv -Path (Join-Path $repoRoot ".env")
+    $vhlkCred = New-CredentialFromEnv -EnvMap $envMap -UserKey "vhlk_VM_USERNAME" -PasswordKey "vhlk_VM_PASSWORD"
+    $dutCred = New-CredentialFromEnv -EnvMap $envMap -UserKey "DRIVER_TEST_VM_USERNAME" -PasswordKey "DRIVER_TEST_VM_PASSWORD"
 
-    Write-LiveLine "[0/?] - checking DUT VM '$DutVmName'"
+    Write-Host "[1/6] start/check VMs" -ForegroundColor Cyan
+    Ensure-HvVmRunning -VmName $VhlkVmName -LogPath $logPath
     Ensure-HvVmRunning -VmName $DutVmName -LogPath $logPath
-    $dutSession = Wait-HvPowerShellDirect -VmName $DutVmName -Credential $dutCred -TimeoutSeconds 180 -LogPath $logPath 6>$null
-    $dutState = Invoke-Command -Session $dutSession -ScriptBlock {
+
+    Write-Host "[2/6] connect to controller + DUT" -ForegroundColor Cyan
+    $vhlkSession = Wait-HvPowerShellDirect -VmName $VhlkVmName -Credential $vhlkCred -TimeoutSeconds 240 -LogPath $logPath 6>$null
+    $dutSession = Wait-HvPowerShellDirect -VmName $DutVmName -Credential $dutCred -TimeoutSeconds 240 -LogPath $logPath 6>$null
+
+    Write-Host "[3/6] check DUT HLK client service" -ForegroundColor Cyan
+    $dutState = Invoke-HvGuestCommand -Session $dutSession -LogPath $logPath -ScriptBlock {
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
 
@@ -134,14 +144,16 @@ try {
             $service = Get-Service -Name "HLKSvc" -ErrorAction SilentlyContinue
         }
 
+        $ip = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike "169.254*" -and $_.IPAddress -ne "127.0.0.1" } |
+            Select-Object -ExpandProperty IPAddress)
+
         [pscustomobject]@{
             ComputerName = $env:COMPUTERNAME
             HlkSvcFound = [bool]$service
             HlkSvcStatus = if ($service) { [string]$service.Status } else { "" }
             HlkSvcStartAttempted = $startAttempted
-            IPv4 = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                Where-Object { $_.IPAddress -notlike "169.254*" -and $_.IPAddress -ne "127.0.0.1" } |
-                Select-Object -ExpandProperty IPAddress)
+            IPv4 = $ip
             CheckedAtUtc = [DateTime]::UtcNow.ToString("o")
         }
     }
@@ -152,9 +164,9 @@ try {
     if ([string]$dutState.HlkSvcStatus -ne "Running") {
         throw "DUT HLKSvc is not running after start attempt."
     }
-    if (@($dutState.IPv4).Count -lt 1) {
-        throw "DUT has no non-link-local IPv4 address. HLK controller cannot heartbeat it."
-    }
+
+    $dutComputerName = [string]$dutState.ComputerName
+    Write-Host ("    DUT computer: {0}; HLKSvc={1}" -f $dutComputerName, $dutState.HlkSvcStatus) -ForegroundColor Green
 
     $remoteReadiness = {
         param($ProjectName, $DutComputerName, $SetDutReady)
@@ -168,14 +180,51 @@ try {
             Add-Type -Path (Join-Path $root "microsoft.windows.kits.hardware.objectmodel.dbconnection.dll")
         }
 
+        function Get-AllMachineObjects {
+            param($Pool)
+
+            $items = @()
+            foreach ($m in @($Pool.GetMachines())) {
+                $items += $m
+            }
+
+            foreach ($child in @($Pool.GetChildPools())) {
+                foreach ($item in @(Get-AllMachineObjects -Pool $child)) {
+                    $items += $item
+                }
+            }
+
+            return @($items)
+        }
+
+        function Convert-MachineInfo {
+            param($Machine)
+
+            $heartbeat = $Machine.LastHeartbeat
+            $ageMinutes = $null
+            if ($heartbeat) {
+                $ageMinutes = [Math]::Round(((Get-Date) - $heartbeat).TotalMinutes, 2)
+            }
+
+            [pscustomobject]@{
+                Name = [string]$Machine.Name
+                Status = [string]$Machine.Status
+                Pool = [string]$Machine.Pool.Path
+                LastHeartbeat = if ($heartbeat) { $heartbeat.ToString("s") } else { "" }
+                HeartbeatAgeMinutes = $ageMinutes
+            }
+        }
+
         function Get-ServiceState {
             param([string[]]$Names)
+
             foreach ($name in $Names) {
                 $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
                 if (-not $svc) {
                     [pscustomobject]@{ Name = $name; Status = "Missing"; StartAttempted = $false }
                     continue
                 }
+
                 $startAttempted = $false
                 if ($svc.Status -ne "Running") {
                     try {
@@ -189,35 +238,8 @@ try {
                         continue
                     }
                 }
+
                 [pscustomobject]@{ Name = $name; Status = [string]$svc.Status; StartAttempted = $startAttempted }
-            }
-        }
-
-        function Get-AllMachineObjects {
-            param($Pool)
-            $items = @()
-            foreach ($m in @($Pool.GetMachines())) { $items += $m }
-            foreach ($child in @($Pool.GetChildPools())) {
-                foreach ($item in @(Get-AllMachineObjects -Pool $child)) { $items += $item }
-            }
-            return @($items)
-        }
-
-        function Convert-MachineInfo {
-            param($Machine)
-            $heartbeat = $Machine.LastHeartbeat
-            $ageMinutes = $null
-            if ($heartbeat) {
-                $ageMinutes = [Math]::Round(((Get-Date) - $heartbeat).TotalMinutes, 2)
-            }
-            [pscustomobject]@{
-                Name = [string]$Machine.Name
-                Status = [string]$Machine.Status
-                PoolName = [string]$Machine.Pool.Name
-                Pool = [string]$Machine.Pool.Path
-                IsRootOrDefaultPool = [bool]($Machine.Pool.Equals($Machine.Pool.RootPool) -or $Machine.Pool.Equals($Machine.Pool.DefaultPool))
-                LastHeartbeat = if ($heartbeat) { $heartbeat.ToString("s") } else { "" }
-                HeartbeatAgeMinutes = $ageMinutes
             }
         }
 
@@ -230,10 +252,11 @@ try {
 
         $services = @(Get-ServiceState -Names @("MSSQLSERVER", "WTTChangeScheduler", "WTTServer", "HLKSvc", "DTMSERVICE"))
         $badServices = @($services | Where-Object { [string]$_.Status -ne "Running" })
-        $machines = @(Get-AllMachineObjects -Pool ($pm.GetRootMachinePool()))
-        $matches = @($machines | Where-Object {
+        $machineObjects = @(Get-AllMachineObjects -Pool ($pm.GetRootMachinePool()))
+        $matches = @($machineObjects | Where-Object {
             ([string]$_.Name) -eq $DutComputerName -or ([string]$_.Name).StartsWith($DutComputerName + "#")
         } | Sort-Object LastHeartbeat -Descending)
+
         if ($matches.Count -lt 1) {
             throw "DUT '$DutComputerName' not found in HLK controller machine inventory."
         }
@@ -243,36 +266,53 @@ try {
             $dut = @($matches | Select-Object -First 1)
         }
         $dut = $dut[0]
-        $before = Convert-MachineInfo -Machine $dut
+        $dutBefore = Convert-MachineInfo -Machine $dut
+        $dutPoolIsRootOrDefault = $dut.Pool.Equals($dut.Pool.RootPool) -or $dut.Pool.Equals($dut.Pool.DefaultPool)
+
         $setReadyResult = $null
-        if ($SetDutReady -and -not $before.IsRootOrDefaultPool) {
+        if ($SetDutReady -and -not $dutPoolIsRootOrDefault) {
             $ready = [Microsoft.Windows.Kits.Hardware.ObjectModel.MachineStatus]::Ready
-            try { $setReadyResult = $dut.SetMachineStatus($ready, 600000) }
-            catch { $setReadyResult = "ERROR: $($_.Exception.Message)" }
-        } elseif ($SetDutReady) {
+            try {
+                $setReadyResult = $dut.SetMachineStatus($ready, 600000)
+            }
+            catch {
+                $setReadyResult = "ERROR: $($_.Exception.Message)"
+            }
+        }
+        elseif ($SetDutReady) {
             $setReadyResult = "SKIP: DUT is in root/default pool"
         }
 
-        $afterMachine = @(Get-AllMachineObjects -Pool ($pm.GetRootMachinePool()) | Where-Object { ([string]$_.Name) -eq ([string]$dut.Name) } | Select-Object -First 1)
+        $machineAfter = @(Get-AllMachineObjects -Pool ($pm.GetRootMachinePool()) | Where-Object {
+            ([string]$_.Name) -eq ([string]$dut.Name)
+        } | Select-Object -First 1)
+
+        $tests = @($project.GetTests())
         [pscustomobject]@{
             Controller = $env:COMPUTERNAME
             Project = $ProjectName
             DutComputerName = $DutComputerName
             ControllerServices = $services
             BadControllerServices = $badServices
-            DutMachineBefore = $before
+            DutMachineBefore = $dutBefore
             SetReadyAttempted = [bool]$SetDutReady
             SetReadyResult = $setReadyResult
-            DutMachineAfter = if ($afterMachine.Count -gt 0) { Convert-MachineInfo -Machine $afterMachine[0] } else { $null }
-            TestCount = @($project.GetTests()).Count
+            DutPoolIsRootOrDefault = [bool]$dutPoolIsRootOrDefault
+            DutMachineAfter = if ($machineAfter.Count -gt 0) {
+                Convert-MachineInfo -Machine $machineAfter[0]
+            } else { $null }
+            MatchingMachines = @($matches | ForEach-Object {
+                Convert-MachineInfo -Machine $_
+            })
+            TestCount = $tests.Count
             CheckedAt = (Get-Date).ToString("s")
         }
     }
 
-    Write-LiveLine "[0/?] - checking controller services + DUT readiness"
-    $readiness = Invoke-Vhlk -Session $session -ScriptBlock $remoteReadiness -ArgumentList @(
+    Write-Host "[4/6] check controller services + HLK machine state" -ForegroundColor Cyan
+    $readiness = Invoke-Vhlk -Session $vhlkSession -ScriptBlock $remoteReadiness -ArgumentList @(
         $ProjectName,
-        [string]$dutState.ComputerName,
+        $dutComputerName,
         (-not [bool]$NoSetDutReady))
     $readiness | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "readiness.json") -Encoding UTF8
 
@@ -282,22 +322,25 @@ try {
     if ($readiness.TestCount -lt 1) {
         throw "HLK project has no tests."
     }
-    $machine = if ($readiness.DutMachineAfter) { $readiness.DutMachineAfter } else { $readiness.DutMachineBefore }
-    if ($machine.IsRootOrDefaultPool) {
-        throw ("DUT machine is in root/default pool ({0}). Move it to a non-default child pool before scheduling tests." -f $machine.PoolName)
+    if ($readiness.DutPoolIsRootOrDefault) {
+        throw ("DUT machine is in root/default pool ({0}). Move it to a non-default child pool before scheduling tests." -f $readiness.DutMachineBefore.Pool)
     }
     if ($readiness.SetReadyAttempted -and ([string]$readiness.SetReadyResult).StartsWith("ERROR:")) {
         throw ("DUT machine could not be set Ready on controller: {0}" -f $readiness.SetReadyResult)
     }
-    if ([string]$machine.Status -notin @("Ready", "Running")) {
-        throw ("DUT machine is not schedulable. Status={0}. See readiness.json." -f $machine.Status)
-    }
-    if ($null -ne $machine.HeartbeatAgeMinutes -and [double]$machine.HeartbeatAgeMinutes -gt $MaxHeartbeatAgeMinutes) {
-        throw ("DUT HLK heartbeat is stale: {0} minutes old. Controller is not seeing current HLKSvc heartbeat." -f $machine.HeartbeatAgeMinutes)
-    }
 
-    $remoteInit = {
-        param($ProjectName, $PlaylistPath, $ReloadPlaylist, $CleanResults, $DryRun)
+    $machineStatus = if ($readiness.DutMachineAfter) { [string]$readiness.DutMachineAfter.Status } else { [string]$readiness.DutMachineBefore.Status }
+    $machineHeartbeatAge = if ($readiness.DutMachineAfter) { $readiness.DutMachineAfter.HeartbeatAgeMinutes } else { $readiness.DutMachineBefore.HeartbeatAgeMinutes }
+    if ($machineStatus -notin @("Ready", "Running")) {
+        throw ("DUT machine is not schedulable. Status={0}. See readiness.json." -f $machineStatus)
+    }
+    if ((-not [bool]$AllowStaleDutHeartbeat) -and $null -ne $machineHeartbeatAge -and [double]$machineHeartbeatAge -gt $MaxHeartbeatAgeMinutes) {
+        throw ("DUT HLK heartbeat is stale: {0} minutes old. Controller is not seeing current HLKSvc heartbeat." -f $machineHeartbeatAge)
+    }
+    Write-Host ("    Controller={0}; DUT machine status={1}; tests={2}" -f $readiness.Controller, $machineStatus, $readiness.TestCount) -ForegroundColor Green
+
+    $remoteQueue = {
+        param($ProjectName, $PlaylistPath, $ReloadPlaylist, $CleanResults, $DryRun, $TestLimit, $TestNamePattern)
 
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -325,13 +368,20 @@ try {
             $loadedPlaylistIds = @($playlistManager.LoadPlaylist($PlaylistPath))
         }
 
-        $tests = @($project.GetTests())
+        $tests = @($project.GetTests() | Sort-Object Name)
+        if (-not [string]::IsNullOrWhiteSpace($TestNamePattern)) {
+            $tests = @($tests | Where-Object { [string]$_.Name -match $TestNamePattern })
+        }
+        $selected = @($tests | Select-Object -First $TestLimit)
+        if ($selected.Count -lt 1) {
+            throw "No tests selected for smoke run."
+        }
+
         $cancelled = 0
         $deleted = 0
         $deleteErrors = @()
-
         if ($CleanResults -and -not $DryRun) {
-            foreach ($test in $tests) {
+            foreach ($test in @($project.GetTests())) {
                 foreach ($result in @($test.GetTestResults())) {
                     try {
                         if ("Running", "InQueue" -contains ([string]$result.Status)) {
@@ -354,49 +404,67 @@ try {
             }
         }
 
-        $queuedResults = @()
+        $queued = @()
+        $queueErrors = @()
         if (-not $DryRun) {
-            $queuedResults = @($project.QueueTest())
+            foreach ($test in $selected) {
+                try {
+                    $queued += @($test.QueueTest())
+                }
+                catch {
+                    $queueErrors += "Queue failed: $($test.Name): $($_.Exception.Message)"
+                }
+            }
         }
 
-        $testsAfter = @($project.GetTests())
         [pscustomobject]@{
-            Controller       = $env:COMPUTERNAME
-            Project          = $ProjectName
-            Playlist         = $PlaylistPath
-            ReloadPlaylist   = [bool]$ReloadPlaylist
+            Controller = $env:COMPUTERNAME
+            Project = $ProjectName
+            Playlist = $PlaylistPath
+            ReloadPlaylist = [bool]$ReloadPlaylist
             LoadedPlaylistIds = $loadedPlaylistIds.Count
-            Tests            = $testsAfter.Count
-            CleanResults     = [bool]$CleanResults
+            CleanResults = [bool]$CleanResults
             CancelledResults = $cancelled
-            DeletedResults   = $deleted
-            DeleteErrors     = $deleteErrors
-            DryRun           = [bool]$DryRun
-            QueuedResults    = $queuedResults.Count
-            StartedAt        = (Get-Date).ToString("s")
+            DeletedResults = $deleted
+            DeleteErrors = $deleteErrors
+            DryRun = [bool]$DryRun
+            TestLimit = $TestLimit
+            TestNamePattern = $TestNamePattern
+            SelectedTests = @($selected | ForEach-Object { [string]$_.Name })
+            QueuedResults = $queued.Count
+            QueueErrors = $queueErrors
+            StartedAt = (Get-Date).ToString("s")
         }
     }
 
-    $reloadPlaylist = -not [bool]$NoReloadPlaylist
-    $cleanResults = -not [bool]$NoCleanResults
-    Write-LiveLine "[0/?] - loading playlist, cleaning old results, queueing tests"
-    $init = Invoke-Vhlk -Session $session -ScriptBlock $remoteInit -ArgumentList @(
+    Write-Host "[5/6] queue 3-test smoke set" -ForegroundColor Cyan
+    $queue = Invoke-Vhlk -Session $vhlkSession -ScriptBlock $remoteQueue -ArgumentList @(
         $ProjectName,
         $PlaylistPath,
-        $reloadPlaylist,
-        $cleanResults,
-        [bool]$DryRun)
+        (-not [bool]$NoReloadPlaylist),
+        (-not [bool]$NoCleanResults),
+        [bool]$DryRun,
+        $TestLimit,
+        $TestNamePattern)
+    $queue | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "queue-result.json") -Encoding UTF8
 
-    $init | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactDir "queue-result.json") -Encoding UTF8
+    if (@($queue.QueueErrors).Count -gt 0) {
+        throw "At least one smoke test failed to queue. See queue-result.json."
+    }
+
+    Write-Host "    Selected tests:" -ForegroundColor Green
+    foreach ($name in @($queue.SelectedTests)) {
+        Write-Host ("      - {0}" -f $name)
+    }
 
     if ($DryRun) {
-        Write-DoneLine
-        Write-Host ("Dry run OK. Tests available: {0}. ArtifactDir: {1}" -f $init.Tests, $artifactDir) -ForegroundColor Green
-        exit 0
+        Write-Host ("Dry run OK. ArtifactDir: {0}" -f $artifactDir) -ForegroundColor Green
+        $exitCode = 0
+        return
     }
 
     $remoteStatus = {
-        param($ProjectName)
+        param($ProjectName, $SelectedTests)
 
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -411,7 +479,9 @@ try {
             throw "HLK project not found: $ProjectName"
         }
 
-        $tests = @($project.GetTests())
+        $selectedNames = @($SelectedTests | ForEach-Object { [string]$_ })
+        $tests = @($project.GetTests() | Where-Object { $selectedNames -contains ([string]$_.Name) })
+
         $groups = @($tests | Group-Object { "{0},{1}" -f $_.Status, $_.ExecutionState } | Sort-Object Name | ForEach-Object {
             [pscustomobject]@{ Name = $_.Name; Count = $_.Count }
         })
@@ -426,83 +496,46 @@ try {
         }).Count
 
         $current = $running | Select-Object -First 1
-        $failures = @($tests | Where-Object { [string]$_.Status -eq "Failed" } | Select-Object -First 5 | ForEach-Object {
+        $details = @($tests | ForEach-Object {
             [pscustomobject]@{
-                Name = $_.Name
+                Name = [string]$_.Name
                 Status = [string]$_.Status
                 ExecutionState = [string]$_.ExecutionState
             }
         })
 
-        $machines = @()
-        function Add-PoolMachines {
-            param($Pool)
-            foreach ($m in @($Pool.GetMachines())) {
-                $script:machines += [pscustomobject]@{
-                    Name = $m.Name
-                    Status = [string]$m.Status
-                    LastHeartbeat = $m.LastHeartbeat
-                    Pool = $m.Pool.Path
-                }
-            }
-            foreach ($child in @($Pool.GetChildPools())) {
-                Add-PoolMachines -Pool $child
-            }
-        }
-        Add-PoolMachines -Pool ($pm.GetRootMachinePool())
-
         [pscustomobject]@{
-            CheckedAt       = (Get-Date).ToString("s")
-            Total           = $tests.Count
-            Completed       = $completed
-            Passed          = $passed
-            Failed          = $failed
-            InQueue         = $inQueue
-            NotRun          = $notRun
-            RunningCount    = $running.Count
-            CurrentName     = if ($current) { $current.Name } else { "" }
-            CurrentStatus   = if ($current) { [string]$current.Status } else { "" }
-            CurrentState    = if ($current) { [string]$current.ExecutionState } else { "" }
-            Groups          = $groups
-            Failures        = $failures
-            Machines        = $machines
+            CheckedAt = (Get-Date).ToString("s")
+            Total = $tests.Count
+            Completed = $completed
+            Passed = $passed
+            Failed = $failed
+            InQueue = $inQueue
+            NotRun = $notRun
+            RunningCount = $running.Count
+            CurrentName = if ($current) { [string]$current.Name } else { "" }
+            CurrentStatus = if ($current) { [string]$current.Status } else { "" }
+            CurrentState = if ($current) { [string]$current.ExecutionState } else { "" }
+            Groups = $groups
+            Details = $details
         }
     }
 
+    Write-Host "[6/6] monitor smoke run for 5 minutes" -ForegroundColor Cyan
     $history = New-Object System.Collections.Generic.List[object]
     $start = Get-Date
+    $deadline = $start.AddMinutes($TimeoutMinutes)
     $lastAnyStarted = $null
     $lastStatus = $null
     $tick = 0
     $spinner = @("|", "/", "-", "\")
 
-    while ($true) {
+    while ((Get-Date) -lt $deadline) {
         $tick++
-        $status = Invoke-Vhlk -Session $session -ScriptBlock $remoteStatus -ArgumentList @($ProjectName)
+        $status = Invoke-Vhlk -Session $vhlkSession -ScriptBlock $remoteStatus -ArgumentList @($ProjectName, @($queue.SelectedTests))
         $history.Add($status) | Out-Null
         $lastStatus = $status
-
-        $elapsed = [int]((Get-Date) - $start).TotalSeconds
-        $remaining = if ($TimeoutMinutes -gt 0) { [Math]::Max(0, [int]($start.AddMinutes($TimeoutMinutes) - (Get-Date)).TotalSeconds) } else { 0 }
-        $glyph = $spinner[$tick % $spinner.Count]
-        $groupText = [string]::Join("; ", @($status.Groups | ForEach-Object { "{0}={1}" -f $_.Name, $_.Count }))
-        $currentIndex = if ($status.RunningCount -gt 0) { [Math]::Min($status.Total, $status.Completed + 1) } else { $status.Completed }
-        $label = if ($status.RunningCount -gt 0) {
-            "{0} running" -f $status.CurrentName
-        } elseif ($status.InQueue -gt 0) {
-            "waiting for scheduler ({0} queued)" -f $status.InQueue
-        } else {
-            "no test running"
-        }
-        $timePart = if ($TimeoutMinutes -gt 0) { "t+{0}s rem={1}s" -f $elapsed, $remaining } else { "t+{0}s" -f $elapsed }
-        $line = "{0} {1} [{2}/{3}] - {4} | pass={5} fail={6} queue={7} groups={8}" -f $glyph, $timePart, $currentIndex, $status.Total, $label, $status.Passed, $status.Failed, $status.InQueue, $groupText
-        $color = if ($status.Failed -gt 0) { [ConsoleColor]::Red } elseif ($status.RunningCount -gt 0) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
-        Write-LiveLine $line $color
-
-        if (($tick % 6) -eq 0) {
-            Write-DoneLine
-            Write-Host ("    alive tick={0}; latest={1}" -f $tick, $status.CheckedAt) -ForegroundColor DarkCyan
-        }
+        $status | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "latest-status.json") -Encoding UTF8
 
         if ($status.RunningCount -gt 0 -or $status.Passed -gt 0 -or $status.Failed -gt 0) {
             if (-not $lastAnyStarted) {
@@ -510,60 +543,77 @@ try {
             }
         }
 
-        $status | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactDir "latest-status.json") -Encoding UTF8
+        $elapsed = [int]((Get-Date) - $start).TotalSeconds
+        $remaining = [Math]::Max(0, [int]($deadline - (Get-Date)).TotalSeconds)
+        $glyph = $spinner[$tick % $spinner.Count]
+        $currentIndex = if ($status.RunningCount -gt 0) { [Math]::Min($status.Total, $status.Completed + 1) } else { $status.Completed }
+        $label = if ($status.RunningCount -gt 0) {
+            "running: {0}" -f $status.CurrentName
+        } elseif ($status.InQueue -gt 0) {
+            "waiting scheduler ({0} queued)" -f $status.InQueue
+        } else {
+            "no active test"
+        }
+        $groupText = [string]::Join("; ", @($status.Groups | ForEach-Object { "{0}={1}" -f $_.Name, $_.Count }))
+        $line = "{0} t+{1}s rem={2}s [{3}/{4}] {5} pass={6} fail={7} notrun={8} groups={9}" -f $glyph, $elapsed, $remaining, $currentIndex, $status.Total, $label, $status.Passed, $status.Failed, $status.NotRun, $groupText
+        $color = if ($status.Failed -gt 0) { [ConsoleColor]::Red } elseif ($status.RunningCount -gt 0 -or $status.Passed -gt 0) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
+        Write-LiveLine -Message $line -Color $color
 
-        if ($StopOnFirstFailure -and $status.Failed -gt 0) {
+        if (($tick % 6) -eq 0) {
             Write-DoneLine
-            Write-Host "First failure detected. Monitoring stopped; HLK queue may still be running." -ForegroundColor Red
-            break
+            Write-Host ("    alive tick={0}; latest={1}" -f $tick, $status.CheckedAt) -ForegroundColor DarkCyan
         }
 
         if ($status.Total -gt 0 -and $status.Completed -ge $status.Total) {
             Write-DoneLine
             if ($status.Failed -eq 0) {
-                Write-Host "All vHLK tests completed without failed status." -ForegroundColor Green
+                Write-Host "[OK] Smoke tests completed without failed status." -ForegroundColor Green
+                $exitCode = 0
             } else {
-                Write-Host ("vHLK completed with {0} failed tests." -f $status.Failed) -ForegroundColor Red
+                Write-Host ("[FAIL] Smoke tests completed with {0} failed." -f $status.Failed) -ForegroundColor Red
+                $exitCode = 2
             }
-            break
-        }
-
-        if ($NoStartTimeoutMinutes -gt 0 -and -not $lastAnyStarted -and ((Get-Date) - $start).TotalMinutes -ge $NoStartTimeoutMinutes) {
-            Write-DoneLine
-            Write-Host ("No vHLK test started within {0} minutes. Check machine pool, HLKSvc, and controller scheduler." -f $NoStartTimeoutMinutes) -ForegroundColor Red
-            break
-        }
-
-        if ($TimeoutMinutes -gt 0 -and ((Get-Date) - $start).TotalMinutes -ge $TimeoutMinutes) {
-            Write-DoneLine
-            Write-Host ("Monitor timeout reached after {0} minutes." -f $TimeoutMinutes) -ForegroundColor Yellow
             break
         }
 
         Start-Sleep -Seconds ([Math]::Max(1, $MonitorIntervalSeconds))
     }
 
+    if (-not $lastStatus) {
+        throw "No status received from controller."
+    }
+
+    if ($exitCode -eq 1) {
+        Write-DoneLine
+        if (-not $lastAnyStarted) {
+            Write-Host ("[TIMEOUT] No selected smoke test started within {0} minutes." -f $TimeoutMinutes) -ForegroundColor Red
+        } else {
+            Write-Host ("[TIMEOUT] Smoke monitor reached {0} minutes before completion." -f $TimeoutMinutes) -ForegroundColor Yellow
+        }
+    }
+
     $summary = [pscustomobject]@{
         ArtifactDir = $artifactDir
         StartedAt = $start.ToString("s")
         CompletedAt = (Get-Date).ToString("s")
-        InitialQueue = $init
+        TimeoutMinutes = $TimeoutMinutes
+        Readiness = $readiness
+        InitialQueue = $queue
         FinalStatus = $lastStatus
         History = $history
     }
-    $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "monitor-summary.json") -Encoding UTF8
-
-    if ($lastStatus -and $lastStatus.Failed -gt 0) {
-        exit 2
-    }
-    if ($lastStatus -and $lastStatus.Total -gt 0 -and $lastStatus.Completed -ge $lastStatus.Total) {
-        exit 0
-    }
-    exit 1
+    $summary | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $artifactDir "monitor-summary.json") -Encoding UTF8
+}
+catch {
+    Write-DoneLine
+    Write-Host ("[ERROR] {0}" -f $_.Exception.Message) -ForegroundColor Red
+    $errorPath = Join-Path $artifactDir "error.txt"
+    Set-Content -LiteralPath $errorPath -Value ($_ | Out-String) -Encoding UTF8
+    $exitCode = 1
 }
 finally {
-    if ($session) {
-        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+    if ($vhlkSession) {
+        Remove-PSSession -Session $vhlkSession -ErrorAction SilentlyContinue
     }
     if ($dutSession) {
         Remove-PSSession -Session $dutSession -ErrorAction SilentlyContinue
@@ -571,3 +621,5 @@ finally {
     Stop-Transcript | Out-Null
     Write-Host ("Artifacts: {0}" -f $artifactDir)
 }
+
+exit $exitCode
