@@ -1,6 +1,5 @@
 #pragma once
 
-#include <filesystem>
 #include <string>
 #include "VirtuaCamDriverAbi.h"
 
@@ -20,6 +19,8 @@ enum class AspectRatioMode
 
 namespace VirtuaCamConfig
 {
+    constexpr const wchar_t* kSettingsRegistryPath = L"HKCU\\Software\\VirtuaCam\\Settings";
+
     struct AppSettings
     {
         bool showPipTopLeft = false;
@@ -29,9 +30,10 @@ namespace VirtuaCamConfig
         std::wstring audioCaptureDeviceName = L"Stereo Mix";
     };
 
-    std::filesystem::path GetConfigPath();
+    const wchar_t* GetSettingsRegistryPath();
     AppSettings LoadSettings();
     bool SaveSettings(const AppSettings& settings);
+    bool DeleteLegacySettingsFile();
 
     AspectRatioMode ParseAspectRatio(const std::wstring& value);
     const wchar_t* AspectRatioName(AspectRatioMode mode);

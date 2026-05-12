@@ -2,35 +2,103 @@
 #include "Config.h"
 #include "RuntimeLog.h"
 
+#include <filesystem>
+#include <wil/resource.h>
+
 namespace
 {
-    constexpr wchar_t kConfigDirName[] = L"VirtuaCam";
-    constexpr wchar_t kConfigFileName[] = L"settings.ini";
-    constexpr wchar_t kSectionName[] = L"VirtuaCam";
+    constexpr wchar_t kSettingsSubkey[] = L"Software\\VirtuaCam\\Settings";
+    constexpr wchar_t kLegacyConfigDirName[] = L"VirtuaCam";
+    constexpr wchar_t kLegacyConfigFileName[] = L"settings.ini";
 
-    std::filesystem::path ResolveLocalAppDataPath()
+    wil::unique_hkey OpenSettingsKey(REGSAM access, bool create)
+    {
+        HKEY rawKey = nullptr;
+        if (create) {
+            DWORD disposition = 0;
+            const LSTATUS status = RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                kSettingsSubkey,
+                0,
+                nullptr,
+                REG_OPTION_NON_VOLATILE,
+                access,
+                nullptr,
+                &rawKey,
+                &disposition);
+            if (status != ERROR_SUCCESS) {
+                VirtuaCamLog::LogWin32(L"RegCreateKeyEx HKCU\\Software\\VirtuaCam\\Settings failed", status);
+                return {};
+            }
+        } else {
+            const LSTATUS status = RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsSubkey, 0, access, &rawKey);
+            if (status != ERROR_SUCCESS) {
+                return {};
+            }
+        }
+        return wil::unique_hkey(rawKey);
+    }
+
+    bool ReadDword(HKEY key, const wchar_t* name, DWORD& value)
+    {
+        DWORD type = 0;
+        DWORD cb = sizeof(value);
+        const LSTATUS status = RegGetValueW(key, nullptr, name, RRF_RT_REG_DWORD, &type, &value, &cb);
+        return status == ERROR_SUCCESS && type == REG_DWORD && cb == sizeof(value);
+    }
+
+    bool WriteDword(HKEY key, const wchar_t* name, DWORD value)
+    {
+        return RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value)) == ERROR_SUCCESS;
+    }
+
+    bool ReadString(HKEY key, const wchar_t* name, std::wstring& value)
+    {
+        DWORD type = 0;
+        DWORD cb = 0;
+        LSTATUS status = RegGetValueW(key, nullptr, name, RRF_RT_REG_SZ, &type, nullptr, &cb);
+        if (status != ERROR_SUCCESS || type != REG_SZ || cb < sizeof(wchar_t)) {
+            return false;
+        }
+
+        std::wstring buffer(cb / sizeof(wchar_t), L'\0');
+        status = RegGetValueW(key, nullptr, name, RRF_RT_REG_SZ, &type, buffer.data(), &cb);
+        if (status != ERROR_SUCCESS || type != REG_SZ) {
+            return false;
+        }
+
+        if (!buffer.empty() && buffer.back() == L'\0') {
+            buffer.pop_back();
+        }
+        value = buffer;
+        return true;
+    }
+
+    bool WriteString(HKEY key, const wchar_t* name, const std::wstring& value)
+    {
+        const DWORD cb = static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t));
+        return RegSetValueExW(key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()), cb) == ERROR_SUCCESS;
+    }
+
+    std::filesystem::path LegacySettingsPath()
     {
         wchar_t buffer[MAX_PATH] = {};
         DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, ARRAYSIZE(buffer));
-        if (len > 0 && len < ARRAYSIZE(buffer)) {
-            return std::filesystem::path(buffer) / kConfigDirName;
+        if (len == 0 || len >= ARRAYSIZE(buffer)) {
+            len = GetEnvironmentVariableW(L"APPDATA", buffer, ARRAYSIZE(buffer));
         }
-
-        wchar_t fallback[MAX_PATH] = {};
-        len = GetEnvironmentVariableW(L"APPDATA", fallback, ARRAYSIZE(fallback));
-        if (len > 0 && len < ARRAYSIZE(fallback)) {
-            return std::filesystem::path(fallback) / kConfigDirName;
+        if (len == 0 || len >= ARRAYSIZE(buffer)) {
+            return {};
         }
-
-        return std::filesystem::current_path();
+        return std::filesystem::path(buffer) / kLegacyConfigDirName / kLegacyConfigFileName;
     }
 }
 
 namespace VirtuaCamConfig
 {
-    std::filesystem::path GetConfigPath()
+    const wchar_t* GetSettingsRegistryPath()
     {
-        return ResolveLocalAppDataPath() / kConfigFileName;
+        return kSettingsRegistryPath;
     }
 
     AspectRatioMode ParseAspectRatio(const std::wstring& value)
@@ -71,65 +139,70 @@ namespace VirtuaCamConfig
     AppSettings LoadSettings()
     {
         AppSettings settings;
-        const auto path = GetConfigPath();
-
-        settings.showPipTopLeft =
-            GetPrivateProfileIntW(kSectionName, L"ShowPipTopLeft", 0, path.c_str()) != 0;
-        settings.showPipTopRight =
-            GetPrivateProfileIntW(kSectionName, L"ShowPipTopRight", 0, path.c_str()) != 0;
-        settings.showPipBottomLeft =
-            GetPrivateProfileIntW(kSectionName, L"ShowPipBottomLeft", 0, path.c_str()) != 0;
-
-        wchar_t aspectRatio[32] = {};
-        GetPrivateProfileStringW(
-            kSectionName,
-            L"AspectRatio",
-            L"16:9",
-            aspectRatio,
-            ARRAYSIZE(aspectRatio),
-            path.c_str());
-        settings.aspectRatio = ParseAspectRatio(aspectRatio);
-
-        wchar_t audioCaptureDeviceName[256] = {};
-        GetPrivateProfileStringW(
-            kSectionName,
-            L"AudioCaptureDeviceName",
-            L"Stereo Mix",
-            audioCaptureDeviceName,
-            ARRAYSIZE(audioCaptureDeviceName),
-            path.c_str());
-        settings.audioCaptureDeviceName = audioCaptureDeviceName;
-
-        if (!std::filesystem::exists(path)) {
-            (void)SaveSettings(settings);
+        wil::unique_hkey key = OpenSettingsKey(KEY_READ | KEY_WRITE, true);
+        if (!key) {
+            return settings;
         }
 
+        DWORD value = 0;
+        if (ReadDword(key.get(), L"ShowPipTopLeft", value)) {
+            settings.showPipTopLeft = value != 0;
+        }
+        if (ReadDword(key.get(), L"ShowPipTopRight", value)) {
+            settings.showPipTopRight = value != 0;
+        }
+        if (ReadDword(key.get(), L"ShowPipBottomLeft", value)) {
+            settings.showPipBottomLeft = value != 0;
+        }
+
+        std::wstring text;
+        if (ReadString(key.get(), L"AspectRatio", text)) {
+            settings.aspectRatio = ParseAspectRatio(text);
+        }
+        if (ReadString(key.get(), L"AudioCaptureDeviceName", text)) {
+            settings.audioCaptureDeviceName = text;
+        }
+
+        (void)SaveSettings(settings);
         return settings;
     }
 
     bool SaveSettings(const AppSettings& settings)
     {
-        const auto path = GetConfigPath();
-        std::error_code ec;
-        std::filesystem::create_directories(path.parent_path(), ec);
-        if (ec) {
-            VirtuaCamLog::LogLine(std::format(
-                L"Create config directory failed: {} error={}",
-                path.parent_path().wstring(),
-                ec.value()));
+        wil::unique_hkey key = OpenSettingsKey(KEY_SET_VALUE, true);
+        if (!key) {
             return false;
         }
 
         const bool ok =
-            WritePrivateProfileStringW(kSectionName, L"ShowPipTopLeft", settings.showPipTopLeft ? L"1" : L"0", path.c_str()) &&
-            WritePrivateProfileStringW(kSectionName, L"ShowPipTopRight", settings.showPipTopRight ? L"1" : L"0", path.c_str()) &&
-            WritePrivateProfileStringW(kSectionName, L"ShowPipBottomLeft", settings.showPipBottomLeft ? L"1" : L"0", path.c_str()) &&
-            WritePrivateProfileStringW(kSectionName, L"AspectRatio", AspectRatioConfigValue(settings.aspectRatio), path.c_str()) &&
-            WritePrivateProfileStringW(kSectionName, L"AudioCaptureDeviceName", settings.audioCaptureDeviceName.c_str(), path.c_str());
+            WriteDword(key.get(), L"ShowPipTopLeft", settings.showPipTopLeft ? 1u : 0u) &&
+            WriteDword(key.get(), L"ShowPipTopRight", settings.showPipTopRight ? 1u : 0u) &&
+            WriteDword(key.get(), L"ShowPipBottomLeft", settings.showPipBottomLeft ? 1u : 0u) &&
+            WriteString(key.get(), L"AspectRatio", AspectRatioConfigValue(settings.aspectRatio)) &&
+            WriteString(key.get(), L"AudioCaptureDeviceName", settings.audioCaptureDeviceName);
 
         if (!ok) {
-            VirtuaCamLog::LogWin32(std::format(L"Write config failed: {}", path.wstring()), GetLastError());
+            VirtuaCamLog::LogWin32(L"Write settings registry failed", GetLastError());
         }
         return ok;
+    }
+
+    bool DeleteLegacySettingsFile()
+    {
+        const std::filesystem::path legacyPath = LegacySettingsPath();
+        if (legacyPath.empty()) {
+            return true;
+        }
+
+        std::error_code ec;
+        std::filesystem::remove(legacyPath, ec);
+        if (ec) {
+            VirtuaCamLog::LogLine(std::format(
+                L"Legacy settings file delete failed: {} error={}",
+                legacyPath.wstring(),
+                ec.value()));
+            return false;
+        }
+        return true;
     }
 }

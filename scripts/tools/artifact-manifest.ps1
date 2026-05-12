@@ -18,6 +18,12 @@ function Get-VirtuaCamRuntimeArtifacts {
     )
 }
 
+function Get-VirtuaCamSetupArtifacts {
+    @(
+        "VirtuaCamSetup.exe"
+    )
+}
+
 function Get-VirtuaCamDriverArtifacts {
     @(
         "avshws.sys",
@@ -30,6 +36,7 @@ function Get-VirtuaCamDriverArtifacts {
 function Get-VirtuaCamInstallArtifacts {
     @(
         (Get-VirtuaCamSoftwareArtifacts) +
+        (Get-VirtuaCamSetupArtifacts) +
         (Get-VirtuaCamRuntimeArtifacts) +
         (Get-VirtuaCamDriverArtifacts)
     )

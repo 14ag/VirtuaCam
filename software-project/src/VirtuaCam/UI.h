@@ -16,6 +16,7 @@ struct CapturableWindow {
 typedef ID3D11Texture2D* (*PFN_GetSharedTexture)();
 
 void UI_Initialize(HINSTANCE instance, HWND& outMainWnd, PFN_GetSharedTexture pfnGetSharedTexture);
+void UI_SetDebugMode(bool enabled);
 void UI_RunMessageLoop(std::function<void()> onIdle);
 void UI_Shutdown();
 void UI_UpdateAudioDeviceLists(const std::vector<std::wstring>& captureDevices);

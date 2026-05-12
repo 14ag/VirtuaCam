@@ -25,9 +25,10 @@ This design avoids the Media Foundation virtual camera output path. The broker c
 * **Direct AVStream output:** frames reach Windows camera clients through `avshws.sys`.
 * **Built-in producers:** camera passthrough and window capture run inside `VirtuaCamProcess.exe`.
 * **External producer support:** `DirectPortConsumer.dll` remains the default dynamic producer module.
-* **Tray controller:** source selection, grid/PIP composition, aspect-ratio selection, and driver status telemetry.
-* **Audio source selection:** active WASAPI capture devices appear under `Audio Source`; camera passthrough tries to select a matching USB camera microphone.
-* **Persisted settings:** PIP toggles, aspect ratio, and selected audio capture device are saved in `%LOCALAPPDATA%\VirtuaCam\settings.ini`.
+* **Tray controller:** source selection, audio source selection, preview, about, and driver status telemetry.
+* **Debug controls:** launching `VirtuaCam.exe -debug` exposes PIP, aspect-ratio masks, diagnostics, logs, and proof tool launchers under `Advanced`.
+* **Audio source selection:** active WASAPI capture devices appear under `Audio Source`; camera passthrough keeps the existing matching-microphone selection behavior.
+* **Persisted settings:** PIP toggles, aspect ratio, and selected audio capture device are saved in `HKCU\Software\VirtuaCam\Settings`.
 * **Driver geometry sync:** frames are scaled to the active driver format, including `1280x720`, `640x480`, `720x1280`, and `480x640`.
 * **FrameEx driver upload:** `DriverBridge` prefers the shared FrameEx ABI for BGRA32/NV12 uploads when the driver reports support, with legacy BGR24 fallback.
 
@@ -43,9 +44,9 @@ Use the repository root scripts. This subproject does not have a separate public
 
 Default staged user-mode artifacts are `VirtuaCam.exe`, `VirtuaCamProcess.exe`, `DirectPortBroker.dll`, `DirectPortClient.dll`, and `DirectPortConsumer.dll`.
 
-Aspect ratio is available from `Settings > Aspect Ratio` with `16:9`, `9:16`, `4:3`, and `3:4`. The selected ratio is sent to the driver as the preferred capture format for the next stream open (`1280x720`, `720x1280`, `640x480`, or `480x640`). The producer preserves source shape and uses black padding when content does not match the selected frame.
+Aspect ratio is available from `Advanced > Aspect Ratio` when launched with `-debug`, with `16:9`, `9:16`, `4:3`, and `3:4`. The selected ratio is sent to the driver as the preferred capture format for the next stream open (`1280x720`, `720x1280`, `640x480`, or `480x640`). The producer preserves source shape and uses black padding when content does not match the selected frame.
 
-Audio capture device selection is available from `Audio Source`. The app starts a WASAPI capture session for the selected input and persists the device name. This is current capture plumbing only; the staged package does not yet expose a separate virtual microphone endpoint.
+Audio capture device selection is available from `Audio Source`. The app starts a WASAPI capture session for the selected input and persists the device name in the registry. Startup falls back to `Stereo Mix` when present.
 
 The main frame loop is paced to the app frame interval, skips unchanged broker frame values, and keeps default/off-feed refresh separate from live producer refresh. The broker throttles process discovery, validates expected producer nonces, caches producer manifest mappings, and flushes shared D3D updates before publishing frame values.
 

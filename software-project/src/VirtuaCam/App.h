@@ -49,6 +49,10 @@
 #define ID_ASPECT_RATIO_9_16            18101
 #define ID_ASPECT_RATIO_4_3             18102
 #define ID_ASPECT_RATIO_3_4             18103
+#define ID_ADV_OPEN_LOG_DIR             18200
+#define ID_ADV_RUN_HOST_PROOF           18201
+#define ID_ADV_RUN_SETUP_VERIFY         18202
+#define ID_ADV_RUN_VM_VERIFIER_PROOF    18203
 
 enum class BrokerState { Searching, Connected, Failed };
 enum class VCamCommand { None = 0 };

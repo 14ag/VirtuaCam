@@ -95,6 +95,7 @@ void LoadSettings();
 void SaveSettings();
 void InitializeAudio();
 void SelectAudioForCameraPassthrough(int cameraIndex);
+void ApplySavedAudioSelection();
 bool HasArg(const std::wstring& cmdLine, const wchar_t* arg);
 bool TryGetArgU64(const std::wstring& cmdLine, const wchar_t* arg, UINT64& outValue);
 
@@ -298,9 +299,9 @@ void SetAspectRatioMode(AspectRatioMode mode)
     g_aspectRatioMode = mode;
     SaveSettings();
     VirtuaCamLog::LogLine(std::format(
-        L"Aspect ratio changed: {} config={}",
+        L"Aspect ratio changed: {} settings={}",
         VirtuaCamConfig::AspectRatioName(g_aspectRatioMode),
-        VirtuaCamConfig::GetConfigPath().wstring()));
+        VirtuaCamConfig::GetSettingsRegistryPath()));
     ApplyDriverAspectPolicy();
 }
 
@@ -782,6 +783,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     }
 
     UI_Initialize(hInstance, g_hMainWnd, g_pfnGetSharedTexture);
+    UI_SetDebugMode(g_debugLoggingEnabled);
     if (!g_hMainWnd) {
         ShutdownSystem(); CoUninitialize(); return FALSE;
     }
@@ -1072,6 +1074,7 @@ bool IsRunningAsAdmin() {
 }
 
 void LoadSettings() {
+    (void)VirtuaCamConfig::DeleteLegacySettingsFile();
     const VirtuaCamConfig::AppSettings settings = VirtuaCamConfig::LoadSettings();
     g_showPipTL = settings.showPipTopLeft;
     g_showPipTR = settings.showPipTopRight;
@@ -1080,8 +1083,8 @@ void LoadSettings() {
     g_audioCaptureDeviceName = settings.audioCaptureDeviceName;
 
     VirtuaCamLog::LogLine(std::format(
-        L"Settings loaded: config={} aspect={} audio={}",
-        VirtuaCamConfig::GetConfigPath().wstring(),
+        L"Settings loaded: registry={} aspect={} audio={}",
+        VirtuaCamConfig::GetSettingsRegistryPath(),
         VirtuaCamConfig::AspectRatioName(g_aspectRatioMode),
         g_audioCaptureDeviceName.empty() ? L"None" : g_audioCaptureDeviceName));
 }

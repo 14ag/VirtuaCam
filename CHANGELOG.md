@@ -9,9 +9,8 @@ Format follows Keep a Changelog and this repository currently tracks changes fro
 ### Added
 
 - tray aspect-ratio setting with `16:9`, `9:16`, `4:3`, and `3:4`
-- `%LOCALAPPDATA%\VirtuaCam\settings.ini` persistence for aspect ratio and PIP toggles
-- `Audio Source` tray selection for active WASAPI capture devices, including persisted `AudioCaptureDeviceName`
-- camera passthrough audio selection that tries to pair a USB camera with its matching microphone
+- `HKCU\Software\VirtuaCam\Settings` persistence for aspect ratio, PIP toggles, and `AudioCaptureDeviceName`
+- `Audio Source` tray selection for None and active WASAPI capture devices
 - shared driver/user-mode ABI header with aspect masks, `VIRTUACAM_PROP_FRAME_EX`, `VIRTUACAM_FRAME_EX_HEADER`, and driver status v2 fields
 - FrameEx driver upload support for BGRA32/RGB32/NV12 with legacy BGR24 fallback
 - broker manifest magic/version/size/owner PID/nonce validation and bounded shared-object names

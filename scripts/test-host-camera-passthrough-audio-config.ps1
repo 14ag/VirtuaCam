@@ -16,7 +16,8 @@ $logDir = Join-Path $outputDir "logs"
 $runtimeLog = Join-Path $logDir "virtuacam-runtime.log"
 $processLog = Join-Path $logDir "virtuacam-process.log"
 $summaryPath = Join-Path $runDir "host-camera-passthrough.json"
-$configPath = Join-Path $env:LOCALAPPDATA "VirtuaCam\settings.ini"
+$settingsRegPath = "HKCU:\Software\VirtuaCam\Settings"
+$legacyConfigPath = Join-Path $env:LOCALAPPDATA "VirtuaCam\settings.ini"
 
 New-Item -ItemType Directory -Force -Path $runDir, $logDir | Out-Null
 
@@ -183,10 +184,10 @@ try {
 
     Remove-Item -LiteralPath $runtimeLog, $processLog -Force -ErrorAction SilentlyContinue
 
-    if (Test-Path -LiteralPath $configPath) {
-        $lines = Get-Content -LiteralPath $configPath | Where-Object { $_ -notmatch '^AudioCaptureDeviceName=' }
-        Set-Content -LiteralPath $configPath -Encoding Unicode -Value $lines
+    if (Test-Path -LiteralPath $settingsRegPath) {
+        Remove-ItemProperty -LiteralPath $settingsRegPath -Name AudioCaptureDeviceName -ErrorAction SilentlyContinue
     }
+    Remove-Item -LiteralPath $legacyConfigPath -Force -ErrorAction SilentlyContinue
 
     $env:VIRTUACAM_ATTEMPT_ID = "host-camera-passthrough"
     $app = Start-Process -FilePath (Join-Path $outputDir "VirtuaCam.exe") `
@@ -209,18 +210,26 @@ try {
          $runtime -notmatch 'Audio capture started: device=Microphone .*Camera .* loopback=0'))
 
     $frame = Capture-VirtualCameraFrame -DevicePattern $VirtualDevicePattern -Timeout $TimeoutSeconds
-    $config = if (Test-Path -LiteralPath $configPath) { [string](Get-Content -LiteralPath $configPath -Raw) } else { "" }
+    $settings = if (Test-Path -LiteralPath $settingsRegPath) { Get-ItemProperty -LiteralPath $settingsRegPath } else { $null }
+    $registryAudioName = if ($settings -and $settings.PSObject.Properties.Name -contains "AudioCaptureDeviceName") {
+        [string]$settings.AudioCaptureDeviceName
+    } else {
+        ""
+    }
 
     $summary = [ordered]@{
         Success = $true
         RunDir = $runDir
         AppPid = $app.Id
-        ConfigPath = $configPath
+        SettingsRegistryPath = $settingsRegPath
+        LegacyConfigPath = $legacyConfigPath
+        LegacyConfigExists = (Test-Path -LiteralPath $legacyConfigPath)
         SawStereoMixDefault = ($runtime -match 'Audio source selected: Stereo Mix .* reason=startup default')
         SawWebcamMicSelected = ($runtime -match 'Audio source selected: Microphone .*Camera .* reason=camera passthrough')
         WebcamMicCaptureStarted = ($runtime -match 'Audio capture started: device=Microphone .*Camera .* loopback=0')
         AudioPacketSeen = ($runtime -match 'Audio capture packet: frames=')
-        ConfigHasWebcamMic = ($config -match 'AudioCaptureDeviceName=Microphone .*Camera')
+        RegistryAudioCaptureDeviceName = $registryAudioName
+        RegistryHasWebcamMic = ($registryAudioName -match 'Microphone .*Camera')
         CameraProducerStarted = ($process -match 'InitializeProducer success: type=camera')
         CameraProducerFrame = ($process -match 'First producer frame: type=camera')
         BrokerConnected = ($runtime -match 'Broker state -> Connected')
@@ -231,7 +240,8 @@ try {
     if (-not $summary.SawStereoMixDefault -or
         -not $summary.SawWebcamMicSelected -or
         -not $summary.WebcamMicCaptureStarted -or
-        -not $summary.ConfigHasWebcamMic -or
+        -not $summary.RegistryHasWebcamMic -or
+        $summary.LegacyConfigExists -or
         -not $summary.CameraProducerStarted -or
         -not $summary.CameraProducerFrame -or
         -not $summary.BrokerConnected -or

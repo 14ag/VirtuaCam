@@ -98,25 +98,35 @@ function Get-AvshwsDevices {
         Where-Object { $_.PNPDeviceID -like "ROOT\AVSHWS\*" }
 }
 
-function Remove-ExistingDriverPackageIfRequested {
-    if (-not $ForceDriverRebind) {
-        return
-    }
+function Remove-DriverPackagesForDevicePattern {
+    param([Parameter(Mandatory = $true)][string]$DeviceIdPattern)
 
     $signedDrivers = Get-CimInstance Win32_PnPSignedDriver |
-        Where-Object { $_.DeviceID -like "ROOT\AVSHWS\*" -and $_.InfName }
+        Where-Object { $_.DeviceID -like $DeviceIdPattern -and $_.InfName }
 
     $infNames = @($signedDrivers | Select-Object -ExpandProperty InfName -Unique)
-    if ($infNames.Count -eq 0) {
-        Write-Info "No bound OEM INF found for ROOT\AVSHWS"
-        return
-    }
-
     foreach ($inf in $infNames) {
         if ($inf -match '^oem\d+\.inf$') {
             Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/delete-driver", $inf, "/uninstall", "/force") -AllowedExitCodes @(0, 259, 3010, -536870340)
         }
     }
+}
+
+function Remove-ExistingDriverPackageIfRequested {
+    param([Parameter(Mandatory = $true)][string]$DeviceIdPattern)
+
+    if (-not $ForceDriverRebind) {
+        return
+    }
+
+    $matched = @(Get-CimInstance Win32_PnPSignedDriver |
+        Where-Object { $_.DeviceID -like $DeviceIdPattern -and $_.InfName })
+    if ($matched.Count -eq 0) {
+        Write-Info "No bound OEM INF found for $DeviceIdPattern"
+        return
+    }
+
+    Remove-DriverPackagesForDevicePattern -DeviceIdPattern $DeviceIdPattern
 }
 
 if (-not ([System.Management.Automation.PSTypeName]'AvshwsInstallerNative').Type) {
@@ -254,6 +264,18 @@ $driverCat = Join-Path $OutputRoot "avshws.cat"
 $driverCer = Join-Path $OutputRoot "VirtualCameraDriver-TestSign.cer"
 $clientDll = Join-Path $OutputRoot "DirectPortClient.dll"
 
+function Remove-LegacyUserSettingsFile {
+    $candidateRoots = @(
+        [Environment]::GetFolderPath("LocalApplicationData"),
+        [Environment]::GetFolderPath("ApplicationData")
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    foreach ($root in $candidateRoots) {
+        $legacyPath = Join-Path $root "VirtuaCam\settings.ini"
+        Remove-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Install-WatcherService {
     param([Parameter(Mandatory = $true)][string]$ProcessPath)
 
@@ -344,11 +366,15 @@ Write-Host "============================================================" -Foreg
 Write-Info "OutputRoot: $OutputRoot"
 
 if ($Uninstall) {
+    Assert-Administrator
     Write-Step "Uninstall startup and VirtuaCam registry entries"
     Uninstall-WatcherService
+    Remove-DriverPackagesForDevicePattern -DeviceIdPattern "ROOT\AVSHWS\*"
     Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCamProcess" -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCam" -ErrorAction SilentlyContinue
     Remove-Item -Path $virtuaCamRegPath -Recurse -ErrorAction SilentlyContinue
+    Remove-Item -Path "HKCU:\Software\VirtuaCam\Settings" -Recurse -ErrorAction SilentlyContinue
+    Remove-LegacyUserSettingsFile
     Write-Success "Uninstall cleanup complete"
     exit 0
 }
@@ -379,7 +405,7 @@ if (-not $SkipDriverInstall) {
     }
 
     Import-TestCertificateIfPresent -Path $driverCer
-    Remove-ExistingDriverPackageIfRequested
+    Remove-ExistingDriverPackageIfRequested -DeviceIdPattern "ROOT\AVSHWS\*"
 
     Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $driverInf, "/install") -AllowedExitCodes @(0, 259)
 
@@ -445,6 +471,7 @@ if (-not $SkipDllRegister) {
 }
 
 Write-Step "Configure registry and startup from output"
+Remove-LegacyUserSettingsFile
 New-Item -Path $virtuaCamRegPath -Force | Out-Null
 $installDirCanonical = [System.IO.Path]::GetFullPath($installDir)
 $virtuaCamExeCanonical = [System.IO.Path]::GetFullPath($virtuaCamExe)

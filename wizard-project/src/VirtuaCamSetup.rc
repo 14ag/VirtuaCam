@@ -1,0 +1,4 @@
+#include <windows.h>
+#include "resource.h"
+
+IDI_VIRTUACAM_SETUP ICON "..\\..\\software-project\\src\\VirtuaCam\\App.ico"

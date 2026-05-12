@@ -10,6 +10,7 @@
 #include <wrl/client.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
+#include <filesystem>
 #include <map>
 
 #pragma comment(lib, "d3d11.lib")
@@ -44,6 +45,38 @@ namespace
 {
     const GUID kDriverPropertySet = { 0xcb043957, 0x7b35, 0x456e, { 0x9b, 0x61, 0x55, 0x13, 0x93, 0x0f, 0x4d, 0x8e } };
     constexpr ULONG kDriverPropertyId = 0;
+
+    std::filesystem::path RepoRootFromExeDir()
+    {
+        std::filesystem::path exeDir = VirtuaCamLog::GetExeDir();
+        if (exeDir.filename() == L"output") {
+            return exeDir.parent_path();
+        }
+        return exeDir;
+    }
+
+    void ShellOpenPath(const std::filesystem::path& path)
+    {
+        ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
+    void RunPowerShellScript(const std::filesystem::path& scriptPath, const wchar_t* extraArgs = nullptr)
+    {
+        if (!std::filesystem::exists(scriptPath)) {
+            VirtuaCamLog::LogLine(std::format(L"Advanced tool missing: {}", scriptPath.wstring()));
+            MessageBoxW(nullptr, scriptPath.c_str(), L"VirtuaCam tool missing", MB_OK | MB_ICONWARNING);
+            return;
+        }
+
+        std::wstring args = std::format(
+            L"-NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+            scriptPath.wstring());
+        if (extraArgs && extraArgs[0] != L'\0') {
+            args += L" ";
+            args += extraArgs;
+        }
+        ShellExecuteW(nullptr, L"open", L"powershell.exe", args.c_str(), RepoRootFromExeDir().c_str(), SW_SHOWNORMAL);
+    }
 
     bool IsDriverOutputCamera(IMoniker* moniker)
     {
@@ -164,6 +197,7 @@ static std::vector<std::wstring> g_captureDeviceNames;
 std::vector<std::wstring> g_cameraDevicePaths;
 std::vector<std::wstring> g_cameraDeviceNamesCache;
 static int g_currentAudioDevice = ID_AUDIO_DEVICE_NONE;
+static bool g_debugUiEnabled = false;
 static PFN_GetSharedTexture g_pfnGetSharedTexture = nullptr;
 static std::function<void()> g_onIdle;
 
@@ -278,6 +312,11 @@ void UI_Initialize(HINSTANCE instance, HWND& outMainWnd, PFN_GetSharedTexture pf
         AddTrayIcon(g_hMainWnd, true);
     }
     outMainWnd = g_hMainWnd;
+}
+
+void UI_SetDebugMode(bool enabled)
+{
+    g_debugUiEnabled = enabled;
 }
 
 void UI_RunMessageLoop(std::function<void()> onIdle) {
@@ -476,6 +515,24 @@ void HandleMenuCommand(UINT id)
         RequestDriverDisconnect();
         DestroyWindow(g_hMainWnd);
     }
+    else if (id == ID_ADV_OPEN_LOG_DIR) {
+        const std::filesystem::path logPath = VirtuaCamLog::GetLogPath();
+        ShellOpenPath(logPath.empty() ? std::filesystem::path(VirtuaCamLog::GetExeDir()) : logPath.parent_path());
+    }
+    else if (id == ID_ADV_RUN_HOST_PROOF) {
+        RunPowerShellScript(RepoRootFromExeDir() / L"scripts" / L"host-media-capture-auto-proof.ps1");
+    }
+    else if (id == ID_ADV_RUN_VM_VERIFIER_PROOF) {
+        RunPowerShellScript(RepoRootFromExeDir() / L"scripts" / L"hyperv-proof-chrome.ps1", L"-EnableVerifier");
+    }
+    else if (id == ID_ADV_RUN_SETUP_VERIFY) {
+        const std::filesystem::path setup = std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"VirtuaCamSetup.exe";
+        if (std::filesystem::exists(setup)) {
+            ShellExecuteW(nullptr, L"open", setup.c_str(), L"--verify-only --quiet", VirtuaCamLog::GetExeDir().c_str(), SW_SHOWNORMAL);
+        } else {
+            MessageBoxW(g_hMainWnd, setup.c_str(), L"VirtuaCam setup not staged", MB_OK | MB_ICONWARNING);
+        }
+    }
     else if (id == ID_SETTINGS_PIP_TL) TogglePipTl();
     else if (id == ID_SETTINGS_PIP_TR) TogglePipTr();
     else if (id == ID_SETTINGS_PIP_BL) TogglePipBl();
@@ -634,22 +691,6 @@ void ShowContextMenu(HWND hwnd) {
     HMENU sourceMenu = BuildSourceSubMenu(cameras, windows, false);
     if (sourceMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sourceMenu), L"Source");
 
-    if (GetPipTlEnabled()) {
-        HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::TL);
-        if (pipMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"PIP (Top Left)");
-    }
-    if (GetPipTrEnabled()) {
-        HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::TR);
-        if (pipMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"PIP (Top Right)");
-    }
-    if (GetPipBlEnabled()) {
-        HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::BL);
-        if (pipMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"PIP (Bottom Left)");
-    }
-
-    HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::BR);
-    if (pipMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"Picture-in-Picture");
-
     HMENU audioSubMenu = CreatePopupMenu();
     if (audioSubMenu) {
         AddNativeMenuItem(audioSubMenu, L"None", ID_AUDIO_DEVICE_NONE, g_currentAudioDevice == ID_AUDIO_DEVICE_NONE);
@@ -665,23 +706,49 @@ void ShowContextMenu(HWND hwnd) {
 
     AddNativeSeparator(menu);
 
-    HMENU settingsMenu = CreatePopupMenu();
-    if (settingsMenu) {
-        AddNativeMenuItem(settingsMenu, L"PIP Top Left", ID_SETTINGS_PIP_TL, GetPipTlEnabled());
-        AddNativeMenuItem(settingsMenu, L"PIP Top Right", ID_SETTINGS_PIP_TR, GetPipTrEnabled());
-        AddNativeMenuItem(settingsMenu, L"PIP Bottom Left", ID_SETTINGS_PIP_BL, GetPipBlEnabled());
-        AddNativeSeparator(settingsMenu);
-        HMENU aspectMenu = CreatePopupMenu();
-        if (aspectMenu) {
-            const AspectRatioMode currentAspect = GetAspectRatioMode();
-            const ULONG allowedAspectMask = GetAllowedAspectRatioMask();
-            AddNativeMenuItem(aspectMenu, L"16:9", ID_ASPECT_RATIO_16_9, currentAspect == AspectRatioMode::R16_9, (allowedAspectMask & ASPECT_RATIO_MASK_16_9) != 0);
-            AddNativeMenuItem(aspectMenu, L"9:16", ID_ASPECT_RATIO_9_16, currentAspect == AspectRatioMode::R9_16, (allowedAspectMask & ASPECT_RATIO_MASK_9_16) != 0);
-            AddNativeMenuItem(aspectMenu, L"4:3", ID_ASPECT_RATIO_4_3, currentAspect == AspectRatioMode::R4_3, (allowedAspectMask & ASPECT_RATIO_MASK_4_3) != 0);
-            AddNativeMenuItem(aspectMenu, L"3:4", ID_ASPECT_RATIO_3_4, currentAspect == AspectRatioMode::R3_4, (allowedAspectMask & ASPECT_RATIO_MASK_3_4) != 0);
-            AppendMenuW(settingsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(aspectMenu), L"Aspect Ratio");
+    if (g_debugUiEnabled) {
+        HMENU advancedMenu = CreatePopupMenu();
+        if (advancedMenu) {
+            if (GetPipTlEnabled()) {
+                HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::TL);
+                if (pipMenu) AppendMenuW(advancedMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"PIP (Top Left)");
+            }
+            if (GetPipTrEnabled()) {
+                HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::TR);
+                if (pipMenu) AppendMenuW(advancedMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"PIP (Top Right)");
+            }
+            if (GetPipBlEnabled()) {
+                HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::BL);
+                if (pipMenu) AppendMenuW(advancedMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"PIP (Bottom Left)");
+            }
+
+            HMENU pipMenu = BuildSourceSubMenu(cameras, windows, true, PipPosition::BR);
+            if (pipMenu) AppendMenuW(advancedMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(pipMenu), L"Picture-in-Picture");
+
+            AddNativeSeparator(advancedMenu);
+            AddNativeMenuItem(advancedMenu, L"PIP Top Left", ID_SETTINGS_PIP_TL, GetPipTlEnabled());
+            AddNativeMenuItem(advancedMenu, L"PIP Top Right", ID_SETTINGS_PIP_TR, GetPipTrEnabled());
+            AddNativeMenuItem(advancedMenu, L"PIP Bottom Left", ID_SETTINGS_PIP_BL, GetPipBlEnabled());
+            AddNativeSeparator(advancedMenu);
+
+            HMENU aspectMenu = CreatePopupMenu();
+            if (aspectMenu) {
+                const AspectRatioMode currentAspect = GetAspectRatioMode();
+                const ULONG allowedAspectMask = GetAllowedAspectRatioMask();
+                AddNativeMenuItem(aspectMenu, L"16:9", ID_ASPECT_RATIO_16_9, currentAspect == AspectRatioMode::R16_9, (allowedAspectMask & ASPECT_RATIO_MASK_16_9) != 0);
+                AddNativeMenuItem(aspectMenu, L"9:16", ID_ASPECT_RATIO_9_16, currentAspect == AspectRatioMode::R9_16, (allowedAspectMask & ASPECT_RATIO_MASK_9_16) != 0);
+                AddNativeMenuItem(aspectMenu, L"4:3", ID_ASPECT_RATIO_4_3, currentAspect == AspectRatioMode::R4_3, (allowedAspectMask & ASPECT_RATIO_MASK_4_3) != 0);
+                AddNativeMenuItem(aspectMenu, L"3:4", ID_ASPECT_RATIO_3_4, currentAspect == AspectRatioMode::R3_4, (allowedAspectMask & ASPECT_RATIO_MASK_3_4) != 0);
+                AppendMenuW(advancedMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(aspectMenu), L"Aspect Ratio");
+            }
+
+            AddNativeSeparator(advancedMenu);
+            AddNativeMenuItem(advancedMenu, L"Open Logs", ID_ADV_OPEN_LOG_DIR);
+            AddNativeMenuItem(advancedMenu, L"Run Host Media Proof", ID_ADV_RUN_HOST_PROOF);
+            AddNativeMenuItem(advancedMenu, L"Run VM Verifier Proof", ID_ADV_RUN_VM_VERIFIER_PROOF);
+            AddNativeMenuItem(advancedMenu, L"Run Setup Verify", ID_ADV_RUN_SETUP_VERIFY);
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(advancedMenu), L"Advanced");
         }
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(settingsMenu), L"Settings");
     }
 
     AddNativeMenuItem(menu, L"About", ID_TRAY_ABOUT);
@@ -731,6 +798,12 @@ LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             if (FAILED(g_swapChain->GetBuffer(0, IID_PPV_ARGS(&pBuffer)))) return 0;
             if (FAILED(g_device->CreateRenderTargetView(pBuffer.Get(), NULL, &g_rtv))) return 0;
             if (g_hTelemetryLabel) SetWindowPos(g_hTelemetryLabel, NULL, 0, 0, width, 20, SWP_NOZORDER);
+        }
+        break;
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) {
+            DestroyWindow(hwnd);
+            return 0;
         }
         break;
     case WM_CLOSE: DestroyWindow(hwnd); break;
@@ -826,8 +899,9 @@ void UpdateTelemetry(BrokerState currentState, bool driverConnected) {
             std::wstring label = std::format(
                 L"Broker: {} | Driver: {}",
                 brokerText,
-                driverConnected ? L"OK" : L"FAIL");
+                driverConnected ? L"Connected" : L"Disconnected");
             SetWindowText(g_hTelemetryLabel, label.c_str());
+            NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, g_hTelemetryLabel, OBJID_CLIENT, CHILDID_SELF);
         }
 
         UpdateTrayTooltip(currentState, driverConnected);

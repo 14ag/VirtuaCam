@@ -89,19 +89,21 @@ The tray menu has two source modes that can look similar when no producers are a
 - `Source > Off`: deliberately sends the generated off/default feed and ignores discovered producer streams.
 - `Source > Auto-Discovery Grid`: scans for available DirectPort producer streams and tiles them into a grid. If no producers are found, it falls back to the generated off/default feed.
 
+Normal tray launch exposes Preview, Source, Audio Source, About, and Exit. Launch with `-debug` to expose PIP, aspect-ratio masks, diagnostics, logs, and proof tool launchers under `Advanced`.
+
 Aspect ratio is controlled from:
 
 ```text
-Settings > Aspect Ratio > 16:9 | 9:16 | 4:3 | 3:4
+Advanced > Aspect Ratio > 16:9 | 9:16 | 4:3 | 3:4
 ```
 
 VirtuaCam stores these settings in:
 
 ```text
-%LOCALAPPDATA%\VirtuaCam\settings.ini
+HKCU\Software\VirtuaCam\Settings
 ```
 
-The config also stores `AudioCaptureDeviceName`. The tray menu exposes `Audio Source`, with `None` plus active WASAPI capture devices. Startup falls back to `Stereo Mix` when present, and camera passthrough attempts to select a matching USB camera microphone before saving the selection. This is capture-side audio plumbing; the repository does not yet stage a separate `VirtuaCam Microphone` endpoint.
+The registry settings include `AudioCaptureDeviceName`. The tray menu exposes `Audio Source`, with `None` and active WASAPI capture devices. Startup falls back to `Stereo Mix` when present, and camera passthrough keeps the existing matching-microphone selection behavior.
 
 The driver defaults to `1280x720`, and also advertises `640x480`, `720x1280`, and `480x640` capture modes. The tray aspect setting is sent to the driver as the preferred capture format, and camera passthrough can restrict the allowed driver aspect mask to formats supported by the physical camera. The next camera stream open chooses matching dimensions when the client accepts the advertised order. The producer still preserves source shape with black padding when content does not match the selected frame.
 
@@ -148,6 +150,7 @@ Host-side proof helpers:
 .\scripts\host-media-capture-auto-proof.ps1
 .\scripts\host-media-capture-auto-proof.ps1 -IncludeAutoSurfaceProbe
 .\scripts\test-host-camera-passthrough-audio-config.ps1
+.\scripts\test-setup-registry-debug.ps1
 ```
 
 `host-media-capture-auto-proof.ps1` runs the CPU-backed frame-reader path by default. Use `-IncludeAutoSurfaceProbe` when you also want to probe the WinRT `Auto` memory preference path.

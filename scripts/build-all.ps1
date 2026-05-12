@@ -217,6 +217,8 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
 $softwareDir = Join-Path $repoRoot "software-project"
 $softwareSrcDir = Join-Path $softwareDir "src"
 $softwareBuildDir = Join-Path $softwareDir "build"
+$wizardDir = Join-Path $repoRoot "wizard-project"
+$wizardBuildDir = Join-Path $wizardDir "build"
 $driverRoot = Join-Path $repoRoot "driver-project"
 $driverSolutionPath = Join-Path $driverRoot "avshws.sln"
 $OutputRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "output"))
@@ -236,6 +238,9 @@ if (-not $SkipDriver) {
 
 if (-not $SkipSoftware -and -not (Test-Path -LiteralPath (Join-Path $softwareSrcDir "CMakeLists.txt"))) {
     Fail "Software CMakeLists.txt missing: $softwareSrcDir"
+}
+if (-not $SkipSoftware -and -not (Test-Path -LiteralPath (Join-Path $wizardDir "CMakeLists.txt"))) {
+    Fail "Wizard CMakeLists.txt missing: $wizardDir"
 }
 if (-not $SkipDriver -and -not (Test-Path -LiteralPath $driverSolutionPath)) {
     Fail "Driver solution missing: $driverSolutionPath"
@@ -289,6 +294,9 @@ if (-not $SkipSoftware) {
 
     if ($Clean -and (Test-Path -LiteralPath $softwareBuildDir)) {
         Remove-Item -LiteralPath $softwareBuildDir -Recurse -Force
+    }
+    if ($Clean -and (Test-Path -LiteralPath $wizardBuildDir)) {
+        Remove-Item -LiteralPath $wizardBuildDir -Recurse -Force
     }
     $null = New-Item -ItemType Directory -Force -Path $softwareBuildDir
 
@@ -348,6 +356,34 @@ if (-not $SkipSoftware) {
             Fail "Missing VC runtime artifact: $src"
         }
         Copy-Item -LiteralPath $src -Destination $OutputRoot -Force
+    }
+
+    Write-Step "Build setup wizard"
+    $null = New-Item -ItemType Directory -Force -Path $wizardBuildDir
+    $wizardConfigArgs = @(
+        "-S", $wizardDir,
+        "-B", $wizardBuildDir,
+        "-G", "Visual Studio 17 2022",
+        "-A", "x64",
+        "-T", "host=x64"
+    )
+    if ($x64Compiler) {
+        $wizardConfigArgs += "-DCMAKE_CXX_COMPILER=$x64Compiler"
+    }
+    Invoke-NativeProcess -FilePath "cmake" -Arguments $wizardConfigArgs
+    Invoke-NativeProcess -FilePath "cmake" -Arguments @("--build", $wizardBuildDir, "--config", $BuildConfig)
+
+    $wizardArtifactDir = Join-Path $wizardBuildDir $BuildConfig
+    foreach ($name in (Get-VirtuaCamSetupArtifacts)) {
+        $src = Join-Path $wizardArtifactDir $name
+        if (-not (Test-Path -LiteralPath $src)) {
+            Fail "Missing setup artifact: $src"
+        }
+        Copy-Item -LiteralPath $src -Destination $OutputRoot -Force
+        $pdb = [System.IO.Path]::ChangeExtension($src, ".pdb")
+        if (Test-Path -LiteralPath $pdb) {
+            Copy-Item -LiteralPath $pdb -Destination $OutputRoot -Force
+        }
     }
 
     Write-Success "Software staged -> $OutputRoot"
@@ -428,7 +464,7 @@ if (-not $SkipDriver) {
 }
 
 Write-Step "Validate required artifacts"
-$requiredSoftware = @((Get-VirtuaCamSoftwareArtifacts) + (Get-VirtuaCamRuntimeArtifacts))
+$requiredSoftware = @((Get-VirtuaCamSoftwareArtifacts) + (Get-VirtuaCamSetupArtifacts) + (Get-VirtuaCamRuntimeArtifacts))
 $requiredDriver = Get-VirtuaCamDriverArtifacts
 
 foreach ($name in $requiredSoftware) {
