@@ -633,7 +633,18 @@ $holdProc = $null
 $driverPackageStage = $null
 $runSucceeded = $false
 $attemptChange = "browser=$Browser; verifier=$([bool]$EnableVerifier); source=$SourceWindowMode; captureBackend=$CaptureBackend; checkpoint=$CheckpointName; args=hold-defaults --force-directshow $($BrowserExtraArgs -join ' ')"
-$guestCred = Get-HvGuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
+$envValues = Read-HvDotEnv
+if ([string]::IsNullOrWhiteSpace($GuestPasswordPlaintext) -and $envValues.ContainsKey("DRIVER_TEST_VM_PASSWORD")) {
+    if ($GuestUser -eq "Administrator" -and $envValues.ContainsKey("DRIVER_TEST_VM_USERNAME") -and -not [string]::IsNullOrWhiteSpace([string]$envValues["DRIVER_TEST_VM_USERNAME"])) {
+        $GuestUser = [string]$envValues["DRIVER_TEST_VM_USERNAME"]
+    }
+    $GuestPasswordPlaintext = [string]$envValues["DRIVER_TEST_VM_PASSWORD"]
+}
+$guestCred = Get-HvGuestCredential `
+    -GuestUser $GuestUser `
+    -GuestPasswordPlaintext $GuestPasswordPlaintext `
+    -EnvUserKey "DRIVER_TEST_VM_USERNAME" `
+    -EnvPasswordKey "DRIVER_TEST_VM_PASSWORD"
 
 Write-HvLog -Message ("Hyper-V proof harness start for '{0}'" -f $VmName) -LogPath $LogPath -Level STEP
 Write-HvLog -Message ("ArtifactDir: {0}" -f $artifactDir) -LogPath $LogPath
@@ -803,6 +814,8 @@ try {
 
         Write-HvLog -Message ("{0}; restarting guest before proof." -f $rebootReason) -LogPath $LogPath -Level STEP
         Restart-HvGuest -Session $session -LogPath $LogPath
+        Wait-HvVmRebootTransition -VmName $VmName -Credential $guestCred -TimeoutSeconds 120 -PollIntervalSeconds 3 -LogPath $LogPath | Out-Null
+        Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 360 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $LogPath | Out-Null
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -LogPath $LogPath
         $postInstallConsoleState = Wait-ForGuestInteractiveDesktop -SessionRef ([ref]$session) -LogFile $LogPath -VmName $VmName -Credential $guestCred -ExpectedUser $GuestUser -TimeoutSeconds 120 -PollSeconds 5
         if (-not (Test-GuestConsoleReady -State $postInstallConsoleState -ExpectedUser $GuestUser)) {
@@ -812,6 +825,7 @@ try {
         Remove-PSSession -Session $session -ErrorAction SilentlyContinue
         $session = $null
         Start-Sleep -Seconds 5
+        Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 180 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $LogPath | Out-Null
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 180 -LogPath $LogPath
     }
 
@@ -870,7 +884,7 @@ try {
     $holdProc = Start-Process -FilePath "powershell.exe" -ArgumentList $holdArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $holdStdoutPath -RedirectStandardError $holdStderrPath
 
     $status = $null
-    $deadline = (Get-Date).AddSeconds(90)
+    $deadline = (Get-Date).AddSeconds(240)
     while ((Get-Date) -lt $deadline) {
         if (Test-Path -LiteralPath $sessionStatusPath) {
             $status = Read-JsonFile -Path $sessionStatusPath

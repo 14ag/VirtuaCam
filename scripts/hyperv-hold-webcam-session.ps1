@@ -203,7 +203,7 @@ try {
         $GuestPasswordPlaintext
 
     $guestState = $null
-    $deadline = (Get-Date).AddSeconds(90)
+    $deadline = (Get-Date).AddSeconds(240)
     while ((Get-Date) -lt $deadline) {
         $guestState = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
             param($GuestStatusPath)
