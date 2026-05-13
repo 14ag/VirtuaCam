@@ -77,11 +77,12 @@ private:
     wil::com_ptr_nothrow<ID3D11VertexShader> m_vertexShader;
     wil::com_ptr_nothrow<ID3D11PixelShader> m_pixelShader;
     wil::com_ptr_nothrow<ID3D11SamplerState> m_samplerState;
+    wil::com_ptr_nothrow<ID3D11Buffer> m_blitConstants;
 
     std::vector<BYTE> m_rgbBuffer;
     std::vector<BYTE> m_frameExBuffer;
-    UINT m_outputWidth = 1280;
-    UINT m_outputHeight = 720;
+    UINT m_outputWidth = 1920;
+    UINT m_outputHeight = 1080;
     ULONG m_outputFormat = 0;
     ULONG m_uploadFormatMask = 0;
     bool m_frameExSupportKnown = false;

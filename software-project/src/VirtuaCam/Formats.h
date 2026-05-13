@@ -16,8 +16,8 @@ struct FrameRate {
 
 static const std::vector<Resolution> g_supportedResolutions = {
     // 16:9 Resolutions
-    {1280, 720,  L"1280x720 (16:9 HD)"},
     {1920, 1080, L"1920x1080 (16:9 FullHD)"},
+    {1280, 720,  L"1280x720 (16:9 HD)"},
     {2560, 1440, L"2560x1440 (16:9 QHD)"},
     {3840, 2160, L"3840x2160 (16:9 4K UHD)"},
     {960, 540,   L"960x540 (16:9 qHD)"},

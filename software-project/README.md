@@ -29,7 +29,7 @@ This design avoids the Media Foundation virtual camera output path. The broker c
 * **Debug controls:** launching `VirtuaCam.exe -debug` exposes PIP, aspect-ratio masks, diagnostics, logs, and proof tool launchers under `Advanced`.
 * **Audio source selection:** active WASAPI capture devices appear under `Audio Source`; camera passthrough keeps the existing matching-microphone selection behavior.
 * **Persisted settings:** PIP toggles, aspect ratio, and selected audio capture device are saved in `HKCU\Software\VirtuaCam\Settings`.
-* **Driver geometry sync:** frames are scaled to the active driver format, including `1280x720`, `640x480`, `720x1280`, and `480x640`.
+* **Driver geometry sync:** frames are scaled to the active driver format, including `1920x1080`, `640x480`, `1080x1920`, and `480x640`.
 * **FrameEx driver upload:** `DriverBridge` prefers the shared FrameEx ABI for BGRA32/NV12 uploads when the driver reports support, with legacy BGR24 fallback.
 
 ## Build and Run
@@ -44,7 +44,7 @@ Use the repository root scripts. This subproject does not have a separate public
 
 Default staged user-mode artifacts are `VirtuaCam.exe`, `VirtuaCamProcess.exe`, `DirectPortBroker.dll`, `DirectPortClient.dll`, and `DirectPortConsumer.dll`.
 
-Aspect ratio is available from `Advanced > Aspect Ratio` when launched with `-debug`, with `16:9`, `9:16`, `4:3`, and `3:4`. The selected ratio is sent to the driver as the preferred capture format for the next stream open (`1280x720`, `720x1280`, `640x480`, or `480x640`). The producer preserves source shape and uses black padding when content does not match the selected frame.
+Aspect ratio is available from `Advanced > Aspect Ratio` when launched with `-debug`, with `16:9`, `9:16`, `4:3`, and `3:4`. The selected ratio is sent to the driver as the preferred capture format for the next stream open (`1920x1080`, `1080x1920`, `640x480`, or `480x640`). The producer preserves source shape and uses black padding when content does not match the selected frame; sources smaller than 1080p are scaled into the 1920x1080 producer canvas.
 
 Audio capture device selection is available from `Audio Source`. The app starts a WASAPI capture session for the selected input and persists the device name in the registry. Startup falls back to `Stereo Mix` when present.
 

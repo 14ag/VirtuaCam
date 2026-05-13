@@ -18,10 +18,18 @@
 
 namespace
 {
-    constexpr UINT kDriverWidth = 1280;
-    constexpr UINT kDriverHeight = 720;
+    constexpr UINT kDriverWidth = 1920;
+    constexpr UINT kDriverHeight = 1080;
     constexpr UINT kDriverBytesPerPixel = 3;
     constexpr UINT kMaxDriverDimension = 1920;
+
+    struct DriverBlitConstants
+    {
+        float uvScaleX;
+        float uvScaleY;
+        float uvOffsetX;
+        float uvOffsetY;
+    };
 
     const GUID kDriverPropertySet = { 0xcb043957, 0x7b35, 0x456e, { 0x9b, 0x61, 0x55, 0x13, 0x93, 0x0f, 0x4d, 0x8e } };
     constexpr ULONG kDriverPropertyIdFrame = 0;
@@ -141,12 +149,40 @@ VS_OUTPUT main(uint id : SV_VertexID) {
     return output;
 })";
 
-    const char* kPixelShaderSource = R"(
+const char* kPixelShaderSource = R"(
 Texture2D inputTexture : register(t0);
 SamplerState inputSampler : register(s0);
+cbuffer DriverBlitConstants : register(b0) {
+    float2 uvScale;
+    float2 uvOffset;
+};
 float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
-    return inputTexture.Sample(inputSampler, uv);
+    return inputTexture.Sample(inputSampler, uv * uvScale + uvOffset);
 })";
+
+    DriverBlitConstants GetOutputCropUvConstants(UINT sourceWidth, UINT sourceHeight, UINT outputWidth, UINT outputHeight)
+    {
+        DriverBlitConstants constants = {};
+        constants.uvScaleX = 1.0f;
+        constants.uvScaleY = 1.0f;
+        constants.uvOffsetX = 0.0f;
+        constants.uvOffsetY = 0.0f;
+
+        if (sourceWidth == 0 || sourceHeight == 0 || outputWidth == 0 || outputHeight == 0) {
+            return constants;
+        }
+
+        const float sourceAspect = static_cast<float>(sourceWidth) / static_cast<float>(sourceHeight);
+        const float outputAspect = static_cast<float>(outputWidth) / static_cast<float>(outputHeight);
+        if (sourceAspect > outputAspect) {
+            constants.uvScaleX = outputAspect / sourceAspect;
+            constants.uvOffsetX = (1.0f - constants.uvScaleX) * 0.5f;
+        } else if (sourceAspect < outputAspect) {
+            constants.uvScaleY = sourceAspect / outputAspect;
+            constants.uvOffsetY = (1.0f - constants.uvScaleY) * 0.5f;
+        }
+        return constants;
+    }
 
     void DumpBgr24FrameAsPpm(
         const wchar_t* path,
@@ -289,6 +325,7 @@ void DriverBridge::Shutdown()
     m_sourceSrv.reset();
     m_sourceTexture.reset();
     m_samplerState.reset();
+    m_blitConstants.reset();
     m_pixelShader.reset();
     m_vertexShader.reset();
     ResetFrameExResources();
@@ -434,6 +471,12 @@ HRESULT DriverBridge::CreateShaders()
     samplerDesc.MinLOD = 0;
     samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
     RETURN_IF_FAILED(m_device->CreateSamplerState(&samplerDesc, &m_samplerState));
+
+    D3D11_BUFFER_DESC constantDesc = {};
+    constantDesc.ByteWidth = sizeof(DriverBlitConstants);
+    constantDesc.Usage = D3D11_USAGE_DEFAULT;
+    constantDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    RETURN_IF_FAILED(m_device->CreateBuffer(&constantDesc, nullptr, m_blitConstants.put()));
     return S_OK;
 }
 
@@ -1263,14 +1306,24 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
     RETURN_IF_FAILED(EnsureGpuResources(sourceTexture));
     RETURN_IF_FAILED(EnsureSourceTextureView(sourceTexture));
 
+    D3D11_TEXTURE2D_DESC sourceDesc = {};
+    sourceTexture->GetDesc(&sourceDesc);
+    const DriverBlitConstants blitConstants = GetOutputCropUvConstants(
+        sourceDesc.Width,
+        sourceDesc.Height,
+        m_outputWidth,
+        m_outputHeight);
     D3D11_VIEWPORT viewport = { 0.f, 0.f, static_cast<float>(m_outputWidth), static_cast<float>(m_outputHeight), 0.f, 1.f };
     ID3D11RenderTargetView* rtvs[] = { m_scaledRtv.get() };
 
     m_context->OMSetRenderTargets(1, rtvs, nullptr);
+    m_context->UpdateSubresource(m_blitConstants.get(), 0, nullptr, &blitConstants, 0, 0);
     m_context->RSSetViewports(1, &viewport);
     m_context->VSSetShader(m_vertexShader.get(), nullptr, 0);
     m_context->PSSetShader(m_pixelShader.get(), nullptr, 0);
     ID3D11SamplerState* samplers[] = { m_samplerState.get() };
+    ID3D11Buffer* constantBuffers[] = { m_blitConstants.get() };
+    m_context->PSSetConstantBuffers(0, 1, constantBuffers);
     m_context->PSSetSamplers(0, 1, samplers);
     ID3D11ShaderResourceView* srvs[] = { m_sourceSrv.get() };
     m_context->PSSetShaderResources(0, 1, srvs);

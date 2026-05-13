@@ -260,8 +260,8 @@ function findChrome() {
       state &&
       state.phase === 'live' &&
       state.trackState === 'live' &&
-      state.videoWidth === 1280 &&
-      state.videoHeight === 720 &&
+      state.videoWidth === 1920 &&
+      state.videoHeight === 1080 &&
       virtualLabel &&
       stats &&
       stats.nonDarkRatio > 0.05

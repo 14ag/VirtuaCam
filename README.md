@@ -112,7 +112,7 @@ HKCU\Software\VirtuaCam\Settings
 
 The registry settings include `AudioCaptureDeviceName`. The tray menu exposes `Audio Source`, with `None` and active WASAPI capture devices. Startup falls back to `Stereo Mix` when present, and camera passthrough keeps the existing matching-microphone selection behavior.
 
-The driver defaults to `1280x720`, and also advertises `640x480`, `720x1280`, and `480x640` capture modes. The tray aspect setting is sent to the driver as the preferred capture format, and camera passthrough can restrict the allowed driver aspect mask to formats supported by the physical camera. The next camera stream open chooses matching dimensions when the client accepts the advertised order. The producer still preserves source shape with black padding when content does not match the selected frame.
+The driver defaults to `1920x1080`, and also advertises `640x480`, `1080x1920`, and `480x640` capture modes. The tray aspect setting is sent to the driver as the preferred capture format, and camera passthrough can restrict the allowed driver aspect mask to formats supported by the physical camera. The next camera stream open chooses matching dimensions when the client accepts the advertised order. The producer renders into a fixed 1920x1080 canvas, so sources smaller than 1080p are upscaled with aspect-preserving black padding instead of being cropped or rejected.
 
 ## Validation
 
