@@ -148,6 +148,111 @@ function Ensure-HvVmRunning {
     throw "Timed out waiting for VM '$VmName' to enter Running state."
 }
 
+function Get-HvVmReadiness {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [System.Management.Automation.PSCredential]$Credential,
+        [switch]$CheckPowerShellDirect
+    )
+
+    $vm = Get-VM -Name $VmName -ErrorAction Stop
+    $integration = @(Get-VMIntegrationService -VMName $VmName -ErrorAction SilentlyContinue)
+    $heartbeat = @($integration | Where-Object { [string]$_.Name -eq "Heartbeat" } | Select-Object -First 1)
+    $psDirect = @($integration | Where-Object { [string]$_.Name -like "*PowerShell Direct*" } | Select-Object -First 1)
+    $psReady = $false
+    $guestComputerName = ""
+    $vmicStatus = ""
+    $lastError = ""
+
+    if ($CheckPowerShellDirect -and $Credential -and $vm.State -eq "Running") {
+        $probeSession = $null
+        try {
+            $probeSession = New-PSSession -VMName $VmName -Credential $Credential -ErrorAction Stop
+            $guest = Invoke-Command -Session $probeSession -ScriptBlock {
+                $svc = Get-Service -Name "vmicvmsession" -ErrorAction SilentlyContinue
+                [pscustomobject]@{
+                    ComputerName = $env:COMPUTERNAME
+                    VmicVmSessionStatus = if ($svc) { [string]$svc.Status } else { "Missing" }
+                }
+            } -ErrorAction Stop
+            $psReady = $true
+            $guestComputerName = [string]$guest.ComputerName
+            $vmicStatus = [string]$guest.VmicVmSessionStatus
+        }
+        catch {
+            $lastError = $_.Exception.Message
+        }
+        finally {
+            if ($probeSession) {
+                Remove-PSSession -Session $probeSession -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    [pscustomobject]@{
+        VmName = $VmName
+        State = [string]$vm.State
+        Status = [string]$vm.Status
+        Uptime = [string]$vm.Uptime
+        Heartbeat = if ($heartbeat.Count -gt 0) { [string]$heartbeat[0].PrimaryStatusDescription } else { "" }
+        HeartbeatSecondary = if ($heartbeat.Count -gt 0) { [string]::Join(",", @($heartbeat[0].SecondaryOperationalStatus)) } else { "" }
+        PowerShellDirect = if ($psDirect.Count -gt 0) { [string]$psDirect[0].PrimaryStatusDescription } else { "" }
+        PowerShellDirectSecondary = if ($psDirect.Count -gt 0) { [string]::Join(",", @($psDirect[0].SecondaryOperationalStatus)) } else { "" }
+        PowerShellDirectReady = $psReady
+        GuestComputerName = $guestComputerName
+        VmicVmSessionStatus = $vmicStatus
+        LastError = $lastError
+        CheckedAtUtc = [DateTime]::UtcNow.ToString("o")
+    }
+}
+
+function Wait-HvVmReady {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [System.Management.Automation.PSCredential]$Credential,
+        [int]$TimeoutSeconds = 180,
+        [int]$PollIntervalSeconds = 3,
+        [switch]$RequirePowerShellDirect,
+        [string]$LogPath = ""
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastSignature = ""
+    $lastReady = $null
+
+    do {
+        $vm = Get-VM -Name $VmName -ErrorAction Stop
+        if ($vm.State -ne "Running") {
+            Write-HvLog -Message ("VM '{0}' is {1}. Starting it." -f $VmName, $vm.State) -LogPath $LogPath -Level WARN
+            Start-VM -Name $VmName | Out-Null
+        }
+
+        $ready = Get-HvVmReadiness -VmName $VmName -Credential $Credential -CheckPowerShellDirect:$RequirePowerShellDirect
+        $lastReady = $ready
+        $signature = "{0}|{1}|{2}|{3}|{4}" -f $ready.State, $ready.Status, $ready.Heartbeat, $ready.PowerShellDirectReady, $ready.VmicVmSessionStatus
+        if ($signature -ne $lastSignature) {
+            Write-HvLog -Message ("VM readiness {0}: state={1}; status={2}; heartbeat={3}; psdirect={4}; vmicvmsession={5}" -f $VmName, $ready.State, $ready.Status, $ready.Heartbeat, $ready.PowerShellDirectReady, $ready.VmicVmSessionStatus) -LogPath $LogPath
+            if (-not [string]::IsNullOrWhiteSpace($ready.LastError)) {
+                Write-HvLog -Message ("VM readiness probe error {0}: {1}" -f $VmName, $ready.LastError) -LogPath $LogPath -Level WARN
+            }
+            $lastSignature = $signature
+        }
+
+        $stateReady = [string]$ready.State -eq "Running"
+        if ($stateReady -and (-not $RequirePowerShellDirect -or $ready.PowerShellDirectReady)) {
+            return $ready
+        }
+
+        Start-Sleep -Seconds ([Math]::Max(1, $PollIntervalSeconds))
+    } while ((Get-Date) -lt $deadline)
+
+    $msg = "Timed out waiting for VM '$VmName' readiness."
+    if ($lastReady -and -not [string]::IsNullOrWhiteSpace($lastReady.LastError)) {
+        $msg += " Last error: $($lastReady.LastError)"
+    }
+    Fail-Hv -Message $msg -LogPath $LogPath
+}
+
 function New-HvSession {
     param(
         [Parameter(Mandatory = $true)][string]$VmName,
@@ -194,7 +299,7 @@ function Wait-HvPowerShellDirect {
         [Parameter(Mandatory = $true)][string]$VmName,
         [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential,
         [int]$TimeoutSeconds = 180,
-        [int]$RetryDelaySeconds = 5,
+        [int]$RetryDelaySeconds = 3,
         [string]$LogPath = ""
     )
 
@@ -203,7 +308,7 @@ function Wait-HvPowerShellDirect {
 
     while ((Get-Date) -lt $deadline) {
         try {
-            Ensure-HvVmRunning -VmName $VmName -LogPath $LogPath
+            Wait-HvVmReady -VmName $VmName -Credential $Credential -TimeoutSeconds ([Math]::Max(1, [int]($deadline - (Get-Date)).TotalSeconds)) -PollIntervalSeconds $RetryDelaySeconds -RequirePowerShellDirect -LogPath $LogPath | Out-Null
             return New-HvSession -VmName $VmName -Credential $Credential -RetryCount 1 -RetryDelaySeconds $RetryDelaySeconds -LogPath $LogPath
         }
         catch {

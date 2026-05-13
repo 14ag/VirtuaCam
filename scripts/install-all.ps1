@@ -1,8 +1,6 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipDriverInstall,
     [switch]$SkipDllRegister,
-    [switch]$ForceDriverRebind,
     [switch]$SkipCertificateImport,
     [switch]$Uninstall
 )
@@ -112,12 +110,8 @@ function Remove-DriverPackagesForDevicePattern {
     }
 }
 
-function Remove-ExistingDriverPackageIfRequested {
+function Remove-ExistingDriverPackage {
     param([Parameter(Mandatory = $true)][string]$DeviceIdPattern)
-
-    if (-not $ForceDriverRebind) {
-        return
-    }
 
     $matched = @(Get-CimInstance Win32_PnPSignedDriver |
         Where-Object { $_.DeviceID -like $DeviceIdPattern -and $_.InfName })
@@ -391,76 +385,72 @@ Write-Success ("Artifacts present ({0})" -f ($expectedArtifacts -join ", "))
 Assert-Administrator
 $null = New-Item -ItemType Directory -Force -Path $logsDir
 
-if (-not $SkipDriverInstall) {
-    Write-Step "Install driver from output"
+Write-Step "Install driver from output"
 
-    $bcdOut = & "$env:WINDIR\System32\bcdedit.exe" /enum "{current}" 2>&1
-    $testLine = $bcdOut | Where-Object { $_ -match '^\s*testsigning\s+' } | Select-Object -First 1
-    $isTestSigningOn = $false
-    if ($testLine) {
-        $isTestSigningOn = $testLine -match '(?i)\bYes\b'
-    }
-    if (-not $isTestSigningOn) {
-        Fail "TESTSIGNING is OFF. Enable then reboot: bcdedit /set testsigning on"
-    }
-
-    Import-TestCertificateIfPresent -Path $driverCer
-    Remove-ExistingDriverPackageIfRequested -DeviceIdPattern "ROOT\AVSHWS\*"
-
-    Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $driverInf, "/install") -AllowedExitCodes @(0, 259)
-
-    $existingDevices = @(Get-AvshwsDevices)
-    if ($existingDevices.Count -eq 0) {
-        Write-Info "No ROOT\AVSHWS device present. Creating it now."
-        $cameraClassGuid = [Guid]::Parse("{ca3e7ab9-b4c3-4ae6-8251-579ef933890f}")
-        [AvshwsInstallerNative]::CreateRootDevice("AVSHWS", "AVSHWS", "Virtual Camera Driver", $cameraClassGuid)
-    }
-    else {
-        Write-Info "ROOT\AVSHWS already exists. Reusing existing device node."
-    }
-
-    $rebootRequired = $false
-    [int]$lastError = 0
-    $bindOutcome = [AvshwsInstallerNative]::TryBindDriver("AVSHWS", $driverInf, $ForceDriverRebind.IsPresent, [ref]$rebootRequired, [ref]$lastError)
-    if (-not $bindOutcome -and $lastError -ne 0) {
-        $hexError = ("0x{0:X8}" -f ([uint32]$lastError))
-        Fail "UpdateDriverForPlugAndPlayDevices failed with $hexError."
-    }
-
-    Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/scan-devices")
-
-    $finalDevices = @(Get-AvshwsDevices)
-    if ($finalDevices.Count -eq 0) {
-        Fail "Install finished but no ROOT\AVSHWS device was found."
-    }
-
-    foreach ($device in $finalDevices) {
-        if (-not [string]::IsNullOrWhiteSpace($device.PNPDeviceID)) {
-            Write-Info ("Restarting device node: {0}" -f $device.PNPDeviceID)
-            Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/restart-device", $device.PNPDeviceID) -AllowedExitCodes @(0, 259, 3010)
-        }
-    }
-
-    Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/scan-devices")
-
-    $finalDevices = @(Get-AvshwsDevices)
-    if ($finalDevices.Count -eq 0) {
-        Fail "Device node disappeared after restart."
-    }
-
-    $bad = @($finalDevices | Where-Object { $_.Status -and $_.Status -ne "OK" })
-    if ($bad.Count -gt 0) {
-        Fail "Installed device present but not OK status."
-    }
-
-    if ($rebootRequired) {
-        Write-Info "A reboot is required to finalize installation."
-    }
-
-    Write-Success "Driver install OK from $OutputRoot"
-} else {
-    Write-Info "Skip driver install"
+$bcdOut = & "$env:WINDIR\System32\bcdedit.exe" /enum "{current}" 2>&1
+$testLine = $bcdOut | Where-Object { $_ -match '^\s*testsigning\s+' } | Select-Object -First 1
+$isTestSigningOn = $false
+if ($testLine) {
+    $isTestSigningOn = $testLine -match '(?i)\bYes\b'
 }
+if (-not $isTestSigningOn) {
+    Fail "TESTSIGNING is OFF. Enable then reboot: bcdedit /set testsigning on"
+}
+
+Import-TestCertificateIfPresent -Path $driverCer
+Remove-ExistingDriverPackage -DeviceIdPattern "ROOT\AVSHWS\*"
+
+Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $driverInf, "/install") -AllowedExitCodes @(0, 259)
+
+$existingDevices = @(Get-AvshwsDevices)
+if ($existingDevices.Count -eq 0) {
+    Write-Info "No ROOT\AVSHWS device present. Creating it now."
+    $cameraClassGuid = [Guid]::Parse("{ca3e7ab9-b4c3-4ae6-8251-579ef933890f}")
+    [AvshwsInstallerNative]::CreateRootDevice("AVSHWS", "AVSHWS", "Virtual Camera Driver", $cameraClassGuid)
+}
+else {
+    Write-Info "ROOT\AVSHWS already exists. Reusing existing device node."
+}
+
+$rebootRequired = $false
+[int]$lastError = 0
+$bindOutcome = [AvshwsInstallerNative]::TryBindDriver("AVSHWS", $driverInf, $true, [ref]$rebootRequired, [ref]$lastError)
+if (-not $bindOutcome -and $lastError -ne 0) {
+    $hexError = ("0x{0:X8}" -f ([uint32]$lastError))
+    Fail "UpdateDriverForPlugAndPlayDevices failed with $hexError."
+}
+
+Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/scan-devices")
+
+$finalDevices = @(Get-AvshwsDevices)
+if ($finalDevices.Count -eq 0) {
+    Fail "Install finished but no ROOT\AVSHWS device was found."
+}
+
+foreach ($device in $finalDevices) {
+    if (-not [string]::IsNullOrWhiteSpace($device.PNPDeviceID)) {
+        Write-Info ("Restarting device node: {0}" -f $device.PNPDeviceID)
+        Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/restart-device", $device.PNPDeviceID) -AllowedExitCodes @(0, 259, 3010)
+    }
+}
+
+Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/scan-devices")
+
+$finalDevices = @(Get-AvshwsDevices)
+if ($finalDevices.Count -eq 0) {
+    Fail "Device node disappeared after restart."
+}
+
+$bad = @($finalDevices | Where-Object { $_.Status -and $_.Status -ne "OK" })
+if ($bad.Count -gt 0) {
+    Fail "Installed device present but not OK status."
+}
+
+if ($rebootRequired) {
+    Write-Info "A reboot is required to finalize installation."
+}
+
+Write-Success "Fresh driver install OK from $OutputRoot"
 
 if (-not $SkipDllRegister) {
     Write-Step "Register software components from output"

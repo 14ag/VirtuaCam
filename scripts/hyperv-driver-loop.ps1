@@ -2,6 +2,7 @@
 param(
     [string]$VmName = "driver-test",
     [string]$CheckpointName = "clean",
+    [string]$ReadyCheckpointName = "clean-ready",
     [string]$GuestUser = "Administrator",
     [System.Management.Automation.PSCredential]$GuestCredential,
     [string]$GuestPasswordPlaintext = "",
@@ -13,6 +14,7 @@ param(
     [string]$PipeName = "",
     [ValidateSet("kd", "windbg")][string]$Debugger = "kd",
     [switch]$SkipDebuggerLaunch,
+    [switch]$DisableReadyCheckpointPreference,
     [int]$ReproWaitSeconds = 45,
     [bool]$RevertAfterRun = $true,
     [string]$LogPath = ""
@@ -60,6 +62,17 @@ Write-HvLog -Message ("ArtifactDir: {0}" -f $artifactDir) -LogPath $LogPath
 Write-HvLog -Message ("PackageRoot: {0}" -f $driverPackageRootPath) -LogPath $LogPath
 Write-HvLog -Message ("CheckpointName: {0}" -f $CheckpointName) -LogPath $LogPath
 
+$restoreCheckpointName = $CheckpointName
+if (-not $DisableReadyCheckpointPreference -and -not [string]::IsNullOrWhiteSpace($ReadyCheckpointName)) {
+    $readyCheckpoint = Get-VMSnapshot -VMName $VmName -Name $ReadyCheckpointName -ErrorAction SilentlyContinue
+    if ($readyCheckpoint) {
+        $restoreCheckpointName = $ReadyCheckpointName
+        Write-HvLog -Message ("Using ready checkpoint '{0}' for faster PowerShell Direct readiness." -f $ReadyCheckpointName) -LogPath $LogPath
+    } else {
+        Write-HvLog -Message ("Ready checkpoint '{0}' not found; using '{1}'." -f $ReadyCheckpointName, $CheckpointName) -LogPath $LogPath -Level WARN
+    }
+}
+
 if (-not (Test-Path -LiteralPath $driverPackageRootPath)) {
     Fail-Hv -Message "Driver package root not found: $driverPackageRootPath" -LogPath $LogPath
 }
@@ -69,10 +82,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $driverPackageRootPath "avshws.inf")
 }
 
 try {
-    Write-HvLog -Message ("Restoring clean checkpoint '{0}' before run" -f $CheckpointName) -LogPath $LogPath -Level STEP
-    $existingCheckpoint = Get-VMSnapshot -VMName $VmName -Name $CheckpointName -ErrorAction SilentlyContinue
+    Write-HvLog -Message ("Restoring clean checkpoint '{0}' before run" -f $restoreCheckpointName) -LogPath $LogPath -Level STEP
+    $existingCheckpoint = Get-VMSnapshot -VMName $VmName -Name $restoreCheckpointName -ErrorAction SilentlyContinue
     if (-not $existingCheckpoint) {
-        Fail-Hv -Message ("Checkpoint '{0}' was not found. Create the clean bench first." -f $CheckpointName) -LogPath $LogPath
+        Fail-Hv -Message ("Checkpoint '{0}' was not found. Create the clean bench first." -f $restoreCheckpointName) -LogPath $LogPath
     }
 
     try {
@@ -85,7 +98,7 @@ try {
         Write-HvLog -Message ("Pre-restore VM stop skipped: {0}" -f $_.Exception.Message) -LogPath $LogPath -Level WARN
     }
 
-    Restore-VMCheckpoint -VMName $VmName -Name $CheckpointName -Confirm:$false | Out-Null
+    Restore-VMCheckpoint -VMName $VmName -Name $restoreCheckpointName -Confirm:$false | Out-Null
 
     $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -LogPath $LogPath
     try {
@@ -279,7 +292,7 @@ try {
 }
 finally {
     if ($RevertAfterRun) {
-        Write-HvLog -Message ("Restoring checkpoint '{0}'" -f $CheckpointName) -LogPath $LogPath -Level STEP
+        Write-HvLog -Message ("Restoring checkpoint '{0}'" -f $restoreCheckpointName) -LogPath $LogPath -Level STEP
         try {
             $vmState = (Get-VM -Name $VmName -ErrorAction Stop).State
             if ($vmState -ne "Off") {
@@ -290,13 +303,13 @@ finally {
             Write-HvLog -Message ("Pre-restore VM stop skipped: {0}" -f $_.Exception.Message) -LogPath $LogPath -Level WARN
         }
 
-        Restore-VMCheckpoint -VMName $VmName -Name $CheckpointName -Confirm:$false | Out-Null
+        Restore-VMCheckpoint -VMName $VmName -Name $restoreCheckpointName -Confirm:$false | Out-Null
     }
 }
 
 [pscustomobject]@{
     VmName          = $VmName
-    CheckpointName  = $CheckpointName
+    CheckpointName  = $restoreCheckpointName
     ArtifactDir     = $artifactDir
     ReproMode       = $ReproMode
     VerifierEnabled = [bool]$EnableVerifier

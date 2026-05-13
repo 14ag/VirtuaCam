@@ -1,9 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$Clean,
+    [switch]$Clean = $true,
     [string]$BuildConfig = "Release",
-    [switch]$SkipSoftware,
-    [switch]$SkipDriver,
     [string]$VcpkgRoot = ""
 )
 
@@ -232,17 +230,15 @@ Write-Step "Pre-flight checks"
 $msbuild = Get-MSBuildPath
 if (-not $msbuild) { Fail "MSBuild not found. Install Visual Studio Build Tools 2022." }
 Write-Success "MSBuild: $msbuild"
-if (-not $SkipDriver) {
-    Assert-WdkPresent
-}
+Assert-WdkPresent
 
-if (-not $SkipSoftware -and -not (Test-Path -LiteralPath (Join-Path $softwareSrcDir "CMakeLists.txt"))) {
+if (-not (Test-Path -LiteralPath (Join-Path $softwareSrcDir "CMakeLists.txt"))) {
     Fail "Software CMakeLists.txt missing: $softwareSrcDir"
 }
-if (-not $SkipSoftware -and -not (Test-Path -LiteralPath (Join-Path $wizardDir "CMakeLists.txt"))) {
+if (-not (Test-Path -LiteralPath (Join-Path $wizardDir "CMakeLists.txt"))) {
     Fail "Wizard CMakeLists.txt missing: $wizardDir"
 }
-if (-not $SkipDriver -and -not (Test-Path -LiteralPath $driverSolutionPath)) {
+if (-not (Test-Path -LiteralPath $driverSolutionPath)) {
     Fail "Driver solution missing: $driverSolutionPath"
 }
 
@@ -274,206 +270,197 @@ foreach ($legacyDir in @(
     }
 }
 
-if (-not $SkipSoftware) {
-    Write-Step "Build software"
+Write-Step "Build software"
 
-    if (-not (Test-Path -LiteralPath $VcpkgRoot)) {
-        Write-Info "Cloning vcpkg into $VcpkgRoot"
-        Invoke-NativeProcess -FilePath "git" -Arguments @("clone", "https://github.com/microsoft/vcpkg.git", $VcpkgRoot)
-        Invoke-NativeProcess -FilePath "cmd.exe" -Arguments @("/c", (Join-Path $VcpkgRoot "bootstrap-vcpkg.bat"), "-disableMetrics")
-    }
-    if (-not (Test-Path -LiteralPath $toolchainFile)) {
-        Fail "vcpkg toolchain file missing: $toolchainFile"
-    }
-
-    foreach ($processName in @("VirtuaCam", "VirtuaCamProcess", "DirectPortBroker")) {
-        Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
-            Stop-Process -Id $_.Id -Force
-        }
-    }
-
-    if ($Clean -and (Test-Path -LiteralPath $softwareBuildDir)) {
-        Remove-Item -LiteralPath $softwareBuildDir -Recurse -Force
-    }
-    if ($Clean -and (Test-Path -LiteralPath $wizardBuildDir)) {
-        Remove-Item -LiteralPath $wizardBuildDir -Recurse -Force
-    }
-    $null = New-Item -ItemType Directory -Force -Path $softwareBuildDir
-
-    $cmakeConfigArgs = @(
-        "-S", $softwareSrcDir,
-        "-B", $softwareBuildDir,
-        "-G", "Visual Studio 17 2022",
-        "-A", "x64",
-        "-T", "host=x64",
-        "-DVCPKG_TARGET_TRIPLET=x64-windows",
-        "-DCMAKE_TOOLCHAIN_FILE=$toolchainFile"
-    )
-
-    $x64Compiler = Get-X64CompilerPath
-    if ($x64Compiler) {
-        $cmakeConfigArgs += "-DCMAKE_CXX_COMPILER=$x64Compiler"
-    }
-
-    Invoke-NativeProcess -FilePath "cmake" -Arguments $cmakeConfigArgs
-    Invoke-NativeProcess -FilePath "cmake" -Arguments @("--build", $softwareBuildDir, "--config", $BuildConfig)
-
-    $softwareArtifactDir = Join-Path $softwareBuildDir $BuildConfig
-    if (-not (Test-Path -LiteralPath $softwareArtifactDir)) {
-        Fail "Software build artifact dir missing: $softwareArtifactDir"
-    }
-
-    foreach ($legacy in @("DirectPortMFCamera.dll", "DirectPortMFGraphicsCapture.dll")) {
-        $legacyPath = Join-Path $OutputRoot $legacy
-        if (Test-Path -LiteralPath $legacyPath) {
-            Remove-Item -LiteralPath $legacyPath -Force
-        }
-    }
-
-    $softwareArtifacts = Get-VirtuaCamSoftwareArtifacts
-    $vcRuntimeArtifacts = Get-VirtuaCamRuntimeArtifacts
-
-    foreach ($name in $softwareArtifacts) {
-        $src = Join-Path $softwareArtifactDir $name
-        if (-not (Test-Path -LiteralPath $src)) {
-            Fail "Missing software artifact: $src"
-        }
-        Copy-Item -LiteralPath $src -Destination $OutputRoot -Force
-        $pdb = [System.IO.Path]::ChangeExtension($src, ".pdb")
-        if (Test-Path -LiteralPath $pdb) {
-            Copy-Item -LiteralPath $pdb -Destination $OutputRoot -Force
-        }
-    }
-
-    $vcRedistDir = Get-VcRedistX64Dir
-    if (-not $vcRedistDir) {
-        Fail "Visual C++ x64 runtime redist folder not found."
-    }
-
-    foreach ($name in $vcRuntimeArtifacts) {
-        $src = Join-Path $vcRedistDir $name
-        if (-not (Test-Path -LiteralPath $src)) {
-            Fail "Missing VC runtime artifact: $src"
-        }
-        Copy-Item -LiteralPath $src -Destination $OutputRoot -Force
-    }
-
-    Write-Step "Build setup wizard"
-    $null = New-Item -ItemType Directory -Force -Path $wizardBuildDir
-    $wizardConfigArgs = @(
-        "-S", $wizardDir,
-        "-B", $wizardBuildDir,
-        "-G", "Visual Studio 17 2022",
-        "-A", "x64",
-        "-T", "host=x64"
-    )
-    if ($x64Compiler) {
-        $wizardConfigArgs += "-DCMAKE_CXX_COMPILER=$x64Compiler"
-    }
-    Invoke-NativeProcess -FilePath "cmake" -Arguments $wizardConfigArgs
-    Invoke-NativeProcess -FilePath "cmake" -Arguments @("--build", $wizardBuildDir, "--config", $BuildConfig)
-
-    $wizardArtifactDir = Join-Path $wizardBuildDir $BuildConfig
-    foreach ($name in (Get-VirtuaCamSetupArtifacts)) {
-        $src = Join-Path $wizardArtifactDir $name
-        if (-not (Test-Path -LiteralPath $src)) {
-            Fail "Missing setup artifact: $src"
-        }
-        Copy-Item -LiteralPath $src -Destination $OutputRoot -Force
-        $pdb = [System.IO.Path]::ChangeExtension($src, ".pdb")
-        if (Test-Path -LiteralPath $pdb) {
-            Copy-Item -LiteralPath $pdb -Destination $OutputRoot -Force
-        }
-    }
-
-    Write-Success "Software staged -> $OutputRoot"
-} else {
-    Write-Info "Skip software"
+if (-not (Test-Path -LiteralPath $VcpkgRoot)) {
+    Write-Info "Cloning vcpkg into $VcpkgRoot"
+    Invoke-NativeProcess -FilePath "git" -Arguments @("clone", "https://github.com/microsoft/vcpkg.git", $VcpkgRoot)
+    Invoke-NativeProcess -FilePath "cmd.exe" -Arguments @("/c", (Join-Path $VcpkgRoot "bootstrap-vcpkg.bat"), "-disableMetrics")
+}
+if (-not (Test-Path -LiteralPath $toolchainFile)) {
+    Fail "vcpkg toolchain file missing: $toolchainFile"
 }
 
-if (-not $SkipDriver) {
-    Write-Step "Build driver"
-
-    $targets = if ($Clean) { "Clean;Build" } else { "Build" }
-    Invoke-NativeProcess -FilePath $msbuild -Arguments @(
-        $driverSolutionPath,
-        "/m",
-        "/t:$targets",
-        "/p:Configuration=$BuildConfig",
-        "/p:Platform=x64",
-        "/nologo",
-        "/v:m"
-    )
-
-    $driverBuildDir = Join-Path $driverRoot ("build\x64\{0}" -f $BuildConfig)
-    $driverSys = Join-Path $driverBuildDir "avshws.sys"
-    $driverPdb = Join-Path $driverBuildDir "avshws.pdb"
-    $driverInf = Join-Path $driverRoot "avshws.inf"
-    if (-not (Test-Path -LiteralPath $driverSys)) { Fail "Fresh driver sys missing: $driverSys" }
-    if (-not (Test-Path -LiteralPath $driverInf)) { Fail "Driver INF missing: $driverInf" }
-
-    if (Test-Path -LiteralPath $driverPackageTmp) {
-        Get-ChildItem -LiteralPath $driverPackageTmp -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+foreach ($processName in @("VirtuaCam", "VirtuaCamProcess", "DirectPortBroker")) {
+    Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
+        Stop-Process -Id $_.Id -Force
     }
-
-    Copy-Item -LiteralPath $driverSys -Destination (Join-Path $driverPackageTmp "avshws.sys") -Force
-    Copy-Item -LiteralPath $driverInf -Destination (Join-Path $driverPackageTmp "avshws.inf") -Force
-
-    $inf2cat = Get-SdkToolPath -ToolName "Inf2Cat.exe" -Architecture "x86"
-    $signtool = Get-SdkToolPath -ToolName "signtool.exe" -Architecture "x64"
-    if (-not $inf2cat) { Fail "Inf2Cat.exe not found in Windows Kits bin." }
-    if (-not $signtool) { Fail "signtool.exe not found in Windows Kits bin." }
-
-    Invoke-NativeProcess -FilePath $inf2cat -Arguments @("/driver:$driverPackageTmp", "/os:10_X64")
-
-    $catPath = Join-Path $driverPackageTmp "avshws.cat"
-    if (-not (Test-Path -LiteralPath $catPath)) {
-        Fail "Catalog generation failed: $catPath not found."
-    }
-
-    $cert = Get-OrCreateTestCodeSigningCertificate -SubjectCommonName "VirtualCameraDriver-TestSign"
-    $cerPath = Join-Path $driverPackageTmp "VirtualCameraDriver-TestSign.cer"
-    Export-Certificate -Cert $cert -FilePath $cerPath -Force | Out-Null
-
-    Invoke-NativeProcess -FilePath $signtool -Arguments @(
-        "sign",
-        "/v",
-        "/fd", "SHA256",
-        "/sha1", $cert.Thumbprint,
-        "/s", "My",
-        $catPath
-    )
-
-    foreach ($artifact in @((Get-VirtuaCamDriverArtifacts) + "avshws.pdb")) {
-        $dst = Join-Path $OutputRoot $artifact
-        if (Test-Path -LiteralPath $dst) {
-            Remove-Item -LiteralPath $dst -Force
-        }
-    }
-
-    foreach ($artifact in (Get-VirtuaCamDriverArtifacts)) {
-        Copy-Item -LiteralPath (Join-Path $driverPackageTmp $artifact) -Destination (Join-Path $OutputRoot $artifact) -Force
-    }
-    if (Test-Path -LiteralPath $driverPdb) {
-        Copy-Item -LiteralPath $driverPdb -Destination (Join-Path $OutputRoot "avshws.pdb") -Force
-    }
-
-    Write-Success "Driver staged -> $OutputRoot"
-} else {
-    Write-Info "Skip driver"
 }
+
+if ($Clean -and (Test-Path -LiteralPath $softwareBuildDir)) {
+    Remove-Item -LiteralPath $softwareBuildDir -Recurse -Force
+}
+if ($Clean -and (Test-Path -LiteralPath $wizardBuildDir)) {
+    Remove-Item -LiteralPath $wizardBuildDir -Recurse -Force
+}
+$null = New-Item -ItemType Directory -Force -Path $softwareBuildDir
+
+$cmakeConfigArgs = @(
+    "-S", $softwareSrcDir,
+    "-B", $softwareBuildDir,
+    "-G", "Visual Studio 17 2022",
+    "-A", "x64",
+    "-T", "host=x64",
+    "-DVCPKG_TARGET_TRIPLET=x64-windows",
+    "-DCMAKE_TOOLCHAIN_FILE=$toolchainFile"
+)
+
+$x64Compiler = Get-X64CompilerPath
+if ($x64Compiler) {
+    $cmakeConfigArgs += "-DCMAKE_CXX_COMPILER=$x64Compiler"
+}
+
+Invoke-NativeProcess -FilePath "cmake" -Arguments $cmakeConfigArgs
+Invoke-NativeProcess -FilePath "cmake" -Arguments @("--build", $softwareBuildDir, "--config", $BuildConfig)
+
+$softwareArtifactDir = Join-Path $softwareBuildDir $BuildConfig
+if (-not (Test-Path -LiteralPath $softwareArtifactDir)) {
+    Fail "Software build artifact dir missing: $softwareArtifactDir"
+}
+
+foreach ($legacy in @("DirectPortMFCamera.dll", "DirectPortMFGraphicsCapture.dll")) {
+    $legacyPath = Join-Path $OutputRoot $legacy
+    if (Test-Path -LiteralPath $legacyPath) {
+        Remove-Item -LiteralPath $legacyPath -Force
+    }
+}
+
+$softwareArtifacts = Get-VirtuaCamSoftwareArtifacts
+$vcRuntimeArtifacts = Get-VirtuaCamRuntimeArtifacts
+
+foreach ($name in $softwareArtifacts) {
+    $src = Join-Path $softwareArtifactDir $name
+    if (-not (Test-Path -LiteralPath $src)) {
+        Fail "Missing software artifact: $src"
+    }
+    Copy-Item -LiteralPath $src -Destination $OutputRoot -Force
+    $pdb = [System.IO.Path]::ChangeExtension($src, ".pdb")
+    if (Test-Path -LiteralPath $pdb) {
+        Copy-Item -LiteralPath $pdb -Destination $OutputRoot -Force
+    }
+}
+
+$vcRedistDir = Get-VcRedistX64Dir
+if (-not $vcRedistDir) {
+    Fail "Visual C++ x64 runtime redist folder not found."
+}
+
+foreach ($name in $vcRuntimeArtifacts) {
+    $src = Join-Path $vcRedistDir $name
+    if (-not (Test-Path -LiteralPath $src)) {
+        Fail "Missing VC runtime artifact: $src"
+    }
+    Copy-Item -LiteralPath $src -Destination $OutputRoot -Force
+}
+
+Write-Step "Build setup wizard"
+$null = New-Item -ItemType Directory -Force -Path $wizardBuildDir
+$wizardConfigArgs = @(
+    "-S", $wizardDir,
+    "-B", $wizardBuildDir,
+    "-G", "Visual Studio 17 2022",
+    "-A", "x64",
+    "-T", "host=x64"
+)
+if ($x64Compiler) {
+    $wizardConfigArgs += "-DCMAKE_CXX_COMPILER=$x64Compiler"
+}
+Invoke-NativeProcess -FilePath "cmake" -Arguments $wizardConfigArgs
+Invoke-NativeProcess -FilePath "cmake" -Arguments @("--build", $wizardBuildDir, "--config", $BuildConfig)
+
+$wizardArtifactDir = Join-Path $wizardBuildDir $BuildConfig
+foreach ($name in (Get-VirtuaCamSetupArtifacts)) {
+    $src = Join-Path $wizardArtifactDir $name
+    if (-not (Test-Path -LiteralPath $src)) {
+        Fail "Missing setup artifact: $src"
+    }
+    Copy-Item -LiteralPath $src -Destination $OutputRoot -Force
+    $pdb = [System.IO.Path]::ChangeExtension($src, ".pdb")
+    if (Test-Path -LiteralPath $pdb) {
+        Copy-Item -LiteralPath $pdb -Destination $OutputRoot -Force
+    }
+}
+Write-Success "Software staged -> $OutputRoot"
+
+Write-Step "Build driver"
+
+$targets = if ($Clean) { "Clean;Build" } else { "Build" }
+Invoke-NativeProcess -FilePath $msbuild -Arguments @(
+    $driverSolutionPath,
+    "/m",
+    "/t:$targets",
+    "/p:Configuration=$BuildConfig",
+    "/p:Platform=x64",
+    "/nologo",
+    "/v:m"
+)
+
+$driverBuildDir = Join-Path $driverRoot ("build\x64\{0}" -f $BuildConfig)
+$driverSys = Join-Path $driverBuildDir "avshws.sys"
+$driverPdb = Join-Path $driverBuildDir "avshws.pdb"
+$driverInf = Join-Path $driverRoot "avshws.inf"
+if (-not (Test-Path -LiteralPath $driverSys)) { Fail "Fresh driver sys missing: $driverSys" }
+if (-not (Test-Path -LiteralPath $driverInf)) { Fail "Driver INF missing: $driverInf" }
+
+if (Test-Path -LiteralPath $driverPackageTmp) {
+    Get-ChildItem -LiteralPath $driverPackageTmp -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Copy-Item -LiteralPath $driverSys -Destination (Join-Path $driverPackageTmp "avshws.sys") -Force
+Copy-Item -LiteralPath $driverInf -Destination (Join-Path $driverPackageTmp "avshws.inf") -Force
+
+$inf2cat = Get-SdkToolPath -ToolName "Inf2Cat.exe" -Architecture "x86"
+$signtool = Get-SdkToolPath -ToolName "signtool.exe" -Architecture "x64"
+if (-not $inf2cat) { Fail "Inf2Cat.exe not found in Windows Kits bin." }
+if (-not $signtool) { Fail "signtool.exe not found in Windows Kits bin." }
+
+Invoke-NativeProcess -FilePath $inf2cat -Arguments @("/driver:$driverPackageTmp", "/os:10_X64")
+
+$catPath = Join-Path $driverPackageTmp "avshws.cat"
+if (-not (Test-Path -LiteralPath $catPath)) {
+    Fail "Catalog generation failed: $catPath not found."
+}
+
+$cert = Get-OrCreateTestCodeSigningCertificate -SubjectCommonName "VirtualCameraDriver-TestSign"
+$cerPath = Join-Path $driverPackageTmp "VirtualCameraDriver-TestSign.cer"
+Export-Certificate -Cert $cert -FilePath $cerPath -Force | Out-Null
+
+Invoke-NativeProcess -FilePath $signtool -Arguments @(
+    "sign",
+    "/v",
+    "/fd", "SHA256",
+    "/sha1", $cert.Thumbprint,
+    "/s", "My",
+    $catPath
+)
+
+foreach ($artifact in @((Get-VirtuaCamDriverArtifacts) + "avshws.pdb")) {
+    $dst = Join-Path $OutputRoot $artifact
+    if (Test-Path -LiteralPath $dst) {
+        Remove-Item -LiteralPath $dst -Force
+    }
+}
+
+foreach ($artifact in (Get-VirtuaCamDriverArtifacts)) {
+    Copy-Item -LiteralPath (Join-Path $driverPackageTmp $artifact) -Destination (Join-Path $OutputRoot $artifact) -Force
+}
+if (Test-Path -LiteralPath $driverPdb) {
+    Copy-Item -LiteralPath $driverPdb -Destination (Join-Path $OutputRoot "avshws.pdb") -Force
+}
+
+Write-Success "Driver staged -> $OutputRoot"
 
 Write-Step "Validate required artifacts"
 $requiredSoftware = @((Get-VirtuaCamSoftwareArtifacts) + (Get-VirtuaCamSetupArtifacts) + (Get-VirtuaCamRuntimeArtifacts))
 $requiredDriver = Get-VirtuaCamDriverArtifacts
 
 foreach ($name in $requiredSoftware) {
-    if (-not $SkipSoftware -and -not (Test-Path -LiteralPath (Join-Path $OutputRoot $name))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $OutputRoot $name))) {
         Fail "Missing software artifact in output: $name"
     }
 }
 foreach ($name in $requiredDriver) {
-    if (-not $SkipDriver -and -not (Test-Path -LiteralPath (Join-Path $OutputRoot $name))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $OutputRoot $name))) {
         Fail "Missing driver artifact in output: $name"
     }
 }

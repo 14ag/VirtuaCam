@@ -7,12 +7,18 @@ param(
     [int]$TestLimit = 3,
     [int]$TimeoutMinutes = 5,
     [int]$MonitorIntervalSeconds = 5,
+    [int]$PendingStartTimeoutSeconds = 90,
     [string]$TestNamePattern = "",
     [int]$MaxHeartbeatAgeMinutes = 10,
+    [string]$LabSwitchName = "hlk-lab",
+    [string]$LabHostIp = "192.168.240.1",
+    [string]$LabControllerIp = "192.168.240.10",
+    [string]$LabDutIp = "192.168.240.20",
     [switch]$NoReloadPlaylist,
     [switch]$NoCleanResults,
     [switch]$NoSetDutReady,
     [switch]$AllowStaleDutHeartbeat,
+    [switch]$SkipLabNetworkRepair,
     [switch]$DryRun
 )
 
@@ -22,6 +28,7 @@ $ErrorActionPreference = "Stop"
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
 . (Join-Path $scriptDir "hyperv-common.ps1")
+. (Join-Path $scriptDir "vhlk-lab-network.ps1")
 
 Assert-HvAdministrator
 
@@ -69,6 +76,19 @@ function Write-LiveLine {
         [Parameter(Mandatory = $true)][string]$Message,
         [ConsoleColor]$Color = [ConsoleColor]::Cyan
     )
+
+    $isRedirected = $false
+    try {
+        $isRedirected = [Console]::IsOutputRedirected
+    }
+    catch {
+        $isRedirected = $true
+    }
+
+    if ($isRedirected) {
+        Write-Host $Message -ForegroundColor $Color
+        return
+    }
 
     try {
         $width = [Math]::Max(40, [Console]::BufferWidth - 1)
@@ -122,15 +142,15 @@ try {
     $vhlkCred = New-CredentialFromEnv -EnvMap $envMap -UserKey "vhlk_VM_USERNAME" -PasswordKey "vhlk_VM_PASSWORD"
     $dutCred = New-CredentialFromEnv -EnvMap $envMap -UserKey "DRIVER_TEST_VM_USERNAME" -PasswordKey "DRIVER_TEST_VM_PASSWORD"
 
-    Write-Host "[1/6] start/check VMs" -ForegroundColor Cyan
-    Ensure-HvVmRunning -VmName $VhlkVmName -LogPath $logPath
-    Ensure-HvVmRunning -VmName $DutVmName -LogPath $logPath
+    Write-Host "[1/7] start/check VMs" -ForegroundColor Cyan
+    Wait-HvVmReady -VmName $VhlkVmName -Credential $vhlkCred -TimeoutSeconds 240 -PollIntervalSeconds 3 -RequirePowerShellDirect -LogPath $logPath | Out-Null
+    Wait-HvVmReady -VmName $DutVmName -Credential $dutCred -TimeoutSeconds 240 -PollIntervalSeconds 3 -RequirePowerShellDirect -LogPath $logPath | Out-Null
 
-    Write-Host "[2/6] connect to controller + DUT" -ForegroundColor Cyan
+    Write-Host "[2/7] connect to controller + DUT" -ForegroundColor Cyan
     $vhlkSession = Wait-HvPowerShellDirect -VmName $VhlkVmName -Credential $vhlkCred -TimeoutSeconds 240 -LogPath $logPath 6>$null
     $dutSession = Wait-HvPowerShellDirect -VmName $DutVmName -Credential $dutCred -TimeoutSeconds 240 -LogPath $logPath 6>$null
 
-    Write-Host "[3/6] check DUT HLK client service" -ForegroundColor Cyan
+    Write-Host "[3/7] check DUT HLK client service" -ForegroundColor Cyan
     $dutState = Invoke-HvGuestCommand -Session $dutSession -LogPath $logPath -ScriptBlock {
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -167,6 +187,26 @@ try {
 
     $dutComputerName = [string]$dutState.ComputerName
     Write-Host ("    DUT computer: {0}; HLKSvc={1}" -f $dutComputerName, $dutState.HlkSvcStatus) -ForegroundColor Green
+
+    if (-not $SkipLabNetworkRepair) {
+        Write-Host "[4/7] repair vHLK lab network" -ForegroundColor Cyan
+        $labNetwork = Repair-VhlkLabNetwork `
+            -VhlkVmName $VhlkVmName `
+            -DutVmName $DutVmName `
+            -VhlkSession $vhlkSession `
+            -DutSession $dutSession `
+            -DutComputerName $dutComputerName `
+            -SwitchName $LabSwitchName `
+            -HostAddress $LabHostIp `
+            -ControllerAddress $LabControllerIp `
+            -DutAddress $LabDutIp
+        $labNetwork | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $artifactDir "lab-network.json") -Encoding UTF8
+        $badLinks = @($labNetwork.Connectivity | Where-Object { -not $_.TcpTestSucceeded })
+        if ($badLinks.Count -gt 0) {
+            throw "vHLK lab network connectivity is not ready. See lab-network.json."
+        }
+        Write-Host ("    Lab IPs ready: controller={0}; DUT={1}" -f $LabControllerIp, $LabDutIp) -ForegroundColor Green
+    }
 
     $remoteReadiness = {
         param($ProjectName, $DutComputerName, $SetDutReady)
@@ -270,14 +310,30 @@ try {
         $dutPoolIsRootOrDefault = $dut.Pool.Equals($dut.Pool.RootPool) -or $dut.Pool.Equals($dut.Pool.DefaultPool)
 
         $setReadyResult = $null
+        $setReadyAttempts = 0
         if ($SetDutReady -and -not $dutPoolIsRootOrDefault) {
             $ready = [Microsoft.Windows.Kits.Hardware.ObjectModel.MachineStatus]::Ready
-            try {
-                $setReadyResult = $dut.SetMachineStatus($ready, 600000)
-            }
-            catch {
-                $setReadyResult = "ERROR: $($_.Exception.Message)"
-            }
+            $readyDeadline = (Get-Date).AddSeconds(120)
+            do {
+                $setReadyAttempts++
+                try {
+                    $setReadyResult = $dut.SetMachineStatus($ready, 600000)
+                    if ($setReadyResult -eq $true -or [string]$setReadyResult -eq "True") {
+                        break
+                    }
+                }
+                catch {
+                    $setReadyResult = "ERROR: $($_.Exception.Message)"
+                }
+
+                Start-Sleep -Seconds 5
+                $refreshed = @(Get-AllMachineObjects -Pool ($pm.GetRootMachinePool()) | Where-Object {
+                    ([string]$_.Name) -eq ([string]$dut.Name)
+                } | Select-Object -First 1)
+                if ($refreshed.Count -gt 0) {
+                    $dut = $refreshed[0]
+                }
+            } while ((Get-Date) -lt $readyDeadline)
         }
         elseif ($SetDutReady) {
             $setReadyResult = "SKIP: DUT is in root/default pool"
@@ -296,6 +352,7 @@ try {
             BadControllerServices = $badServices
             DutMachineBefore = $dutBefore
             SetReadyAttempted = [bool]$SetDutReady
+            SetReadyAttempts = $setReadyAttempts
             SetReadyResult = $setReadyResult
             DutPoolIsRootOrDefault = [bool]$dutPoolIsRootOrDefault
             DutMachineAfter = if ($machineAfter.Count -gt 0) {
@@ -309,7 +366,7 @@ try {
         }
     }
 
-    Write-Host "[4/6] check controller services + HLK machine state" -ForegroundColor Cyan
+    Write-Host "[5/7] check controller services + HLK machine state" -ForegroundColor Cyan
     $readiness = Invoke-Vhlk -Session $vhlkSession -ScriptBlock $remoteReadiness -ArgumentList @(
         $ProjectName,
         $dutComputerName,
@@ -340,7 +397,7 @@ try {
     Write-Host ("    Controller={0}; DUT machine status={1}; tests={2}" -f $readiness.Controller, $machineStatus, $readiness.TestCount) -ForegroundColor Green
 
     $remoteQueue = {
-        param($ProjectName, $PlaylistPath, $ReloadPlaylist, $CleanResults, $DryRun, $TestLimit, $TestNamePattern)
+        param($ProjectName, $PlaylistPath, $ReloadPlaylist, $CleanResults, $DryRun, $TestLimit, $TestNamePattern, $DutComputerName)
 
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -368,13 +425,61 @@ try {
             $loadedPlaylistIds = @($playlistManager.LoadPlaylist($PlaylistPath))
         }
 
+        function Get-HlkMachineByName {
+            param($Pool, [string]$Name)
+            foreach ($machine in @($Pool.GetMachines())) {
+                if ([string]$machine.Name -eq $Name) {
+                    return $machine
+                }
+            }
+            foreach ($child in @($Pool.GetChildPools())) {
+                $found = Get-HlkMachineByName -Pool $child -Name $Name
+                if ($found) {
+                    return $found
+                }
+            }
+            return $null
+        }
+
+        $dutMachine = Get-HlkMachineByName -Pool ($pm.GetRootMachinePool()) -Name $DutComputerName
+        if (-not $dutMachine) {
+            throw "DUT '$DutComputerName' not found in controller machine inventory."
+        }
+        if ([string]$dutMachine.Status -notin @("Ready", "Running")) {
+            throw "DUT '$DutComputerName' is not schedulable. Status=$($dutMachine.Status)."
+        }
+
         $tests = @($project.GetTests() | Sort-Object Name)
         if (-not [string]::IsNullOrWhiteSpace($TestNamePattern)) {
-            $tests = @($tests | Where-Object { [string]$_.Name -match $TestNamePattern })
+            if ($TestNamePattern.IndexOfAny([char[]]"*?[]") -ge 0) {
+                $tests = @($tests | Where-Object { [string]$_.Name -like $TestNamePattern })
+            }
+            else {
+                $escapedPattern = [regex]::Escape($TestNamePattern)
+                $tests = @($tests | Where-Object { [string]$_.Name -match $escapedPattern })
+            }
         }
         $selected = @($tests | Select-Object -First $TestLimit)
         if ($selected.Count -lt 1) {
             throw "No tests selected for smoke run."
+        }
+
+        $activeCancelled = 0
+        $activeCancelErrors = @()
+        if (-not $DryRun) {
+            foreach ($test in @($project.GetTests())) {
+                foreach ($result in @($test.GetTestResults())) {
+                    if ([string]$result.Status -in @("InQueue", "Running")) {
+                        try {
+                            $result.Cancel()
+                            $activeCancelled++
+                        }
+                        catch {
+                            $activeCancelErrors += "Cancel active failed: $($test.Name): $($_.Exception.Message)"
+                        }
+                    }
+                }
+            }
         }
 
         $cancelled = 0
@@ -383,16 +488,6 @@ try {
         if ($CleanResults -and -not $DryRun) {
             foreach ($test in @($project.GetTests())) {
                 foreach ($result in @($test.GetTestResults())) {
-                    try {
-                        if ("Running", "InQueue" -contains ([string]$result.Status)) {
-                            $result.Cancel()
-                            $cancelled++
-                        }
-                    }
-                    catch {
-                        $deleteErrors += "Cancel failed: $($test.Name): $($_.Exception.Message)"
-                    }
-
                     try {
                         $test.DeleteTestResult($result)
                         $deleted++
@@ -407,9 +502,11 @@ try {
         $queued = @()
         $queueErrors = @()
         if (-not $DryRun) {
+            $machineList = New-Object 'System.Collections.Generic.List[Microsoft.Windows.Kits.Hardware.ObjectModel.Machine]'
+            $machineList.Add($dutMachine) | Out-Null
             foreach ($test in $selected) {
                 try {
-                    $queued += @($test.QueueTest())
+                    $queued += @($test.QueueTest($machineList))
                 }
                 catch {
                     $queueErrors += "Queue failed: $($test.Name): $($_.Exception.Message)"
@@ -424,12 +521,16 @@ try {
             ReloadPlaylist = [bool]$ReloadPlaylist
             LoadedPlaylistIds = $loadedPlaylistIds.Count
             CleanResults = [bool]$CleanResults
+            ActiveCancelledResults = $activeCancelled
+            ActiveCancelErrors = $activeCancelErrors
             CancelledResults = $cancelled
             DeletedResults = $deleted
             DeleteErrors = $deleteErrors
             DryRun = [bool]$DryRun
             TestLimit = $TestLimit
             TestNamePattern = $TestNamePattern
+            DutComputerName = $DutComputerName
+            QueueMode = "DirectToDutMachine"
             SelectedTests = @($selected | ForEach-Object { [string]$_.Name })
             QueuedResults = $queued.Count
             QueueErrors = $queueErrors
@@ -437,7 +538,7 @@ try {
         }
     }
 
-    Write-Host "[5/6] queue 3-test smoke set" -ForegroundColor Cyan
+    Write-Host "[6/7] queue 3-test smoke set" -ForegroundColor Cyan
     $queue = Invoke-Vhlk -Session $vhlkSession -ScriptBlock $remoteQueue -ArgumentList @(
         $ProjectName,
         $PlaylistPath,
@@ -445,11 +546,15 @@ try {
         (-not [bool]$NoCleanResults),
         [bool]$DryRun,
         $TestLimit,
-        $TestNamePattern)
+        $TestNamePattern,
+        $dutComputerName)
     $queue | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "queue-result.json") -Encoding UTF8
 
     if (@($queue.QueueErrors).Count -gt 0) {
         throw "At least one smoke test failed to queue. See queue-result.json."
+    }
+    if (@($queue.ActiveCancelErrors).Count -gt 0) {
+        throw "At least one active queued/running result failed to cancel. See queue-result.json."
     }
 
     Write-Host "    Selected tests:" -ForegroundColor Green
@@ -518,10 +623,11 @@ try {
             CurrentState = if ($current) { [string]$current.ExecutionState } else { "" }
             Groups = $groups
             Details = $details
+            FailedTestNames = @($details | Where-Object { [string]$_.Status -eq "Failed" } | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
         }
     }
 
-    Write-Host "[6/6] monitor smoke run for 5 minutes" -ForegroundColor Cyan
+    Write-Host "[7/7] monitor smoke run for 5 minutes" -ForegroundColor Cyan
     $history = New-Object System.Collections.Generic.List[object]
     $start = Get-Date
     $deadline = $start.AddMinutes($TimeoutMinutes)
@@ -532,10 +638,44 @@ try {
 
     while ((Get-Date) -lt $deadline) {
         $tick++
-        $status = Invoke-Vhlk -Session $vhlkSession -ScriptBlock $remoteStatus -ArgumentList @($ProjectName, @($queue.SelectedTests))
+        $status = $null
+        $statusFresh = $true
+        $statusPollError = ""
+        try {
+            $status = Invoke-Vhlk -Session $vhlkSession -ScriptBlock $remoteStatus -ArgumentList @($ProjectName, @($queue.SelectedTests))
+        }
+        catch {
+            $statusFresh = $false
+            $statusPollError = $_.Exception.Message
+            Write-DoneLine
+            Write-HvLog -Message ("Remote status poll failed; using last known status. {0}" -f $statusPollError) -LogPath $logPath -Level WARN
+            try {
+                if ($vhlkSession) {
+                    Remove-PSSession -Session $vhlkSession -ErrorAction SilentlyContinue
+                }
+                $vhlkSession = Wait-HvPowerShellDirect -VmName $VhlkVmName -Credential $vhlkCred -TimeoutSeconds 60 -LogPath $logPath 6>$null
+            }
+            catch {
+                Write-HvLog -Message ("Controller session reopen failed; will retry. {0}" -f $_.Exception.Message) -LogPath $logPath -Level WARN
+            }
+        }
+
+        if ($null -eq $status) {
+            if ($lastStatus) {
+                $status = $lastStatus
+            } else {
+                Start-Sleep -Seconds ([Math]::Max(1, $MonitorIntervalSeconds))
+                continue
+            }
+        }
+        Add-Member -InputObject $status -NotePropertyName StatusFresh -NotePropertyValue $statusFresh -Force
+        Add-Member -InputObject $status -NotePropertyName StatusPollError -NotePropertyValue $statusPollError -Force
         $history.Add($status) | Out-Null
         $lastStatus = $status
         $status | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "latest-status.json") -Encoding UTF8
+        if ($status.FailedTestNames) {
+            @($status.FailedTestNames) | Set-Content -LiteralPath (Join-Path $artifactDir "failed-test-names.txt") -Encoding UTF8
+        }
 
         if ($status.RunningCount -gt 0 -or $status.Passed -gt 0 -or $status.Failed -gt 0) {
             if (-not $lastAnyStarted) {
@@ -573,6 +713,31 @@ try {
                 Write-Host ("[FAIL] Smoke tests completed with {0} failed." -f $status.Failed) -ForegroundColor Red
                 $exitCode = 2
             }
+            break
+        }
+
+        if ($PendingStartTimeoutSeconds -gt 0 -and -not $lastAnyStarted -and $status.InQueue -gt 0 -and ((Get-Date) - $start).TotalSeconds -ge $PendingStartTimeoutSeconds) {
+            Write-DoneLine
+            Write-Host ("[TIMEOUT] Smoke tests stayed pending for {0} seconds. Cancelling queued results." -f $PendingStartTimeoutSeconds) -ForegroundColor Red
+            Invoke-Vhlk -Session $vhlkSession -ScriptBlock {
+                param($ProjectName, $SelectedTests)
+                Set-StrictMode -Version Latest
+                $ErrorActionPreference = "Continue"
+                $root = "C:\Program Files (x86)\Windows Kits\10\Hardware Lab Kit\Controller"
+                Add-Type -Path (Join-Path $root "microsoft.windows.kits.hardware.objectmodel.dll")
+                Add-Type -Path (Join-Path $root "microsoft.windows.kits.hardware.objectmodel.dbconnection.dll")
+                $pm = [Microsoft.Windows.Kits.Hardware.ObjectModel.DBConnection.DatabaseProjectManager]::new($env:COMPUTERNAME)
+                $project = $pm.GetProject($ProjectName)
+                $selectedNames = @($SelectedTests | ForEach-Object { [string]$_ })
+                foreach ($test in @($project.GetTests() | Where-Object { $selectedNames -contains ([string]$_.Name) })) {
+                    foreach ($result in @($test.GetTestResults())) {
+                        if ([string]$result.Status -in @("InQueue", "Running")) {
+                            try { $result.Cancel() } catch {}
+                        }
+                    }
+                }
+            } -ArgumentList @($ProjectName, @($queue.SelectedTests)) | Out-Null
+            $exitCode = 3
             break
         }
 
