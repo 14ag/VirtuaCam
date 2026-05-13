@@ -282,14 +282,14 @@ namespace
 #endif // ALLOC_PRAGMA
 
 //OG: 320x240
-#define DMAX_X 1280
-#define DMAX_Y 720
-#define D_X 1280
-#define D_Y 720
+#define DMAX_X 1920
+#define DMAX_Y 1080
+#define D_X 1920
+#define D_Y 1080
 #define D_480P_X 640
 #define D_480P_Y 480
-#define D_9X16_X 720
-#define D_9X16_Y 1280
+#define D_9X16_X 1080
+#define D_9X16_Y 1920
 #define D_3X4_X 480
 #define D_3X4_Y 640
 
@@ -859,10 +859,13 @@ Return Value:
             //
             // First, stop the hardware if we actually did anything to it.
             //
-            if (m_HardwareState != HardwareStopped) {
+            if (m_HardwareState != HardwareStopped &&
+                (!m_AcquiredResources || m_Device -> GetAcquiredResourceCount () <= 1)) {
                 Status = m_Device -> Stop ();
                 NT_ASSERT (NT_SUCCESS (Status));
 
+                m_HardwareState = HardwareStopped;
+            } else if (m_AcquiredResources) {
                 m_HardwareState = HardwareStopped;
             }
 
@@ -895,6 +898,7 @@ Return Value:
                 }
 
                 m_Device -> ReleaseHardwareResources (
+                    this
                     );
 
                 m_AcquiredResources = FALSE;
@@ -902,7 +906,9 @@ Return Value:
 
             m_PreviousStreamPointer = NULL;
             m_PendIo = FALSE;
-            m_Device->NotifyCameraState(FALSE);
+            if (m_Device -> GetAcquiredResourceCount () == 0) {
+                m_Device->NotifyCameraState(FALSE);
+            }
 
             break;
 
@@ -2066,8 +2072,8 @@ FormatNV12_Capture = {
 };
 
 //
-// 480p capture formats required by HLK record scenarios.  Keep the
-// 1280x720 ranges as the default formats, but advertise explicit 640x480
+// 480p capture formats required by HLK record scenarios. Keep the
+// 1920x1080 ranges as the default formats, but advertise explicit 640x480
 // types so Media Foundation can select the requested record pin resolution.
 //
 const

@@ -40,9 +40,9 @@ namespace
         { 0x0bb8a130, 0x17c4, 0x40a4, { 0xa1, 0x7a, 0x7c, 0xb4, 0x43, 0x7f, 0x90, 0xe2 } };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileMediaInfos[] = {
-        { { 1280, 720 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
-        { { 720, 1280 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
@@ -56,6 +56,12 @@ namespace
         {
             STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
             { 1, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileMediaInfos)
+        },
+        {
+            STATICGUIDOF(PINNAME_VIDEO_STILL),
+            { 2, KSCameraProfileSensorType_RGB },
             SIZEOF_ARRAY(CameraProfileMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileMediaInfos)
         }
@@ -964,6 +970,7 @@ DEFINE_KSAUTOMATION_TABLE(AvsFilterAutomationTable)
 
 GUID g_PINNAME_VIDEO_PREVIEW = {STATIC_PINNAME_VIDEO_PREVIEW};
 GUID g_PINNAME_VIDEO_CAPTURE = {STATIC_PINNAME_VIDEO_CAPTURE};
+GUID g_PINNAME_VIDEO_STILL = {STATIC_PINNAME_VIDEO_STILL};
 
 NTSTATUS
 VirtuaCamPublishCameraProfiles (
@@ -1084,6 +1091,34 @@ CaptureFilterPinDescriptors [CAPTURE_FILTER_PIN_COUNT] = {
         &CapturePinAllocatorFraming,        // Allocator Framing
         reinterpret_cast <PFNKSINTERSECTHANDLEREX> 
             (CCapturePin::IntersectHandler)
+    },
+    //
+    // Still image pin. Media Foundation can encode JPEG/PNG/JPEG-XR from
+    // these uncompressed ranges, so do not claim kernel JPEG/H264 output.
+    //
+    {
+        &CapturePinDispatch,
+        &CapturePinAutomationTable,
+        {
+            0,                              // Interfaces (NULL, 0 == default)
+            NULL,
+            0,                              // Mediums (NULL, 0 == default)
+            NULL,
+            SIZEOF_ARRAY(CapturePinDataRanges),// Range Count
+            CapturePinDataRanges,           // Ranges
+            KSPIN_DATAFLOW_OUT,             // Dataflow
+            KSPIN_COMMUNICATION_BOTH,       // Communication
+            &PIN_CATEGORY_STILL,            // Category
+            &g_PINNAME_VIDEO_STILL,         // Name
+            0                               // Reserved
+        },
+        KSPIN_FLAG_PROCESS_IN_RUN_STATE_ONLY |
+            KSPIN_FLAG_DO_NOT_INITIATE_PROCESSING,// Pin Flags
+        1,                                  // Instances Possible
+        0,                                  // Instances Necessary
+        &CapturePinAllocatorFraming,        // Allocator Framing
+        reinterpret_cast <PFNKSINTERSECTHANDLEREX>
+            (CCapturePin::IntersectHandler)
     }
 };
 
@@ -1108,7 +1143,7 @@ CaptureFilterDispatch = {
 // CaptureFilterDescription:
 //
 // The descriptor for the capture filter.  We don't specify any topology
-// since there's only one pin on the filter.  Realistically, there would
+// since this virtual camera has simple peer output pins.  Realistically, there would
 // be some topological relationships here because there would be input 
 // pins from crossbars and the like.
 //

@@ -6,7 +6,7 @@ Windows virtual camera driver using the AVStream `avshws` minidriver. It is the 
 - **Type**: Kernel-mode driver (AVStream).
 - **Path**: Direct driver communication (bypasses Media Foundation).
 - **Communication**: Custom `IKsPropertySet` on AVStream filter.
-- **Buffer**: legacy BGR24 input side channel sized to the active capture format, plus FrameEx uploads for BGRA32/RGB32/NV12 when negotiated. Default is 1280x720 at 30fps; the KS capture pin also advertises 640x480, 720x1280, and 480x640 formats for HLK and portrait clients.
+- **Buffer**: legacy BGR24 input side channel sized to the active capture format, plus FrameEx uploads for BGRA32/RGB32/NV12 when negotiated. Default is 1920x1080 at 30fps; the KS capture pin also advertises 640x480, 1080x1920, and 480x640 formats for HLK and portrait clients.
 - **Device class**: `Camera`.
 - **Hardware ID**: `AVSHWS`.
 - **Service name**: `avshws`.

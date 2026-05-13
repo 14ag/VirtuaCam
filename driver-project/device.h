@@ -73,6 +73,8 @@ private:
     // notify the capture sink.
     //
     ICaptureSink *m_CaptureSink;
+    ICaptureSink *m_CaptureSinks[CAPTURE_FILTER_PIN_COUNT];
+    ULONG m_CaptureSinkCount;
 
     //
     // The video info header we're basing hardware settings on.  The pin
@@ -375,9 +377,8 @@ public:
     // AcquireHardwareResources():
     //
     // Called to acquire hardware resources for the device based on a given
-    // video info header.  This will fail if another object has already
-    // acquired hardware resources since we emulate a single capture
-    // device.
+    // video info header. Compatible pins can share one simulated source so
+    // preview, capture, and still streams can be opened together.
     //
     NTSTATUS
     AcquireHardwareResources (
@@ -392,6 +393,11 @@ public:
     //
     void
     ReleaseHardwareResources (
+        IN ICaptureSink *CaptureSink
+        );
+
+    ULONG
+    GetAcquiredResourceCount (
         );
 
     //

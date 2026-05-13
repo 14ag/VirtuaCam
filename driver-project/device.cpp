@@ -418,7 +418,7 @@ QuiesceHardware (
     }
 
     if (m_PinsWithResources) {
-        ReleaseHardwareResources ();
+        ReleaseHardwareResources (NULL);
     }
 
     if (ReleaseAdapter && m_DmaAdapterObject) {
@@ -724,21 +724,41 @@ Return Value:
             // If everything has succeeded thus far, set the capture sink.
             //
             m_CaptureSink = CaptureSink;
+            m_CaptureSinks[0] = CaptureSink;
+            m_CaptureSinkCount = 1;
 
         } else {
             //
             // If anything failed in here, we release the resources we've
             // acquired.
             //
-            ReleaseHardwareResources ();
+            ReleaseHardwareResources (CaptureSink);
         }
     
     } else {
-
-        //
-        // TODO: Better status code?
-        //
-        Status = STATUS_SHARING_VIOLATION;
+        if (!CaptureSink || !VideoInfoHeader || !m_VideoInfoHeader) {
+            Status = STATUS_INVALID_PARAMETER;
+        } else if (m_CaptureSinkCount >= CAPTURE_FILTER_PIN_COUNT) {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        } else if (m_VideoInfoHeader->bmiHeader.biCompression != VideoInfoHeader->bmiHeader.biCompression ||
+            m_VideoInfoHeader->bmiHeader.biBitCount != VideoInfoHeader->bmiHeader.biBitCount ||
+            m_VideoInfoHeader->bmiHeader.biWidth != VideoInfoHeader->bmiHeader.biWidth ||
+            ABS(m_VideoInfoHeader->bmiHeader.biHeight) != ABS(VideoInfoHeader->bmiHeader.biHeight)) {
+            Status = STATUS_SHARING_VIOLATION;
+        } else {
+            bool alreadyTracked = false;
+            for (ULONG i = 0; i < m_CaptureSinkCount; ++i) {
+                if (m_CaptureSinks[i] == CaptureSink) {
+                    alreadyTracked = true;
+                    break;
+                }
+            }
+            if (!alreadyTracked) {
+                m_CaptureSinks[m_CaptureSinkCount++] = CaptureSink;
+                InterlockedIncrement(&m_PinsWithResources);
+            }
+            Status = STATUS_SUCCESS;
+        }
 
     }
 
@@ -752,6 +772,7 @@ Return Value:
 void
 CCaptureDevice::
 ReleaseHardwareResources (
+    IN ICaptureSink *CaptureSink
     )
 
 /*++
@@ -775,6 +796,21 @@ Return Value:
 
     PAGED_CODE();
 
+    if (CaptureSink && m_CaptureSinkCount > 1) {
+        for (ULONG i = 0; i < m_CaptureSinkCount; ++i) {
+            if (m_CaptureSinks[i] == CaptureSink) {
+                for (ULONG j = i + 1; j < m_CaptureSinkCount; ++j) {
+                    m_CaptureSinks[j - 1] = m_CaptureSinks[j];
+                }
+                m_CaptureSinks[m_CaptureSinkCount - 1] = NULL;
+                --m_CaptureSinkCount;
+                InterlockedDecrement(&m_PinsWithResources);
+                m_CaptureSink = m_CaptureSinks[0];
+                return;
+            }
+        }
+    }
+
     //
     // Blow away the image synth.
     //
@@ -787,6 +823,8 @@ Return Value:
     RtlZeroMemory(&m_VideoInfoHeaderStorage, sizeof(m_VideoInfoHeaderStorage));
     m_VideoInfoHeader = NULL;
     m_CaptureSink = NULL;
+    RtlZeroMemory(m_CaptureSinks, sizeof(m_CaptureSinks));
+    m_CaptureSinkCount = 0;
 
     //
     // Release our "lock" on hardware resources.  This will allow another
@@ -862,6 +900,14 @@ Return Value:
             );
 
 
+}
+
+ULONG
+CCaptureDevice::
+GetAcquiredResourceCount (
+    )
+{
+    return m_CaptureSinkCount;
 }
 
 #ifdef ALLOC_PRAGMA
@@ -1094,7 +1140,7 @@ Return Value:
 --*/
 
 {
-    if (!m_HardwareSimulation || !m_CaptureSink) {
+    if (!m_HardwareSimulation || m_CaptureSinkCount == 0) {
         return;
     }
 
@@ -1107,7 +1153,11 @@ Return Value:
     // of hardware registers (ReadNumberOfMappingsCompleted) which would likely
     // be done in the ISR.
     //
-    m_CaptureSink -> CompleteMappings (1);
+    for (ULONG i = 0; i < m_CaptureSinkCount; ++i) {
+        if (m_CaptureSinks[i]) {
+            m_CaptureSinks[i] -> CompleteMappings (1);
+        }
+    }
 
 }
 
@@ -1288,7 +1338,9 @@ void CCaptureDevice::QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status)
         m_HardwareSimulation->QueryStatus(status);
     }
 
-    if (m_CaptureSink) {
-        status->CompletedFrameCount = m_CaptureSink->GetCompletedFrameCount();
+    for (ULONG i = 0; i < m_CaptureSinkCount; ++i) {
+        if (m_CaptureSinks[i]) {
+            status->CompletedFrameCount += m_CaptureSinks[i]->GetCompletedFrameCount();
+        }
     }
 }
