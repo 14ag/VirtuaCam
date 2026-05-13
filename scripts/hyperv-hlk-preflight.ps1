@@ -82,7 +82,7 @@ function Restore-HvCheckpointForPreflight {
         Write-HvLog -Message ("VM stop before restore skipped: {0}" -f $_.Exception.Message) -LogPath $LogFile -Level WARN
     }
 
-    Restore-VMCheckpoint -VMName $TargetVm -Name $TargetCheckpoint -Confirm:$false | Out-Null
+    Restore-HvCheckpoint -VmName $TargetVm -CheckpointName $TargetCheckpoint -LogPath $LogFile
 }
 
 $guestCred = Get-HvGuestCredential -GuestCredential $GuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext

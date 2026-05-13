@@ -105,7 +105,7 @@ function Remove-DriverPackagesForDevicePattern {
     $infNames = @($signedDrivers | Select-Object -ExpandProperty InfName -Unique)
     foreach ($inf in $infNames) {
         if ($inf -match '^oem\d+\.inf$') {
-            Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/delete-driver", $inf, "/uninstall", "/force") -AllowedExitCodes @(0, 259, 3010, -536870340)
+            Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/delete-driver", $inf, "/uninstall", "/force") -AllowedExitCodes @(0, 2, 259, 3010, -536870340)
         }
     }
 }
@@ -400,7 +400,7 @@ if (-not $isTestSigningOn) {
 Import-TestCertificateIfPresent -Path $driverCer
 Remove-ExistingDriverPackage -DeviceIdPattern "ROOT\AVSHWS\*"
 
-Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $driverInf, "/install") -AllowedExitCodes @(0, 259)
+Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $driverInf, "/install") -AllowedExitCodes @(0, 2, 259, 3010)
 
 $existingDevices = @(Get-AvshwsDevices)
 if ($existingDevices.Count -eq 0) {
@@ -430,7 +430,7 @@ if ($finalDevices.Count -eq 0) {
 foreach ($device in $finalDevices) {
     if (-not [string]::IsNullOrWhiteSpace($device.PNPDeviceID)) {
         Write-Info ("Restarting device node: {0}" -f $device.PNPDeviceID)
-        Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/restart-device", $device.PNPDeviceID) -AllowedExitCodes @(0, 259, 3010)
+        Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/restart-device", $device.PNPDeviceID) -AllowedExitCodes @(0, 2, 259, 3010)
     }
 }
 

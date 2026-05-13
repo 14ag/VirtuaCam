@@ -37,17 +37,9 @@ function Restore-HvCheckpointForValidation {
         Fail-Hv -Message ("Checkpoint '{0}' was not found." -f $TargetCheckpoint) -LogPath $LogFile
     }
 
-    try {
-        $vmState = (Get-VM -Name $TargetVm -ErrorAction Stop).State
-        if ($vmState -ne "Off") {
-            Stop-VM -Name $TargetVm -TurnOff -Force -Confirm:$false | Out-Null
-        }
-    }
-    catch {
-        Write-HvLog -Message ("VM stop before restore skipped: {0}" -f $_.Exception.Message) -LogPath $LogFile -Level WARN
-    }
+    Stop-HvVmForRestore -VmName $TargetVm -LogPath $LogFile
 
-    Restore-VMCheckpoint -VMName $TargetVm -Name $TargetCheckpoint -Confirm:$false | Out-Null
+    Restore-HvCheckpoint -VmName $TargetVm -CheckpointName $TargetCheckpoint -LogPath $LogFile
 }
 
 function Assert-PoshSshAvailable {

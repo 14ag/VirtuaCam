@@ -37,10 +37,7 @@ function Restore-ProofCheckpoint {
     if (-not $checkpoint) {
         Fail-Hv -Message ("Checkpoint '{0}' was not found." -f $TargetCheckpoint) -LogPath $LogFile
     }
-    $vmState = (Get-VM -Name $TargetVm -ErrorAction Stop).State
-    if ($vmState -ne "Off") {
-        Stop-VM -Name $TargetVm -TurnOff -Force -Confirm:$false | Out-Null
-    }
+    Stop-HvVmForRestore -VmName $TargetVm -LogPath $LogFile
     Restore-VMSnapshot -VMName $TargetVm -Name $TargetCheckpoint -Confirm:$false | Out-Null
 }
 
@@ -56,7 +53,15 @@ $holdStderrPath = Join-Path $runDir "vm-session-host.stderr.txt"
 $cameraResultPath = Join-Path $runDir "windows-camera-proof.json"
 $hostScreenshotPath = Join-Path $runDir "windows-camera-proof.png"
 
-$guestCred = Get-HvGuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
+$envValues = Read-HvDotEnv
+if ([string]::IsNullOrWhiteSpace($GuestPasswordPlaintext) -and $envValues.ContainsKey("DRIVER_TEST_VM_PASSWORD")) {
+    if ($GuestUser -eq "Administrator" -and $envValues.ContainsKey("DRIVER_TEST_VM_USERNAME") -and -not [string]::IsNullOrWhiteSpace([string]$envValues["DRIVER_TEST_VM_USERNAME"])) {
+        $GuestUser = [string]$envValues["DRIVER_TEST_VM_USERNAME"]
+    }
+    $GuestPasswordPlaintext = [string]$envValues["DRIVER_TEST_VM_PASSWORD"]
+}
+
+$guestCred = Get-HvGuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext -EnvUserKey "DRIVER_TEST_VM_USERNAME" -EnvPasswordKey "DRIVER_TEST_VM_PASSWORD"
 $session = $null
 $holdProc = $null
 $guestRoot = "C:\Temp\VirtuaCamHyperV\camera-proof"
@@ -69,6 +74,7 @@ $guestScreenshotPath = Join-Path $guestRoot "windows-camera-proof.png"
 
 try {
     Restore-ProofCheckpoint -TargetVm $VmName -TargetCheckpoint $CheckpointName -LogFile $logPath
+    Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $logPath | Out-Null
     $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -LogPath $logPath
 
     Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
@@ -96,6 +102,15 @@ try {
     Set-Content -LiteralPath (Join-Path $runDir "guest-driver-install.txt") -Value $install.Output
     if ($install.ExitCode -ne 0) {
         throw "driver.InstallFailed"
+    }
+    if ($install.Output -match '(?i)reboot is needed|reboot is required|pending system reboot|a reboot is required') {
+        Write-HvLog -Message "Driver install requested reboot; restarting guest before Windows Camera proof." -LogPath $logPath -Level STEP
+        Restart-HvGuest -Session $session -LogPath $logPath
+        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+        $session = $null
+        Wait-HvVmRebootTransition -VmName $VmName -Credential $guestCred -TimeoutSeconds 90 -PollIntervalSeconds 3 -LogPath $logPath | Out-Null
+        Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 300 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $logPath | Out-Null
+        $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 300 -LogPath $logPath
     }
 
     Remove-Item -LiteralPath $statusPath, $stopSignalPath -Force -ErrorAction SilentlyContinue

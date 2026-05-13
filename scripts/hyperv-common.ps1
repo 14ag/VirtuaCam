@@ -90,15 +90,60 @@ function Get-HvArtifactDirectory {
     return $runDir
 }
 
+function Read-HvDotEnv {
+    param(
+        [string]$Path = (Resolve-HvPath -Path ".env")
+    )
+
+    $values = @{}
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $values
+    }
+
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith("#")) {
+            continue
+        }
+
+        $parts = $line -split "=", 2
+        if ($parts.Count -ne 2) {
+            continue
+        }
+
+        $name = $parts[0].Trim()
+        $value = $parts[1].Trim()
+        if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $values[$name] = $value
+        }
+    }
+
+    return $values
+}
+
 function Get-HvGuestCredential {
     param(
         [System.Management.Automation.PSCredential]$GuestCredential,
         [string]$GuestUser = "Administrator",
-        [string]$GuestPasswordPlaintext = ""
+        [string]$GuestPasswordPlaintext = "",
+        [string]$EnvUserKey = "",
+        [string]$EnvPasswordKey = ""
     )
 
     if ($GuestCredential) {
         return $GuestCredential
+    }
+
+    if ([string]::IsNullOrWhiteSpace($GuestPasswordPlaintext) -and -not [string]::IsNullOrWhiteSpace($EnvPasswordKey)) {
+        $envValues = Read-HvDotEnv
+        if ($envValues.ContainsKey($EnvUserKey) -and -not [string]::IsNullOrWhiteSpace([string]$envValues[$EnvUserKey]) -and $GuestUser -eq "Administrator") {
+            $GuestUser = [string]$envValues[$EnvUserKey]
+        }
+        if ($envValues.ContainsKey($EnvPasswordKey) -and -not [string]::IsNullOrWhiteSpace([string]$envValues[$EnvPasswordKey])) {
+            $GuestPasswordPlaintext = [string]$envValues[$EnvPasswordKey]
+        }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($GuestPasswordPlaintext)) {
@@ -148,46 +193,295 @@ function Ensure-HvVmRunning {
     throw "Timed out waiting for VM '$VmName' to enter Running state."
 }
 
+function Stop-HvVmForRestore {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [int]$TimeoutSeconds = 180,
+        [string]$LogPath = ""
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $stopRequested = $false
+    do {
+        $vm = Get-VM -Name $VmName -ErrorAction Stop
+        if ([string]$vm.State -eq "Off") {
+            return
+        }
+
+        if (-not $stopRequested -and [string]$vm.State -ne "Stopping") {
+            Write-HvLog -Message ("Stopping VM '{0}' from state {1} before checkpoint restore." -f $VmName, $vm.State) -LogPath $LogPath -Level WARN
+            Stop-VM -Name $VmName -TurnOff -Force -Confirm:$false | Out-Null
+            $stopRequested = $true
+        }
+
+        Start-Sleep -Seconds 3
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Timed out waiting for VM '$VmName' to stop before checkpoint restore."
+}
+
+function Restore-HvCheckpoint {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][string]$CheckpointName,
+        [string]$LogPath = ""
+    )
+
+    $checkpoint = Get-VMSnapshot -VMName $VmName -Name $CheckpointName -ErrorAction SilentlyContinue
+    if (-not $checkpoint) {
+        Fail-Hv -Message ("Checkpoint '{0}' was not found for VM '{1}'." -f $CheckpointName, $VmName) -LogPath $LogPath
+    }
+
+    Write-HvLog -Message ("Restoring checkpoint '{0}' on VM '{1}'." -f $CheckpointName, $VmName) -LogPath $LogPath
+    Restore-VMSnapshot -VMName $VmName -Name $CheckpointName -Confirm:$false | Out-Null
+}
+
+function Test-HvVmConnectionStateAtLeast {
+    param(
+        [Parameter(Mandatory = $true)][string]$State,
+        [Parameter(Mandatory = $true)][string]$MinimumState
+    )
+
+    $rank = @{
+        NotFound = 0
+        Off = 1
+        Saved = 1
+        Paused = 1
+        Stopping = 2
+        Booting = 3
+        WindowsLoading = 4
+        AwaitingLogin = 5
+        LoggingIn = 6
+        LoggedIn = 7
+        ReadyToConnect = 8
+        Unknown = 0
+    }
+
+    if (-not $rank.ContainsKey($State)) {
+        return $false
+    }
+    if (-not $rank.ContainsKey($MinimumState)) {
+        return $false
+    }
+
+    return [int]$rank[$State] -ge [int]$rank[$MinimumState]
+}
+
+function Get-HvVmConnectionState {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [System.Management.Automation.PSCredential]$Credential,
+        [int]$ReadyThresholdSeconds = 30
+    )
+
+    $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    if (-not $vm) {
+        return [pscustomobject]@{
+            State = "NotFound"
+            Detail = "No VM named '$VmName' found on this host."
+            LogonUIRunning = $false
+            UserinitRunning = $false
+            ExplorerRunning = $false
+            ExplorerAgeSeconds = $null
+            PowerShellDirectReady = $false
+            LastError = ""
+        }
+    }
+
+    switch ([string]$vm.State) {
+        "Off" { return [pscustomobject]@{ State = "Off"; Detail = "VM is powered off."; LogonUIRunning = $false; UserinitRunning = $false; ExplorerRunning = $false; ExplorerAgeSeconds = $null; PowerShellDirectReady = $false; LastError = "" } }
+        "Saved" { return [pscustomobject]@{ State = "Saved"; Detail = "VM state is saved to disk."; LogonUIRunning = $false; UserinitRunning = $false; ExplorerRunning = $false; ExplorerAgeSeconds = $null; PowerShellDirectReady = $false; LastError = "" } }
+        "Paused" { return [pscustomobject]@{ State = "Paused"; Detail = "VM is paused."; LogonUIRunning = $false; UserinitRunning = $false; ExplorerRunning = $false; ExplorerAgeSeconds = $null; PowerShellDirectReady = $false; LastError = "" } }
+        "Stopping" { return [pscustomobject]@{ State = "Stopping"; Detail = "VM is stopping; wait before start/connect."; LogonUIRunning = $false; UserinitRunning = $false; ExplorerRunning = $false; ExplorerAgeSeconds = $null; PowerShellDirectReady = $false; LastError = "" } }
+        "Starting" { return [pscustomobject]@{ State = "Booting"; Detail = "VM is starting at hypervisor level."; LogonUIRunning = $false; UserinitRunning = $false; ExplorerRunning = $false; ExplorerAgeSeconds = $null; PowerShellDirectReady = $false; LastError = "" } }
+    }
+
+    if ([string]$vm.State -ne "Running") {
+        return [pscustomobject]@{
+            State = "Booting"
+            Detail = "VM state is '$($vm.State)'."
+            LogonUIRunning = $false
+            UserinitRunning = $false
+            ExplorerRunning = $false
+            ExplorerAgeSeconds = $null
+            PowerShellDirectReady = $false
+            LastError = ""
+        }
+    }
+
+    $heartbeat = $vm | Get-VMIntegrationService -Name "Heartbeat" -ErrorAction SilentlyContinue
+    $heartbeatOK = $heartbeat -and ([string]$heartbeat.PrimaryStatusDescription -eq "OK")
+    if (-not $heartbeatOK) {
+        $heartbeatText = if ($heartbeat) { [string]$heartbeat.PrimaryStatusDescription } else { "Missing" }
+        return [pscustomobject]@{
+            State = "Booting"
+            Detail = "VM is running but heartbeat is '$heartbeatText'."
+            LogonUIRunning = $false
+            UserinitRunning = $false
+            ExplorerRunning = $false
+            ExplorerAgeSeconds = $null
+            PowerShellDirectReady = $false
+            LastError = ""
+        }
+    }
+
+    if (-not $Credential) {
+        return [pscustomobject]@{
+            State = "WindowsLoading"
+            Detail = "Heartbeat OK; credential not provided for PowerShell Direct state probe."
+            LogonUIRunning = $false
+            UserinitRunning = $false
+            ExplorerRunning = $false
+            ExplorerAgeSeconds = $null
+            PowerShellDirectReady = $false
+            LastError = ""
+        }
+    }
+
+    $probe = $null
+    try {
+        $probe = Invoke-Command -VMName $VmName -Credential $Credential -ErrorAction Stop -ScriptBlock {
+            $logonUI = Get-Process -Name "LogonUI" -ErrorAction SilentlyContinue
+            $userinit = Get-Process -Name "userinit" -ErrorAction SilentlyContinue
+            $explorer = Get-Process -Name "explorer" -ErrorAction SilentlyContinue
+
+            $explorerAgeSeconds = $null
+            if ($explorer) {
+                $oldest = $explorer | Sort-Object StartTime | Select-Object -First 1
+                $explorerAgeSeconds = [int]((Get-Date) - $oldest.StartTime).TotalSeconds
+            }
+
+            $svc = Get-Service -Name "vmicvmsession" -ErrorAction SilentlyContinue
+            [pscustomobject]@{
+                ComputerName = $env:COMPUTERNAME
+                VmicVmSessionStatus = if ($svc) { [string]$svc.Status } else { "Missing" }
+                LogonUIRunning = [bool]$logonUI
+                UserinitRunning = [bool]$userinit
+                ExplorerRunning = [bool]$explorer
+                ExplorerAgeSeconds = $explorerAgeSeconds
+            }
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            State = "WindowsLoading"
+            Detail = "Heartbeat OK but PowerShell Direct refused: $($_.Exception.Message)"
+            LogonUIRunning = $false
+            UserinitRunning = $false
+            ExplorerRunning = $false
+            ExplorerAgeSeconds = $null
+            PowerShellDirectReady = $false
+            LastError = $_.Exception.Message
+        }
+    }
+
+    if ($probe.LogonUIRunning -and -not $probe.ExplorerRunning) {
+        return [pscustomobject]@{
+            State = "AwaitingLogin"
+            Detail = "LogonUI.exe is running; login screen is displayed."
+            LogonUIRunning = $true
+            UserinitRunning = [bool]$probe.UserinitRunning
+            ExplorerRunning = $false
+            ExplorerAgeSeconds = $null
+            PowerShellDirectReady = $true
+            LastError = ""
+            GuestComputerName = [string]$probe.ComputerName
+            VmicVmSessionStatus = [string]$probe.VmicVmSessionStatus
+        }
+    }
+
+    if (-not $probe.LogonUIRunning -and -not $probe.ExplorerRunning) {
+        if ($probe.UserinitRunning) {
+            return [pscustomobject]@{
+                State = "LoggingIn"
+                Detail = "userinit.exe is active; user profile is loading."
+                LogonUIRunning = $false
+                UserinitRunning = $true
+                ExplorerRunning = $false
+                ExplorerAgeSeconds = $null
+                PowerShellDirectReady = $true
+                LastError = ""
+                GuestComputerName = [string]$probe.ComputerName
+                VmicVmSessionStatus = [string]$probe.VmicVmSessionStatus
+            }
+        }
+
+        return [pscustomobject]@{
+            State = "WindowsLoading"
+            Detail = "PowerShell Direct connected but explorer.exe has not started."
+            LogonUIRunning = $false
+            UserinitRunning = $false
+            ExplorerRunning = $false
+            ExplorerAgeSeconds = $null
+            PowerShellDirectReady = $true
+            LastError = ""
+            GuestComputerName = [string]$probe.ComputerName
+            VmicVmSessionStatus = [string]$probe.VmicVmSessionStatus
+        }
+    }
+
+    if ($probe.ExplorerRunning) {
+        $age = $probe.ExplorerAgeSeconds
+        if ($null -ne $age -and [int]$age -ge $ReadyThresholdSeconds) {
+            return [pscustomobject]@{
+                State = "ReadyToConnect"
+                Detail = "explorer.exe has been running for ${age}s; session is settled."
+                LogonUIRunning = [bool]$probe.LogonUIRunning
+                UserinitRunning = [bool]$probe.UserinitRunning
+                ExplorerRunning = $true
+                ExplorerAgeSeconds = $age
+                PowerShellDirectReady = $true
+                LastError = ""
+                GuestComputerName = [string]$probe.ComputerName
+                VmicVmSessionStatus = [string]$probe.VmicVmSessionStatus
+            }
+        }
+
+        return [pscustomobject]@{
+            State = "LoggedIn"
+            Detail = "explorer.exe started ${age}s ago; session still settling."
+            LogonUIRunning = [bool]$probe.LogonUIRunning
+            UserinitRunning = [bool]$probe.UserinitRunning
+            ExplorerRunning = $true
+            ExplorerAgeSeconds = $age
+            PowerShellDirectReady = $true
+            LastError = ""
+            GuestComputerName = [string]$probe.ComputerName
+            VmicVmSessionStatus = [string]$probe.VmicVmSessionStatus
+        }
+    }
+
+    return [pscustomobject]@{
+        State = "Unknown"
+        Detail = "Could not determine state from process snapshot."
+        LogonUIRunning = [bool]$probe.LogonUIRunning
+        UserinitRunning = [bool]$probe.UserinitRunning
+        ExplorerRunning = [bool]$probe.ExplorerRunning
+        ExplorerAgeSeconds = $probe.ExplorerAgeSeconds
+        PowerShellDirectReady = $true
+        LastError = ""
+        GuestComputerName = [string]$probe.ComputerName
+        VmicVmSessionStatus = [string]$probe.VmicVmSessionStatus
+    }
+}
+
 function Get-HvVmReadiness {
     param(
         [Parameter(Mandatory = $true)][string]$VmName,
         [System.Management.Automation.PSCredential]$Credential,
-        [switch]$CheckPowerShellDirect
+        [switch]$CheckPowerShellDirect,
+        [int]$ReadyThresholdSeconds = 30
     )
 
     $vm = Get-VM -Name $VmName -ErrorAction Stop
     $integration = @(Get-VMIntegrationService -VMName $VmName -ErrorAction SilentlyContinue)
     $heartbeat = @($integration | Where-Object { [string]$_.Name -eq "Heartbeat" } | Select-Object -First 1)
     $psDirect = @($integration | Where-Object { [string]$_.Name -like "*PowerShell Direct*" } | Select-Object -First 1)
-    $psReady = $false
-    $guestComputerName = ""
-    $vmicStatus = ""
-    $lastError = ""
-
-    if ($CheckPowerShellDirect -and $Credential -and $vm.State -eq "Running") {
-        $probeSession = $null
-        try {
-            $probeSession = New-PSSession -VMName $VmName -Credential $Credential -ErrorAction Stop
-            $guest = Invoke-Command -Session $probeSession -ScriptBlock {
-                $svc = Get-Service -Name "vmicvmsession" -ErrorAction SilentlyContinue
-                [pscustomobject]@{
-                    ComputerName = $env:COMPUTERNAME
-                    VmicVmSessionStatus = if ($svc) { [string]$svc.Status } else { "Missing" }
-                }
-            } -ErrorAction Stop
-            $psReady = $true
-            $guestComputerName = [string]$guest.ComputerName
-            $vmicStatus = [string]$guest.VmicVmSessionStatus
-        }
-        catch {
-            $lastError = $_.Exception.Message
-        }
-        finally {
-            if ($probeSession) {
-                Remove-PSSession -Session $probeSession -ErrorAction SilentlyContinue
-            }
-        }
-    }
+    $connection = Get-HvVmConnectionState -VmName $VmName -Credential $Credential -ReadyThresholdSeconds $ReadyThresholdSeconds
+    $psReady = [bool]$connection.PowerShellDirectReady
+    $guestComputerName = if ($connection.PSObject.Properties.Name -contains "GuestComputerName") { [string]$connection.GuestComputerName } else { "" }
+    $vmicStatus = if ($connection.PSObject.Properties.Name -contains "VmicVmSessionStatus") { [string]$connection.VmicVmSessionStatus } else { "" }
+    $lastError = [string]$connection.LastError
 
     [pscustomobject]@{
         VmName = $VmName
@@ -201,6 +495,12 @@ function Get-HvVmReadiness {
         PowerShellDirectReady = $psReady
         GuestComputerName = $guestComputerName
         VmicVmSessionStatus = $vmicStatus
+        ConnectionState = [string]$connection.State
+        ConnectionDetail = [string]$connection.Detail
+        LogonUIRunning = [bool]$connection.LogonUIRunning
+        UserinitRunning = [bool]$connection.UserinitRunning
+        ExplorerRunning = [bool]$connection.ExplorerRunning
+        ExplorerAgeSeconds = $connection.ExplorerAgeSeconds
         LastError = $lastError
         CheckedAtUtc = [DateTime]::UtcNow.ToString("o")
     }
@@ -213,6 +513,10 @@ function Wait-HvVmReady {
         [int]$TimeoutSeconds = 180,
         [int]$PollIntervalSeconds = 3,
         [switch]$RequirePowerShellDirect,
+        [switch]$RequireInteractiveSession,
+        [ValidateSet("", "Booting", "WindowsLoading", "AwaitingLogin", "LoggingIn", "LoggedIn", "ReadyToConnect")]
+        [string]$UntilConnectionState = "",
+        [int]$ReadyThresholdSeconds = 30,
         [string]$LogPath = ""
     )
 
@@ -220,18 +524,26 @@ function Wait-HvVmReady {
     $lastSignature = ""
     $lastReady = $null
 
+    if ($RequireInteractiveSession -and [string]::IsNullOrWhiteSpace($UntilConnectionState)) {
+        $UntilConnectionState = "ReadyToConnect"
+        $RequirePowerShellDirect = $true
+    }
+
     do {
         $vm = Get-VM -Name $VmName -ErrorAction Stop
-        if ($vm.State -ne "Running") {
+        if ([string]$vm.State -eq "Off" -or [string]$vm.State -eq "Saved") {
             Write-HvLog -Message ("VM '{0}' is {1}. Starting it." -f $VmName, $vm.State) -LogPath $LogPath -Level WARN
             Start-VM -Name $VmName | Out-Null
+        } elseif ([string]$vm.State -eq "Paused") {
+            Write-HvLog -Message ("VM '{0}' is Paused. Resuming it." -f $VmName) -LogPath $LogPath -Level WARN
+            Resume-VM -Name $VmName | Out-Null
         }
 
-        $ready = Get-HvVmReadiness -VmName $VmName -Credential $Credential -CheckPowerShellDirect:$RequirePowerShellDirect
+        $ready = Get-HvVmReadiness -VmName $VmName -Credential $Credential -CheckPowerShellDirect:$RequirePowerShellDirect -ReadyThresholdSeconds $ReadyThresholdSeconds
         $lastReady = $ready
-        $signature = "{0}|{1}|{2}|{3}|{4}" -f $ready.State, $ready.Status, $ready.Heartbeat, $ready.PowerShellDirectReady, $ready.VmicVmSessionStatus
+        $signature = "{0}|{1}|{2}|{3}|{4}|{5}|{6}" -f $ready.State, $ready.Status, $ready.Heartbeat, $ready.PowerShellDirectReady, $ready.ConnectionState, $ready.VmicVmSessionStatus, $ready.ExplorerAgeSeconds
         if ($signature -ne $lastSignature) {
-            Write-HvLog -Message ("VM readiness {0}: state={1}; status={2}; heartbeat={3}; psdirect={4}; vmicvmsession={5}" -f $VmName, $ready.State, $ready.Status, $ready.Heartbeat, $ready.PowerShellDirectReady, $ready.VmicVmSessionStatus) -LogPath $LogPath
+            Write-HvLog -Message ("VM readiness {0}: state={1}; status={2}; heartbeat={3}; psdirect={4}; connection={5}; detail={6}; vmicvmsession={7}; logonui={8}; userinit={9}; explorer={10}; explorerAge={11}" -f $VmName, $ready.State, $ready.Status, $ready.Heartbeat, $ready.PowerShellDirectReady, $ready.ConnectionState, $ready.ConnectionDetail, $ready.VmicVmSessionStatus, $ready.LogonUIRunning, $ready.UserinitRunning, $ready.ExplorerRunning, $ready.ExplorerAgeSeconds) -LogPath $LogPath
             if (-not [string]::IsNullOrWhiteSpace($ready.LastError)) {
                 Write-HvLog -Message ("VM readiness probe error {0}: {1}" -f $VmName, $ready.LastError) -LogPath $LogPath -Level WARN
             }
@@ -239,7 +551,8 @@ function Wait-HvVmReady {
         }
 
         $stateReady = [string]$ready.State -eq "Running"
-        if ($stateReady -and (-not $RequirePowerShellDirect -or $ready.PowerShellDirectReady)) {
+        $connectionReady = [string]::IsNullOrWhiteSpace($UntilConnectionState) -or (Test-HvVmConnectionStateAtLeast -State ([string]$ready.ConnectionState) -MinimumState $UntilConnectionState)
+        if ($stateReady -and $connectionReady -and (-not $RequirePowerShellDirect -or $ready.PowerShellDirectReady)) {
             return $ready
         }
 
@@ -420,4 +733,39 @@ function Restart-HvGuest {
     Write-HvLog -Message "Restarting guest OS." -LogPath $LogPath -Level STEP
     Invoke-Command -Session $Session -ScriptBlock { Restart-Computer -Force } -ErrorAction SilentlyContinue | Out-Null
     Remove-PSSession -Session $Session -ErrorAction SilentlyContinue
+}
+
+function Wait-HvVmRebootTransition {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential,
+        [int]$TimeoutSeconds = 90,
+        [int]$PollIntervalSeconds = 3,
+        [string]$LogPath = ""
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastSummary = ""
+    do {
+        $ready = Get-HvVmReadiness -VmName $VmName -Credential $Credential -CheckPowerShellDirect -ReadyThresholdSeconds 30
+        $summary = "state={0}; heartbeat={1}; psdirect={2}; connection={3}; detail={4}" -f $ready.State, $ready.Heartbeat, $ready.PowerShellDirect, $ready.ConnectionState, $ready.ConnectionDetail
+        if ($summary -ne $lastSummary) {
+            Write-HvLog -Message ("VM reboot transition {0}: {1}" -f $VmName, $summary) -LogPath $LogPath
+            $lastSummary = $summary
+        }
+
+        $isTransition = ([string]$ready.State -in @("Off", "Saved", "Paused", "Stopping")) -or
+            ([string]$ready.Heartbeat -ne "OK") -or
+            (-not [bool]$ready.PowerShellDirect) -or
+            (Test-HvVmConnectionStateAtLeast -State ([string]$ready.ConnectionState) -MinimumState "LoggedIn") -eq $false
+
+        if ($isTransition) {
+            return $ready
+        }
+
+        Start-Sleep -Seconds $PollIntervalSeconds
+    } while ((Get-Date) -lt $deadline)
+
+    Write-HvLog -Message ("VM '{0}' did not show a reboot transition within {1}s; waiting for readiness anyway." -f $VmName, $TimeoutSeconds) -LogPath $LogPath -Level WARN
+    return $ready
 }

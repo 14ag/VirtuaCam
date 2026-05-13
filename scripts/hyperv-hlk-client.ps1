@@ -70,7 +70,7 @@ if ($RestoreCleanFirst) {
         Write-HvLog -Message ("VM stop before restore skipped: {0}" -f $_.Exception.Message) -LogPath $LogPath -Level WARN
     }
 
-    Restore-VMCheckpoint -VMName $VmName -Name $CheckpointName -Confirm:$false | Out-Null
+    Restore-HvCheckpoint -VmName $VmName -CheckpointName $CheckpointName -LogPath $LogPath
 }
 
 $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -LogPath $LogPath

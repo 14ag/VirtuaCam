@@ -1,5 +1,12 @@
 # VirtuaCam PowerShell Scripts — Code Review
 
+## Current Fix Status
+
+- VM readiness now needs the shared Probe-VMState state machine in `hyperv-common.ps1`, including heartbeat, PowerShell Direct, `LogonUI`, `userinit`, `explorer`, and `ReadyToConnect` state.
+- UI proof flows should wait for `ReadyToConnect`; service-only and HLK flows should log connection state and wait for PowerShell Direct plus heartbeat.
+- vHLK runners should keep the stale-poll warning, redirected-output guard, active queue cancellation, and full failed-name export.
+- Driver-test DirectShow validation should use `scripts/test-driver-dshow-probe.ps1` so probe output is written on the host and aborted guest logging cannot stall the run.
+
 **Scope:** All scripts under `VirtuaCam/scripts/`  
 **Focus:** Code quality · logical-flow stability · counter / state-tracking accuracy  
 **Rating scale:** 🔴 High · 🟡 Medium · 🟢 Low / Info

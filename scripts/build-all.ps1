@@ -19,6 +19,32 @@ function Fail {
     exit 1
 }
 
+function Assert-FilePresentAndNotEmpty {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Fail "Required artifact missing: $Path"
+    }
+
+    $item = Get-Item -LiteralPath $Path
+    if ($item.Length -le 0) {
+        Fail "Required artifact is empty: $Path"
+    }
+}
+
+function Assert-PathInsideRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $resolvedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    if (-not $resolvedPath.StartsWith($resolvedRoot + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        Fail "Refusing to modify path outside repository root: $resolvedPath"
+    }
+}
+
 function Invoke-NativeProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -221,6 +247,9 @@ $driverRoot = Join-Path $repoRoot "driver-project"
 $driverSolutionPath = Join-Path $driverRoot "avshws.sln"
 $OutputRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "output"))
 $driverPackageTmp = Join-Path $repoRoot ".driver-package-work"
+foreach ($pathToGuard in @($OutputRoot, $driverPackageTmp, $softwareBuildDir, $wizardBuildDir)) {
+    Assert-PathInsideRoot -Path $pathToGuard -Root $repoRoot
+}
 
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host " Build All"
@@ -260,6 +289,7 @@ if ($Clean -and (Test-Path -LiteralPath $OutputRoot)) {
 }
 $null = New-Item -ItemType Directory -Force -Path $OutputRoot, $driverPackageTmp
 Write-Info "OutputRoot: $OutputRoot"
+Write-Info ".driver-package-work is a temporary INF/catalog signing workspace; final install artifacts are staged in output."
 
 foreach ($legacyDir in @(
     (Join-Path $OutputRoot "software"),
@@ -455,14 +485,10 @@ $requiredSoftware = @((Get-VirtuaCamSoftwareArtifacts) + (Get-VirtuaCamSetupArti
 $requiredDriver = Get-VirtuaCamDriverArtifacts
 
 foreach ($name in $requiredSoftware) {
-    if (-not (Test-Path -LiteralPath (Join-Path $OutputRoot $name))) {
-        Fail "Missing software artifact in output: $name"
-    }
+    Assert-FilePresentAndNotEmpty -Path (Join-Path $OutputRoot $name)
 }
 foreach ($name in $requiredDriver) {
-    if (-not (Test-Path -LiteralPath (Join-Path $OutputRoot $name))) {
-        Fail "Missing driver artifact in output: $name"
-    }
+    Assert-FilePresentAndNotEmpty -Path (Join-Path $OutputRoot $name)
 }
 Write-Success "Artifacts present in output"
 

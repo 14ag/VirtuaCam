@@ -41,7 +41,15 @@ if ([string]::IsNullOrWhiteSpace($LogPath)) {
     $LogPath = Join-Path $artifactDir "hyperv-driver-loop.log"
 }
 
-$guestCred = Get-HvGuestCredential -GuestCredential $GuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext
+$envValues = Read-HvDotEnv
+if ([string]::IsNullOrWhiteSpace($GuestPasswordPlaintext) -and $envValues.ContainsKey("DRIVER_TEST_VM_PASSWORD")) {
+    if ($GuestUser -eq "Administrator" -and $envValues.ContainsKey("DRIVER_TEST_VM_USERNAME") -and -not [string]::IsNullOrWhiteSpace([string]$envValues["DRIVER_TEST_VM_USERNAME"])) {
+        $GuestUser = [string]$envValues["DRIVER_TEST_VM_USERNAME"]
+    }
+    $GuestPasswordPlaintext = [string]$envValues["DRIVER_TEST_VM_PASSWORD"]
+}
+
+$guestCred = Get-HvGuestCredential -GuestCredential $GuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext -EnvUserKey "DRIVER_TEST_VM_USERNAME" -EnvPasswordKey "DRIVER_TEST_VM_PASSWORD"
 $repoRoot = Get-HvRepoRoot
 $driverPackageRootPath = Resolve-HvPath -Path "output" -BasePath $repoRoot
 $installAllScript = Resolve-HvPath -Path "scripts\install-all.ps1" -BasePath $repoRoot
@@ -89,16 +97,13 @@ try {
     }
 
     try {
-        $vmState = (Get-VM -Name $VmName -ErrorAction Stop).State
-        if ($vmState -ne "Off") {
-            Stop-VM -Name $VmName -TurnOff -Force -Confirm:$false | Out-Null
-        }
+        Stop-HvVmForRestore -VmName $VmName -LogPath $LogPath
     }
     catch {
         Write-HvLog -Message ("Pre-restore VM stop skipped: {0}" -f $_.Exception.Message) -LogPath $LogPath -Level WARN
     }
 
-    Restore-VMCheckpoint -VMName $VmName -Name $restoreCheckpointName -Confirm:$false | Out-Null
+    Restore-HvCheckpoint -VmName $VmName -CheckpointName $restoreCheckpointName -LogPath $LogPath
 
     $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -LogPath $LogPath
     try {
@@ -174,6 +179,9 @@ try {
         if ($installNeedsReboot) {
             Write-HvLog -Message "Driver install requested reboot; restarting guest before repro." -LogPath $LogPath -Level STEP
             Restart-HvGuest -Session $session -LogPath $LogPath
+            Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+            $session = $null
+            Wait-HvVmRebootTransition -VmName $VmName -Credential $guestCred -TimeoutSeconds 90 -PollIntervalSeconds 3 -LogPath $LogPath | Out-Null
             $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -LogPath $LogPath
         }
 
@@ -205,7 +213,14 @@ try {
         }
 
         Restart-HvGuest -Session $session -LogPath $LogPath
+        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+        $session = $null
+        Wait-HvVmRebootTransition -VmName $VmName -Credential $guestCred -TimeoutSeconds 90 -PollIntervalSeconds 3 -LogPath $LogPath | Out-Null
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -LogPath $LogPath
+
+        if ($ReproMode -ne "None") {
+            Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $LogPath | Out-Null
+        }
 
         $postBootVerifier = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
             verifier /querysettings 2>&1 | Out-String
@@ -294,16 +309,13 @@ finally {
     if ($RevertAfterRun) {
         Write-HvLog -Message ("Restoring checkpoint '{0}'" -f $restoreCheckpointName) -LogPath $LogPath -Level STEP
         try {
-            $vmState = (Get-VM -Name $VmName -ErrorAction Stop).State
-            if ($vmState -ne "Off") {
-                Stop-VM -Name $VmName -TurnOff -Force -Confirm:$false | Out-Null
-            }
+            Stop-HvVmForRestore -VmName $VmName -LogPath $LogPath
         }
         catch {
             Write-HvLog -Message ("Pre-restore VM stop skipped: {0}" -f $_.Exception.Message) -LogPath $LogPath -Level WARN
         }
 
-        Restore-VMCheckpoint -VMName $VmName -Name $restoreCheckpointName -Confirm:$false | Out-Null
+        Restore-HvCheckpoint -VmName $VmName -CheckpointName $restoreCheckpointName -LogPath $LogPath
     }
 }
 

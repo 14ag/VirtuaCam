@@ -52,11 +52,21 @@ foreach ($path in $vhlkScripts) {
     Assert-NotContains -Path $path -Pattern "Select-Object\s+-First\s+5\s+\|\s+ForEach-Object\s*\{" -Message "$path must not truncate failed-name export to five failures."
 }
 
+Assert-Contains -Path "scripts\hyperv-common.ps1" -Pattern "function Get-HvVmConnectionState" -Message "hyperv-common must expose Probe-VMState connection states."
 Assert-Contains -Path "scripts\hyperv-common.ps1" -Pattern "function Get-HvVmReadiness" -Message "hyperv-common must expose VM readiness inspection."
 Assert-Contains -Path "scripts\hyperv-common.ps1" -Pattern "function Wait-HvVmReady" -Message "hyperv-common must expose VM readiness polling."
+Assert-Contains -Path "scripts\hyperv-common.ps1" -Pattern "function Stop-HvVmForRestore" -Message "hyperv-common must stop VMs safely before checkpoint restore."
 Assert-Contains -Path "scripts\hyperv-common.ps1" -Pattern "PollIntervalSeconds\s*=\s*3" -Message "VM readiness polling must default to 3 seconds."
 Assert-Contains -Path "scripts\hyperv-common.ps1" -Pattern "vmicvmsession" -Message "VM readiness must report vmicvmsession status."
+Assert-Contains -Path "scripts\hyperv-common.ps1" -Pattern "ReadyToConnect" -Message "VM readiness must support ReadyToConnect state."
+Assert-Contains -Path "scripts\hyperv-common.ps1" -Pattern "LogonUI" -Message "VM readiness must report login-screen state."
+Assert-Contains -Path "scripts\hyperv-common.ps1" -Pattern "userinit" -Message "VM readiness must report profile-loading state."
+Assert-Contains -Path "scripts\hyperv-common.ps1" -Pattern "explorer" -Message "VM readiness must report shell-settled state."
 Assert-Contains -Path "scripts\hyperv-driver-loop.ps1" -Pattern 'ReadyCheckpointName\s*=\s*"clean-ready"' -Message "driver-test loop must prefer clean-ready checkpoint when present."
 Assert-Contains -Path "scripts\hyperv-driver-loop.ps1" -Pattern "DisableReadyCheckpointPreference" -Message "driver-test loop must allow disabling ready checkpoint preference."
+Assert-Contains -Path "scripts\hyperv-driver-loop.ps1" -Pattern "RequireInteractiveSession" -Message "driver loop must wait for interactive readiness before UI repro."
+Assert-Contains -Path "scripts\hyperv-proof-windows-camera.ps1" -Pattern "RequireInteractiveSession" -Message "Windows Camera proof must wait for interactive readiness."
+Assert-Contains -Path "scripts\test-driver-dshow-probe.ps1" -Pattern "DirectShow probe gate" -Message "driver-test DirectShow gate script must exist."
+Assert-Contains -Path "scripts\test-driver-dshow-probe.ps1" -Pattern 'Set-Content -LiteralPath \$localLog' -Message "DirectShow gate must write probe logs on host side."
 
 Write-Host "vHLK runner flow whitebox checks passed."
