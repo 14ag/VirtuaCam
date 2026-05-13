@@ -24,6 +24,7 @@ void UI_SetAudioSelectionCallback(std::function<void(int)> callback);
 void UI_SetCurrentAudioDeviceId(int id);
 int UI_GetCurrentAudioDeviceId();
 std::vector<std::wstring> UI_RefreshCameraDeviceList();
+std::vector<CapturableWindow> EnumerateWindows();
 
 // Returns a cached camera DevicePath for a given camera index (menu index),
 // or nullptr if out of range / unknown. This is used to launch camera producers

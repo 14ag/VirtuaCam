@@ -9,6 +9,8 @@ param(
     [int]$PendingStartTimeoutSeconds = 90,
     [int]$TimeoutMinutes = 0,
     [int]$MaxHeartbeatAgeMinutes = 10,
+    [int]$ResearchGateFailureCount = 0,
+    [int]$StopOnFailureCount = 0,
     [string]$TestNameListPath = "",
     [string]$LabSwitchName = "hlk-lab",
     [string]$LabHostIp = "192.168.240.1",
@@ -134,6 +136,12 @@ try {
 
     if ($MaxHeartbeatAgeMinutes -lt 1) {
         throw "MaxHeartbeatAgeMinutes must be at least 1."
+    }
+    if ($ResearchGateFailureCount -lt 0) {
+        throw "ResearchGateFailureCount must be 0 or greater."
+    }
+    if ($StopOnFailureCount -lt 0) {
+        throw "StopOnFailureCount must be 0 or greater."
     }
 
     $selectedTestNames = @()
@@ -456,10 +464,31 @@ try {
         }
 
         $tests = @($project.GetTests())
+        $testsToQueue = @($tests)
+        $missingSelectedTests = @()
+        if ($SelectedTestNames -and $SelectedTestNames.Count -gt 0) {
+            $byName = @{}
+            foreach ($test in $tests) {
+                $byName[[string]$test.Name] = $test
+            }
+            $testsToQueue = @()
+            foreach ($name in $SelectedTestNames) {
+                if ($byName.ContainsKey($name)) {
+                    $testsToQueue += $byName[$name]
+                } else {
+                    $missingSelectedTests += $name
+                }
+            }
+            if ($testsToQueue.Count -lt 1) {
+                throw "No selected tests exist in HLK project."
+            }
+        }
+
+        $testsToManage = if ($SelectedTestNames -and $SelectedTestNames.Count -gt 0) { @($testsToQueue) } else { @($tests) }
         $activeCancelled = 0
         $activeCancelErrors = @()
         if (-not $DryRun) {
-            foreach ($test in $tests) {
+            foreach ($test in $testsToManage) {
                 foreach ($result in @($test.GetTestResults())) {
                     if ([string]$result.Status -in @("InQueue", "Running")) {
                         try {
@@ -479,7 +508,7 @@ try {
         $deleteErrors = @()
 
         if ($CleanResults -and -not $DryRun) {
-            foreach ($test in $tests) {
+            foreach ($test in $testsToManage) {
                 foreach ($result in @($test.GetTestResults())) {
                     try {
                         $test.DeleteTestResult($result)
@@ -489,26 +518,6 @@ try {
                         $deleteErrors += "Delete failed: $($test.Name): $($_.Exception.Message)"
                     }
                 }
-            }
-        }
-
-        $testsToQueue = @($tests)
-        $missingSelectedTests = @()
-        if ($SelectedTestNames -and $SelectedTestNames.Count -gt 0) {
-            $byName = @{}
-            foreach ($test in $tests) {
-                $byName[[string]$test.Name] = $test
-            }
-            $testsToQueue = @()
-            foreach ($name in $SelectedTestNames) {
-                if ($byName.ContainsKey($name)) {
-                    $testsToQueue += $byName[$name]
-                } else {
-                    $missingSelectedTests += $name
-                }
-            }
-            if ($testsToQueue.Count -lt 1) {
-                throw "No selected tests exist in HLK project."
             }
         }
 
@@ -548,6 +557,7 @@ try {
             DryRun           = [bool]$DryRun
             DutComputerName  = $DutComputerName
             QueueMode        = "DirectToDutMachine"
+            ManagedTests     = @($testsToManage | ForEach-Object { [string]$_.Name })
             SelectedTestNames = @($testsToQueue | ForEach-Object { [string]$_.Name })
             MissingSelectedTests = $missingSelectedTests
             QueuedResults    = $queuedResults.Count
@@ -592,8 +602,13 @@ try {
         exit 0
     }
 
+    $selectedTestNamesJson = ConvertTo-Json -InputObject @($selectedTestNames) -Depth 3 -Compress
+
     $remoteStatus = {
-        param($ProjectName)
+        param(
+            $ProjectName,
+            [string]$SelectedTestNamesJson
+        )
 
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -609,21 +624,49 @@ try {
         }
 
         $tests = @($project.GetTests())
-        $groups = @($tests | Group-Object { "{0},{1}" -f $_.Status, $_.ExecutionState } | Sort-Object Name | ForEach-Object {
+        $selectedNames = @()
+        if (-not [string]::IsNullOrWhiteSpace($SelectedTestNamesJson)) {
+            $selectedNames = @($SelectedTestNamesJson | ConvertFrom-Json | ForEach-Object {
+                $name = ([string]$_).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($name)) {
+                    $name
+                }
+            } | Sort-Object -Unique)
+        }
+
+        $selectedNameSet = @{}
+        foreach ($name in $selectedNames) {
+            $selectedNameSet[$name] = $true
+        }
+
+        $projectNameSet = @{}
+        foreach ($test in $tests) {
+            $projectNameSet[[string]$test.Name] = $true
+        }
+
+        $monitoringSelectedTests = $selectedNameSet.Count -gt 0
+        $monitoredTests = if ($monitoringSelectedTests) {
+            @($tests | Where-Object { $selectedNameSet.ContainsKey([string]$_.Name) })
+        } else {
+            @($tests)
+        }
+        $missingSelectedTests = @($selectedNames | Where-Object { -not $projectNameSet.ContainsKey($_) })
+
+        $groups = @($monitoredTests | Group-Object { "{0},{1}" -f $_.Status, $_.ExecutionState } | Sort-Object Name | ForEach-Object {
             [pscustomobject]@{ Name = $_.Name; Count = $_.Count }
         })
 
-        $passed = @($tests | Where-Object { [string]$_.Status -eq "Passed" }).Count
-        $failed = @($tests | Where-Object { [string]$_.Status -eq "Failed" }).Count
-        $running = @($tests | Where-Object { [string]$_.ExecutionState -eq "Running" })
-        $inQueue = @($tests | Where-Object { [string]$_.ExecutionState -eq "InQueue" }).Count
-        $notRun = @($tests | Where-Object { [string]$_.Status -eq "NotRun" }).Count
-        $completed = @($tests | Where-Object {
+        $passed = @($monitoredTests | Where-Object { [string]$_.Status -eq "Passed" }).Count
+        $failed = @($monitoredTests | Where-Object { [string]$_.Status -eq "Failed" }).Count
+        $running = @($monitoredTests | Where-Object { [string]$_.ExecutionState -eq "Running" })
+        $inQueue = @($monitoredTests | Where-Object { [string]$_.ExecutionState -eq "InQueue" }).Count
+        $notRun = @($monitoredTests | Where-Object { [string]$_.Status -eq "NotRun" }).Count
+        $completed = @($monitoredTests | Where-Object {
             [string]$_.Status -in @("Passed", "Failed", "Canceled", "Cancelled", "Blocked", "NotApplicable")
         }).Count
 
         $current = $running | Select-Object -First 1
-        $failures = @($tests | Where-Object { [string]$_.Status -eq "Failed" } | ForEach-Object {
+        $failures = @($monitoredTests | Where-Object { [string]$_.Status -eq "Failed" } | ForEach-Object {
             [pscustomobject]@{
                 Name = $_.Name
                 Status = [string]$_.Status
@@ -650,7 +693,11 @@ try {
 
         [pscustomobject]@{
             CheckedAt       = (Get-Date).ToString("s")
-            Total           = $tests.Count
+            Total           = $monitoredTests.Count
+            ProjectTotal    = $tests.Count
+            MonitoringSelectedTests = $monitoringSelectedTests
+            SelectedTestNames = $selectedNames
+            MissingSelectedTests = $missingSelectedTests
             Completed       = $completed
             Passed          = $passed
             Failed          = $failed
@@ -667,10 +714,65 @@ try {
         }
     }
 
+    $remoteCancelQueuedOrRunning = {
+        param(
+            $ProjectName,
+            [string]$SelectedTestNamesJson
+        )
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = "Continue"
+        $root = "C:\Program Files (x86)\Windows Kits\10\Hardware Lab Kit\Controller"
+        Add-Type -Path (Join-Path $root "microsoft.windows.kits.hardware.objectmodel.dll")
+        Add-Type -Path (Join-Path $root "microsoft.windows.kits.hardware.objectmodel.dbconnection.dll")
+        $pm = [Microsoft.Windows.Kits.Hardware.ObjectModel.DBConnection.DatabaseProjectManager]::new($env:COMPUTERNAME)
+        $project = $pm.GetProject($ProjectName)
+        $tests = @($project.GetTests())
+        $selectedNames = @()
+        if (-not [string]::IsNullOrWhiteSpace($SelectedTestNamesJson)) {
+            $selectedNames = @($SelectedTestNamesJson | ConvertFrom-Json | ForEach-Object {
+                $name = ([string]$_).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($name)) {
+                    $name
+                }
+            } | Sort-Object -Unique)
+        }
+        $selectedNameSet = @{}
+        foreach ($name in $selectedNames) {
+            $selectedNameSet[$name] = $true
+        }
+        $testsToCancel = if ($selectedNameSet.Count -gt 0) {
+            @($tests | Where-Object { $selectedNameSet.ContainsKey([string]$_.Name) })
+        } else {
+            @($tests)
+        }
+        $cancelled = 0
+        $errors = @()
+        foreach ($test in $testsToCancel) {
+            foreach ($result in @($test.GetTestResults())) {
+                if ([string]$result.Status -in @("InQueue", "Running")) {
+                    try {
+                        $result.Cancel()
+                        $cancelled++
+                    }
+                    catch {
+                        $errors += "Cancel failed: $($test.Name): $($_.Exception.Message)"
+                    }
+                }
+            }
+        }
+        [pscustomobject]@{
+            Cancelled = $cancelled
+            Errors = $errors
+            ProjectTotal = $tests.Count
+            ManagedTests = @($testsToCancel | ForEach-Object { [string]$_.Name })
+        }
+    }
+
     $history = New-Object System.Collections.Generic.List[object]
     $start = Get-Date
     $lastAnyStarted = $null
     $lastStatus = $null
+    $stopReason = ""
     $tick = 0
     $spinner = @("|", "/", "-", "\")
 
@@ -680,7 +782,7 @@ try {
         $statusFresh = $true
         $statusPollError = ""
         try {
-            $status = Invoke-Vhlk -Session $session -ScriptBlock $remoteStatus -ArgumentList @($ProjectName)
+            $status = Invoke-Vhlk -Session $session -ScriptBlock $remoteStatus -ArgumentList @($ProjectName, $selectedTestNamesJson)
         }
         catch {
             $statusFresh = $false
@@ -748,6 +850,41 @@ try {
         if ($StopOnFirstFailure -and $status.Failed -gt 0) {
             Write-DoneLine
             Write-Host "First failure detected. Monitoring stopped; HLK queue may still be running." -ForegroundColor Red
+            $stopReason = "StopOnFirstFailure"
+            break
+        }
+
+        if ($ResearchGateFailureCount -gt 0 -and $status.Failed -ge $ResearchGateFailureCount) {
+            Write-DoneLine
+            Write-Host ("Research gate reached at {0} failed tests. Cancelling queued/running results." -f $ResearchGateFailureCount) -ForegroundColor Red
+            $cancel = Invoke-Vhlk -Session $session -ScriptBlock $remoteCancelQueuedOrRunning -ArgumentList @($ProjectName, $selectedTestNamesJson)
+            $researchGate = [pscustomobject]@{
+                Trigger = "ResearchGateFailureCount"
+                Threshold = $ResearchGateFailureCount
+                Failed = $status.Failed
+                FailedTestNames = @($status.FailedTestNames)
+                Cancel = $cancel
+                CheckedAt = (Get-Date).ToString("s")
+            }
+            $researchGate | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactDir "research-gate.json") -Encoding UTF8
+            $stopReason = "ResearchGateFailureCount"
+            break
+        }
+
+        if ($StopOnFailureCount -gt 0 -and $status.Failed -ge $StopOnFailureCount) {
+            Write-DoneLine
+            Write-Host ("Failure stop reached at {0} failed tests. Cancelling queued/running results." -f $StopOnFailureCount) -ForegroundColor Red
+            $cancel = Invoke-Vhlk -Session $session -ScriptBlock $remoteCancelQueuedOrRunning -ArgumentList @($ProjectName, $selectedTestNamesJson)
+            $failureGate = [pscustomobject]@{
+                Trigger = "StopOnFailureCount"
+                Threshold = $StopOnFailureCount
+                Failed = $status.Failed
+                FailedTestNames = @($status.FailedTestNames)
+                Cancel = $cancel
+                CheckedAt = (Get-Date).ToString("s")
+            }
+            $failureGate | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactDir "failure-stop.json") -Encoding UTF8
+            $stopReason = "StopOnFailureCount"
             break
         }
 
@@ -758,58 +895,30 @@ try {
             } else {
                 Write-Host ("vHLK completed with {0} failed tests." -f $status.Failed) -ForegroundColor Red
             }
+            $stopReason = "Completed"
             break
         }
 
         if ($NoStartTimeoutMinutes -gt 0 -and -not $lastAnyStarted -and ((Get-Date) - $start).TotalMinutes -ge $NoStartTimeoutMinutes) {
             Write-DoneLine
             Write-Host ("No vHLK test started within {0} minutes. Cancelling queued results." -f $NoStartTimeoutMinutes) -ForegroundColor Red
-            Invoke-Vhlk -Session $session -ScriptBlock {
-                param($ProjectName)
-                Set-StrictMode -Version Latest
-                $ErrorActionPreference = "Continue"
-                $root = "C:\Program Files (x86)\Windows Kits\10\Hardware Lab Kit\Controller"
-                Add-Type -Path (Join-Path $root "microsoft.windows.kits.hardware.objectmodel.dll")
-                Add-Type -Path (Join-Path $root "microsoft.windows.kits.hardware.objectmodel.dbconnection.dll")
-                $pm = [Microsoft.Windows.Kits.Hardware.ObjectModel.DBConnection.DatabaseProjectManager]::new($env:COMPUTERNAME)
-                $project = $pm.GetProject($ProjectName)
-                foreach ($test in @($project.GetTests())) {
-                    foreach ($result in @($test.GetTestResults())) {
-                        if ([string]$result.Status -in @("InQueue", "Running")) {
-                            try { $result.Cancel() } catch {}
-                        }
-                    }
-                }
-            } -ArgumentList @($ProjectName) | Out-Null
+            Invoke-Vhlk -Session $session -ScriptBlock $remoteCancelQueuedOrRunning -ArgumentList @($ProjectName, $selectedTestNamesJson) | Out-Null
+            $stopReason = "NoStartTimeout"
             break
         }
 
         if ($PendingStartTimeoutSeconds -gt 0 -and -not $lastAnyStarted -and $status.InQueue -gt 0 -and ((Get-Date) - $start).TotalSeconds -ge $PendingStartTimeoutSeconds) {
             Write-DoneLine
             Write-Host ("vHLK tests stayed pending for {0} seconds. Cancelling queued results." -f $PendingStartTimeoutSeconds) -ForegroundColor Red
-            Invoke-Vhlk -Session $session -ScriptBlock {
-                param($ProjectName)
-                Set-StrictMode -Version Latest
-                $ErrorActionPreference = "Continue"
-                $root = "C:\Program Files (x86)\Windows Kits\10\Hardware Lab Kit\Controller"
-                Add-Type -Path (Join-Path $root "microsoft.windows.kits.hardware.objectmodel.dll")
-                Add-Type -Path (Join-Path $root "microsoft.windows.kits.hardware.objectmodel.dbconnection.dll")
-                $pm = [Microsoft.Windows.Kits.Hardware.ObjectModel.DBConnection.DatabaseProjectManager]::new($env:COMPUTERNAME)
-                $project = $pm.GetProject($ProjectName)
-                foreach ($test in @($project.GetTests())) {
-                    foreach ($result in @($test.GetTestResults())) {
-                        if ([string]$result.Status -in @("InQueue", "Running")) {
-                            try { $result.Cancel() } catch {}
-                        }
-                    }
-                }
-            } -ArgumentList @($ProjectName) | Out-Null
+            Invoke-Vhlk -Session $session -ScriptBlock $remoteCancelQueuedOrRunning -ArgumentList @($ProjectName, $selectedTestNamesJson) | Out-Null
+            $stopReason = "PendingStartTimeout"
             break
         }
 
         if ($TimeoutMinutes -gt 0 -and ((Get-Date) - $start).TotalMinutes -ge $TimeoutMinutes) {
             Write-DoneLine
             Write-Host ("Monitor timeout reached after {0} minutes." -f $TimeoutMinutes) -ForegroundColor Yellow
+            $stopReason = "Timeout"
             break
         }
 
@@ -822,6 +931,7 @@ try {
         CompletedAt = (Get-Date).ToString("s")
         InitialQueue = $init
         FinalStatus = $lastStatus
+        StopReason = $stopReason
         History = $history
     }
     $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "monitor-summary.json") -Encoding UTF8

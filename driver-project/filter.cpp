@@ -39,40 +39,93 @@ namespace
     const GUID VirtuaCamCustomProfileGuid =
         { 0x0bb8a130, 0x17c4, 0x40a4, { 0xa1, 0x7a, 0x7c, 0xb4, 0x43, 0x7f, 0x90, 0xe2 } };
 
-    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileMediaInfos[] = {
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileFullMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
-    KSCAMERA_PROFILE_PININFO CameraProfilePins[] = {
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileStandardMediaInfos[] = {
+        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+    };
+
+    KSCAMERA_PROFILE_PININFO CameraProfileFullPins[] = {
         {
             STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
             { 0, KSCameraProfileSensorType_RGB },
-            SIZEOF_ARRAY(CameraProfileMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileMediaInfos)
+            SIZEOF_ARRAY(CameraProfileFullMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileFullMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
             { 1, KSCameraProfileSensorType_RGB },
-            SIZEOF_ARRAY(CameraProfileMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileMediaInfos)
+            SIZEOF_ARRAY(CameraProfileFullMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileFullMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_STILL),
             { 2, KSCameraProfileSensorType_RGB },
-            SIZEOF_ARRAY(CameraProfileMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileMediaInfos)
+            SIZEOF_ARRAY(CameraProfileFullMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileFullMediaInfos)
         }
     };
 
-    const GUID CameraProfileIds[] = {
-        STATICGUIDOF(KSCAMERAPROFILE_VideoConferencing),
-        STATICGUIDOF(KSCAMERAPROFILE_VideoRecording),
-        STATICGUIDOF(KSCAMERAPROFILE_HighQualityPhoto),
-        STATICGUIDOF(KSCAMERAPROFILE_BalancedVideoAndPhoto),
-        VirtuaCamCustomProfileGuid
+    KSCAMERA_PROFILE_PININFO CameraProfileStandardPins[] = {
+        {
+            STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
+            { 0, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileStandardMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileStandardMediaInfos)
+        },
+        {
+            STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
+            { 1, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileStandardMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileStandardMediaInfos)
+        },
+        {
+            STATICGUIDOF(PINNAME_VIDEO_STILL),
+            { 2, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileStandardMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileStandardMediaInfos)
+        }
+    };
+
+    struct CameraProfileDescriptor
+    {
+        GUID ProfileId;
+        ULONG PinCount;
+        PKSCAMERA_PROFILE_PININFO Pins;
+    };
+
+    CameraProfileDescriptor CameraProfileDescriptors[] = {
+        {
+            STATICGUIDOF(KSCAMERAPROFILE_VideoRecording),
+            SIZEOF_ARRAY(CameraProfileFullPins),
+            CameraProfileFullPins
+        },
+        {
+            STATICGUIDOF(KSCAMERAPROFILE_VideoConferencing),
+            SIZEOF_ARRAY(CameraProfileStandardPins),
+            CameraProfileStandardPins
+        },
+        {
+            STATICGUIDOF(KSCAMERAPROFILE_HighQualityPhoto),
+            SIZEOF_ARRAY(CameraProfileStandardPins),
+            CameraProfileStandardPins
+        },
+        {
+            STATICGUIDOF(KSCAMERAPROFILE_BalancedVideoAndPhoto),
+            SIZEOF_ARRAY(CameraProfileStandardPins),
+            CameraProfileStandardPins
+        },
+        {
+            VirtuaCamCustomProfileGuid,
+            SIZEOF_ARRAY(CameraProfileStandardPins),
+            CameraProfileStandardPins
+        }
     };
 
     KSCAMERA_EXTENDEDPROP_PROFILE CurrentCameraProfile = {
@@ -198,14 +251,15 @@ namespace
         return CopyPropertyDataFromCaller(Irp, Data, sizeof(HANDLE), value, __alignof(HANDLE));
     }
 
-    bool IsPublishedCameraProfile(_In_ const GUID& ProfileId)
+    bool IsSupportedCameraProfileSelection(_In_ const GUID& ProfileId)
     {
-        if (IsEqualGUID(ProfileId, KSCAMERAPROFILE_Legacy)) {
+        if (IsEqualGUID(ProfileId, GUID_NULL) ||
+            IsEqualGUID(ProfileId, KSCAMERAPROFILE_Legacy)) {
             return true;
         }
 
-        for (ULONG i = 0; i < SIZEOF_ARRAY(CameraProfileIds); ++i) {
-            if (IsEqualGUID(ProfileId, CameraProfileIds[i])) {
+        for (ULONG i = 0; i < SIZEOF_ARRAY(CameraProfileDescriptors); ++i) {
+            if (IsEqualGUID(ProfileId, CameraProfileDescriptors[i].ProfileId)) {
                 return true;
             }
         }
@@ -779,12 +833,14 @@ SetCameraProfile(
     PKSCAMERA_EXTENDEDPROP_PROFILE Payload =
         reinterpret_cast<PKSCAMERA_EXTENDEDPROP_PROFILE>(Header + 1);
 
-    if (Header->PinId != KSCAMERA_EXTENDEDPROP_FILTERSCOPE ||
+    if (Header->Version != 1 ||
+        Header->PinId != KSCAMERA_EXTENDEDPROP_FILTERSCOPE ||
         Header->Size != payloadSize ||
+        Header->Capability != KSCAMERA_EXTENDEDPROP_CAPS_ASYNCCONTROL ||
         Header->Flags != 0 ||
         Payload->Index != 0 ||
         Payload->Reserved != 0 ||
-        !IsPublishedCameraProfile(Payload->ProfileId)) {
+        !IsSupportedCameraProfileSelection(Payload->ProfileId)) {
         Header->Result = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
         Irp->IoStatus.Information = payloadSize;
         return STATUS_INVALID_PARAMETER;
@@ -989,14 +1045,14 @@ VirtuaCamPublishCameraProfiles (
         return Status;
     }
 
-    for (ULONG i = 0; i < SIZEOF_ARRAY(CameraProfileIds); ++i) {
+    for (ULONG i = 0; i < SIZEOF_ARRAY(CameraProfileDescriptors); ++i) {
         KSDEVICE_PROFILE_INFO ProfileInfo = {};
         ProfileInfo.Type = KSDEVICE_PROFILE_TYPE_CAMERA;
         ProfileInfo.Size = sizeof(ProfileInfo);
-        ProfileInfo.Camera.Info.ProfileId = CameraProfileIds[i];
+        ProfileInfo.Camera.Info.ProfileId = CameraProfileDescriptors[i].ProfileId;
         ProfileInfo.Camera.Info.Index = 0;
-        ProfileInfo.Camera.Info.PinCount = SIZEOF_ARRAY(CameraProfilePins);
-        ProfileInfo.Camera.Info.Pins = CameraProfilePins;
+        ProfileInfo.Camera.Info.PinCount = CameraProfileDescriptors[i].PinCount;
+        ProfileInfo.Camera.Info.Pins = CameraProfileDescriptors[i].Pins;
         ProfileInfo.Camera.Reserved = 0;
         ProfileInfo.Camera.ConcurrencyCount = 0;
         ProfileInfo.Camera.Concurrency = NULL;

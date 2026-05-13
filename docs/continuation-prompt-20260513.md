@@ -4,6 +4,8 @@ You are continuing work in `C:\Users\philip\sauce\virtual-webcam\VirtuaCam` on b
 
 Rules from user:
 - Always use caveman skill.
+- - use any other skills as needed, but prioritize caveman.
+- - Use PowerShell/batch automation, not manual steps. this means that if a step can be automated, it should be automated, even if it's a one-time step. This includes parsing logs, exporting failed test lists, and running specific subsets of tests. and update docummentation so that user knows exatly what the automation does and how to run it. a batch script with a menu would be ideal for this. the selector in the batch script should use this template '[selector](../../../batch-scripts/binaries/selector.bat)'
 - Do not run full vHLK during fix batches.
 - After each fix batch, run only driver-test gates and whitebox/local checks.
 - After all batch fixes pass, run all vHLK tests minus all that have passed or are blocked/unrun, using the latest failed-test-name list as filter.
@@ -62,3 +64,7 @@ Useful source refs already consulted:
 - Microsoft Learn, `KSCAMERA_PROFILE_MEDIAINFO`: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ksmedia/ns-ksmedia-_kscamera_profile_mediainfo
 - Microsoft Learn, `IAMStreamConfig`: https://learn.microsoft.com/en-us/windows/win32/api/strmif/nn-strmif-iamstreamconfig
 - Microsoft Learn, PowerShell Direct and Hyper-V heartbeat/vmicvmsession docs for readiness flow.
+# most critical
+- for each task complete, check the box next to it. create a workflow of alll the steps listed here . the workflow shhould have clear stages, and each stage should have a checklist of tasks to complete. the workflow should be designed to ensure that all necessary steps are completed in the correct order, and that any issues are identified and addressed as early as possible in the process. the workflow should also include checkpoints for reviewing progress and making adjustments as needed. 
+
+- at the end i want a complete workflow checklist that I can use to track progress and ensure that all necessary steps are completed. if sth is not done justify why it is impossible or not applicable at this time, and document any blockers or issues encountered.

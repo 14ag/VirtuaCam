@@ -100,6 +100,9 @@ void SelectAudioForCameraPassthrough(int cameraIndex);
 void ApplySavedAudioSelection();
 bool HasArg(const std::wstring& cmdLine, const wchar_t* arg);
 bool TryGetArgU64(const std::wstring& cmdLine, const wchar_t* arg, UINT64& outValue);
+int PrintCapturableWindowsJson();
+std::wstring JsonEscape(const std::wstring& value);
+bool WriteStdoutText(const std::wstring& text);
 
 ULONG AspectRatioMask(AspectRatioMode mode)
 {
@@ -764,6 +767,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     logOpts.enabled = g_debugLoggingEnabled;
     VirtuaCamLog::Init(logOpts);
 
+    if (HasArg(cmdLine, L"--windows")) {
+        return PrintCapturableWindowsJson();
+    }
+
     g_silentStart = HasArg(cmdLine, L"/startup") || HasArg(cmdLine, L"-startup");
     if (g_silentStart) {
         VirtuaCamLog::LogLine(L"Startup mode: /startup (tray-silent)");
@@ -1160,4 +1167,82 @@ bool HasArg(const std::wstring& cmdLine, const wchar_t* arg)
 
     LocalFree(argv);
     return found;
+}
+
+std::wstring JsonEscape(const std::wstring& value)
+{
+    std::wstring out;
+    out.reserve(value.size() + 8);
+    for (wchar_t ch : value) {
+        switch (ch) {
+        case L'\\': out += L"\\\\"; break;
+        case L'"': out += L"\\\""; break;
+        case L'\b': out += L"\\b"; break;
+        case L'\f': out += L"\\f"; break;
+        case L'\n': out += L"\\n"; break;
+        case L'\r': out += L"\\r"; break;
+        case L'\t': out += L"\\t"; break;
+        default:
+            if (ch < 0x20) {
+                wchar_t escaped[7] = {};
+                swprintf_s(escaped, L"\\u%04x", static_cast<unsigned int>(ch));
+                out += escaped;
+            } else {
+                out += ch;
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+bool WriteStdoutText(const std::wstring& text)
+{
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!output || output == INVALID_HANDLE_VALUE) {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+        output = GetStdHandle(STD_OUTPUT_HANDLE);
+    }
+    if (!output || output == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    DWORD mode = 0;
+    if (GetConsoleMode(output, &mode)) {
+        DWORD written = 0;
+        return WriteConsoleW(output, text.c_str(), static_cast<DWORD>(text.size()), &written, nullptr) != FALSE;
+    }
+
+    const int bytesNeeded = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    if (bytesNeeded <= 0) {
+        return false;
+    }
+
+    std::string utf8(static_cast<size_t>(bytesNeeded), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), utf8.data(), bytesNeeded, nullptr, nullptr);
+    DWORD written = 0;
+    return WriteFile(output, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr) != FALSE;
+}
+
+int PrintCapturableWindowsJson()
+{
+    const auto windows = EnumerateWindows();
+    std::wstring json = L"[\r\n";
+    for (size_t i = 0; i < windows.size(); ++i) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(windows[i].hwnd, &pid);
+        json += L"  {\"hwnd\":";
+        json += std::to_wstring(static_cast<UINT64>(reinterpret_cast<UINT_PTR>(windows[i].hwnd)));
+        json += L",\"pid\":";
+        json += std::to_wstring(pid);
+        json += L",\"title\":\"";
+        json += JsonEscape(windows[i].title);
+        json += L"\"}";
+        if (i + 1 < windows.size()) {
+            json += L",";
+        }
+        json += L"\r\n";
+    }
+    json += L"]\r\n";
+    return WriteStdoutText(json) ? 0 : 1;
 }
