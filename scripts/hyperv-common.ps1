@@ -375,14 +375,14 @@ function Get-HvVmConnectionState {
         }
     }
 
-    if ($probe.LogonUIRunning -and -not $probe.ExplorerRunning) {
+    if ($probe.LogonUIRunning) {
         return [pscustomobject]@{
             State = "AwaitingLogin"
             Detail = "LogonUI.exe is running; login screen is displayed."
             LogonUIRunning = $true
             UserinitRunning = [bool]$probe.UserinitRunning
-            ExplorerRunning = $false
-            ExplorerAgeSeconds = $null
+            ExplorerRunning = [bool]$probe.ExplorerRunning
+            ExplorerAgeSeconds = $probe.ExplorerAgeSeconds
             PowerShellDirectReady = $true
             LastError = ""
             GuestComputerName = [string]$probe.ComputerName

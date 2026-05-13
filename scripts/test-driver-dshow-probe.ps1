@@ -97,6 +97,7 @@ try {
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\tools\artifact-manifest.ps1") -GuestPath $guestScriptToolsRoot -LogPath $logPath
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "tools\dshow-probe\build\dshow_probe.exe") -GuestPath $guestProbeToolsRoot -LogPath $logPath
 
+    Write-HvLog -Message "Installing staged package inside guest before DirectShow probes." -LogPath $logPath -Level STEP
     $install = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
         param($InstallScript)
 
@@ -119,6 +120,19 @@ try {
         Wait-HvVmRebootTransition -VmName $VmName -Credential $guestCred -TimeoutSeconds 90 -PollIntervalSeconds 3 -LogPath $logPath | Out-Null
         Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 360 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $logPath | Out-Null
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 240 -LogPath $logPath
+
+        $probePresent = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
+            param($ProbeExe)
+            Test-Path -LiteralPath $ProbeExe
+        } -ArgumentList $guestProbeExe
+        if (-not [bool]$probePresent) {
+            Write-HvLog -Message "Probe executable missing after reboot; copying it again." -LogPath $logPath -Level WARN
+            Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
+                param($ProbeToolsRoot)
+                $null = New-Item -ItemType Directory -Force -Path $ProbeToolsRoot
+            } -ArgumentList $guestProbeToolsRoot | Out-Null
+            Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "tools\dshow-probe\build\dshow_probe.exe") -GuestPath $guestProbeToolsRoot -LogPath $logPath
+        }
     }
 
     $results = @()

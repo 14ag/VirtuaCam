@@ -553,8 +553,14 @@ try {
     if (@($queue.QueueErrors).Count -gt 0) {
         throw "At least one smoke test failed to queue. See queue-result.json."
     }
-    if (@($queue.ActiveCancelErrors).Count -gt 0) {
+    $fatalActiveCancelErrors = @($queue.ActiveCancelErrors | Where-Object {
+        [string]$_ -notmatch "Job cannot be cancelled in\s+'PD'\s+pipeline"
+    })
+    if ($fatalActiveCancelErrors.Count -gt 0) {
         throw "At least one active queued/running result failed to cancel. See queue-result.json."
+    }
+    if (@($queue.ActiveCancelErrors).Count -gt 0) {
+        Write-Host "[WARN] HLK refused to cancel a result already in the PD pipeline; selected smoke tests were still queued and monitoring will continue." -ForegroundColor Yellow
     }
 
     Write-Host "    Selected tests:" -ForegroundColor Green

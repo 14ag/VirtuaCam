@@ -358,32 +358,49 @@ try {
         }
     }
 
-    Write-LiveLine "[0/?] - checking controller services + DUT readiness"
-    $readiness = Invoke-Vhlk -Session $session -ScriptBlock $remoteReadiness -ArgumentList @(
-        $ProjectName,
-        [string]$dutState.ComputerName,
-        (-not [bool]$NoSetDutReady))
-    $readiness | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "readiness.json") -Encoding UTF8
+    $readinessDeadline = (Get-Date).AddMinutes(15)
+    $readiness = $null
+    $machine = $null
+    do {
+        Write-LiveLine "[0/?] - checking controller services + DUT readiness"
+        $readiness = Invoke-Vhlk -Session $session -ScriptBlock $remoteReadiness -ArgumentList @(
+            $ProjectName,
+            [string]$dutState.ComputerName,
+            (-not [bool]$NoSetDutReady))
+        $readiness | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "readiness.json") -Encoding UTF8
 
-    if (@($readiness.BadControllerServices).Count -gt 0) {
-        throw "One or more controller services are not Running. See readiness.json."
-    }
-    if ($readiness.TestCount -lt 1) {
-        throw "HLK project has no tests."
-    }
-    $machine = if ($readiness.DutMachineAfter) { $readiness.DutMachineAfter } else { $readiness.DutMachineBefore }
-    if ($machine.IsRootOrDefaultPool) {
-        throw ("DUT machine is in root/default pool ({0}). Move it to a non-default child pool before scheduling tests." -f $machine.PoolName)
-    }
-    if ($readiness.SetReadyAttempted -and ([string]$readiness.SetReadyResult).StartsWith("ERROR:")) {
-        throw ("DUT machine could not be set Ready on controller: {0}" -f $readiness.SetReadyResult)
-    }
-    if ([string]$machine.Status -notin @("Ready", "Running")) {
-        throw ("DUT machine is not schedulable. Status={0}. See readiness.json." -f $machine.Status)
-    }
-    if ($null -ne $machine.HeartbeatAgeMinutes -and [double]$machine.HeartbeatAgeMinutes -gt $MaxHeartbeatAgeMinutes) {
-        throw ("DUT HLK heartbeat is stale: {0} minutes old. Controller is not seeing current HLKSvc heartbeat." -f $machine.HeartbeatAgeMinutes)
-    }
+        if (@($readiness.BadControllerServices).Count -gt 0) {
+            throw "One or more controller services are not Running. See readiness.json."
+        }
+        if ($readiness.TestCount -lt 1) {
+            throw "HLK project has no tests."
+        }
+        $machine = if ($readiness.DutMachineAfter) { $readiness.DutMachineAfter } else { $readiness.DutMachineBefore }
+        if ($machine.IsRootOrDefaultPool) {
+            throw ("DUT machine is in root/default pool ({0}). Move it to a non-default child pool before scheduling tests." -f $machine.PoolName)
+        }
+        if ($readiness.SetReadyAttempted -and ([string]$readiness.SetReadyResult).StartsWith("ERROR:")) {
+            throw ("DUT machine could not be set Ready on controller: {0}" -f $readiness.SetReadyResult)
+        }
+
+        $heartbeatFresh = $true
+        if ($null -ne $machine.HeartbeatAgeMinutes -and [double]$machine.HeartbeatAgeMinutes -gt $MaxHeartbeatAgeMinutes) {
+            $heartbeatFresh = $false
+        }
+        if ([string]$machine.Status -in @("Ready", "Running") -and $heartbeatFresh) {
+            break
+        }
+
+        if ((Get-Date) -ge $readinessDeadline) {
+            if (-not $heartbeatFresh) {
+                throw ("DUT HLK heartbeat is stale: {0} minutes old. Controller is not seeing current HLKSvc heartbeat." -f $machine.HeartbeatAgeMinutes)
+            }
+            throw ("DUT machine is not schedulable. Status={0}. See readiness.json." -f $machine.Status)
+        }
+
+        Write-Host ("[WARN] DUT machine status={0}; waiting for HLK client to become Ready/Running." -f $machine.Status) -ForegroundColor Yellow
+        Start-Sleep -Seconds 15
+    } while ($true)
 
     $remoteInit = {
         param($ProjectName, $PlaylistPath, $ReloadPlaylist, $CleanResults, $DryRun, $DutComputerName, [string[]]$SelectedTestNames)
@@ -556,8 +573,14 @@ try {
     if (@($init.QueueErrors).Count -gt 0) {
         throw "At least one selected test failed to queue. See queue-result.json."
     }
-    if (@($init.ActiveCancelErrors).Count -gt 0) {
+    $fatalActiveCancelErrors = @($init.ActiveCancelErrors | Where-Object {
+        [string]$_ -notmatch "Job cannot be cancelled in\s+'PD'\s+pipeline"
+    })
+    if ($fatalActiveCancelErrors.Count -gt 0) {
         throw "At least one active queued/running result failed to cancel. See queue-result.json."
+    }
+    if (@($init.ActiveCancelErrors).Count -gt 0) {
+        Write-Host "[WARN] HLK refused to cancel a result already in the PD pipeline; selected tests were still queued and monitoring will continue." -ForegroundColor Yellow
     }
     if (@($init.MissingSelectedTests).Count -gt 0) {
         throw "Some selected tests were not found in the HLK project. See queue-result.json."

@@ -45,6 +45,7 @@ static std::wstring GuidToString(REFGUID guid) {
 
 static std::wstring MediaSubtypeToString(const GUID& guid) {
     if (guid == MEDIASUBTYPE_RGB24) return L"MEDIASUBTYPE_RGB24";
+    if (guid == MEDIASUBTYPE_RGB32) return L"MEDIASUBTYPE_RGB32";
     if (guid == MEDIASUBTYPE_YUY2) return L"MEDIASUBTYPE_YUY2";
     if (guid == MEDIASUBTYPE_UYVY) return L"MEDIASUBTYPE_UYVY";
     if (guid == MEDIASUBTYPE_NV12) return L"MEDIASUBTYPE_NV12";
@@ -179,23 +180,45 @@ struct CapabilityInfo {
     DWORD compression = 0;
     REFERENCE_TIME avgTimePerFrame = 0;
     GUID subtype = GUID_NULL;
+    GUID formatType = GUID_NULL;
 };
 
 static bool ExtractCapability(const AM_MEDIA_TYPE& mt, CapabilityInfo* info) {
     if (!info) {
         return false;
     }
-    if (mt.formattype != FORMAT_VideoInfo || !mt.pbFormat || mt.cbFormat < sizeof(VIDEOINFOHEADER)) {
+    if (!mt.pbFormat) {
         return false;
     }
 
-    const auto* vih = reinterpret_cast<const VIDEOINFOHEADER*>(mt.pbFormat);
-    info->width = vih->bmiHeader.biWidth;
-    info->height = vih->bmiHeader.biHeight;
-    info->bitCount = vih->bmiHeader.biBitCount;
-    info->compression = vih->bmiHeader.biCompression;
-    info->avgTimePerFrame = vih->AvgTimePerFrame;
+    if (mt.formattype == FORMAT_VideoInfo) {
+        if (mt.cbFormat < sizeof(VIDEOINFOHEADER)) {
+            return false;
+        }
+
+        const auto* vih = reinterpret_cast<const VIDEOINFOHEADER*>(mt.pbFormat);
+        info->width = vih->bmiHeader.biWidth;
+        info->height = vih->bmiHeader.biHeight;
+        info->bitCount = vih->bmiHeader.biBitCount;
+        info->compression = vih->bmiHeader.biCompression;
+        info->avgTimePerFrame = vih->AvgTimePerFrame;
+    } else if (mt.formattype == FORMAT_VideoInfo2) {
+        if (mt.cbFormat < sizeof(VIDEOINFOHEADER2)) {
+            return false;
+        }
+
+        const auto* vih = reinterpret_cast<const VIDEOINFOHEADER2*>(mt.pbFormat);
+        info->width = vih->bmiHeader.biWidth;
+        info->height = vih->bmiHeader.biHeight;
+        info->bitCount = vih->bmiHeader.biBitCount;
+        info->compression = vih->bmiHeader.biCompression;
+        info->avgTimePerFrame = vih->AvgTimePerFrame;
+    } else {
+        return false;
+    }
+
     info->subtype = mt.subtype;
+    info->formatType = mt.formattype;
     return true;
 }
 
@@ -269,7 +292,8 @@ static HRESULT ApplyCapability(IPin* pin, const CapabilityInfo& requested) {
             info.height == requested.height &&
             info.bitCount == requested.bitCount &&
             info.compression == requested.compression &&
-            info.subtype == requested.subtype;
+            info.subtype == requested.subtype &&
+            info.formatType == requested.formatType;
 
         if (match) {
             result = config->SetFormat(mt);
@@ -294,6 +318,7 @@ static void PrintCapabilities(const std::vector<CapabilityInfo>& caps) {
         std::wcout
             << L"  [" << i << L"] "
             << cap.width << L"x" << cap.height
+            << L" format=" << (cap.formatType == FORMAT_VideoInfo2 ? L"VideoInfo2" : L"VideoInfo")
             << L" subtype=" << MediaSubtypeToString(cap.subtype)
             << L" bitCount=" << cap.bitCount
             << L" compression=" << FourCcToString(cap.compression)
@@ -503,6 +528,9 @@ int wmain(int argc, wchar_t** argv) {
             continue;
         }
         if (mode == L"yuy2" && cap.subtype != MEDIASUBTYPE_YUY2) {
+            continue;
+        }
+        if (mode == L"video2" && cap.formatType != FORMAT_VideoInfo2) {
             continue;
         }
         std::wcout << L"=== Probe: explicit format " << MediaSubtypeToString(cap.subtype) << L" ===" << std::endl;
