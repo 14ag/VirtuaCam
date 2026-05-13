@@ -22,6 +22,7 @@ static std::unique_ptr<VirtuaCam::Discovery> g_discovery;
 static std::unique_ptr<DriverBridge> g_driverBridge;
 static bool g_disconnectAttempted = false;
 static bool g_debugLoggingEnabled = false;
+static bool g_silentStart = false;
 
 typedef void (*PFN_InitializeBroker)();
 typedef void (*PFN_ShutdownBroker)();
@@ -59,6 +60,7 @@ static ULONG g_allowedAspectRatioMask = ASPECT_RATIO_MASK_ALL;
 static std::wstring g_audioCaptureDeviceName = L"Stereo Mix";
 static constexpr ULONGLONG kAppFrameIntervalMs = 33;
 static constexpr ULONGLONG kDefaultFeedRefreshMs = 1000;
+static constexpr ULONGLONG kSilentDriverInactiveExitMs = 5ull * 60ull * 1000ull;
 
 const wchar_t* SourceModeToString(SourceMode mode)
 {
@@ -762,8 +764,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     logOpts.enabled = g_debugLoggingEnabled;
     VirtuaCamLog::Init(logOpts);
 
-    const bool silentStart = HasArg(cmdLine, L"/startup") || HasArg(cmdLine, L"-startup");
-    if (silentStart) {
+    g_silentStart = HasArg(cmdLine, L"/startup") || HasArg(cmdLine, L"-startup");
+    if (g_silentStart) {
         VirtuaCamLog::LogLine(L"Startup mode: /startup (tray-silent)");
     }
 
@@ -824,7 +826,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     if (FAILED(hrDriver)) {
         VirtuaCamLog::LogHr(L"DriverBridge::Initialize failed", hrDriver);
         VirtuaCamLog::LogLine(std::format(L"DriverBridge last error: {}", g_driverBridge->GetLastError()));
-        if (!silentStart) {
+        if (!g_silentStart) {
             std::wstring message =
                 L"DriverBridge failed to connect to the avshws kernel driver.\n"
                 L"Make sure driver-project is installed.";
@@ -846,6 +848,7 @@ void OnIdle() {
     static ULONGLONG s_nextFrameTick = 0;
     static BrokerState s_lastBrokerState = BrokerState::Searching;
     static bool s_lastDriverActive = false;
+    static ULONGLONG s_driverInactiveSinceTick = 0;
     const ULONGLONG now = GetTickCount64();
     const ULONGLONG frameIntervalMs = (s_lastDriverActive && s_lastBrokerState == BrokerState::Connected)
         ? kAppFrameIntervalMs
@@ -865,6 +868,17 @@ void OnIdle() {
         brokerState = g_pfnGetBrokerState();
         const bool driverActive = GetDriverBridgeStatus();
         UpdateTelemetry(brokerState, driverActive);
+        if (driverActive) {
+            s_driverInactiveSinceTick = 0;
+        } else if (g_silentStart) {
+            if (s_driverInactiveSinceTick == 0) {
+                s_driverInactiveSinceTick = now;
+            } else if (now - s_driverInactiveSinceTick >= kSilentDriverInactiveExitMs) {
+                VirtuaCamLog::LogLine(L"Startup mode: driver inactive for 5 minutes; exiting app while watcher remains active");
+                PostMessageW(g_hMainWnd, WM_CLOSE, 0, 0);
+                return;
+            }
+        }
         s_lastBrokerState = brokerState;
         s_lastDriverActive = driverActive;
     }

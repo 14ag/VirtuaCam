@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for contributing to Virtual Webcam v2.
+Thanks for contributing to VirtuaCam.
 
 ## Before you start
 
@@ -56,10 +56,9 @@ Common commands:
 
 ```powershell
 .\scripts\build-all.ps1
-.\scripts\build-all.ps1 -Clean
-.\scripts\build-all.ps1 -SkipDriver
-.\scripts\build-all.ps1 -SkipSoftware
 ```
+
+The build is clean by default and always stages the complete software and driver package.
 
 Installer command:
 

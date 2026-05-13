@@ -2,7 +2,7 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Platform: Windows 10+ / 11](https://img.shields.io/badge/Platform-Windows_10%2B_/_11-blue.svg) ![Language: C++20](https://img.shields.io/badge/Language-C++20-orange.svg)
 
-VirtuaCam is the user-mode side of Virtual Webcam v2. It runs the tray controller, producer host, GPU broker, and driver bridge that feed frames into the `avshws` AVStream camera driver.
+VirtuaCam is the user-mode side of VirtuaCam. It runs the tray controller, producer host, GPU broker, and driver bridge that feed frames into the `avshws` AVStream camera driver.
 
 ## Architecture: Direct-to-Driver Path
 

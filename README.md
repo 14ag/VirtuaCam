@@ -1,4 +1,4 @@
-# Virtual Webcam
+# VirtuaCam
 
 Windows virtual camera stack for Windows built from:
 
@@ -40,7 +40,9 @@ Requirements:
 4. CMake 3.20 or newer
 5. Git
 
-3. Build the full staged package with the single build script:
+## Build
+
+Build the full staged package with the single build script:
 
 ```powershell
 .\scripts\build-all.ps1
@@ -52,17 +54,20 @@ Useful variants stay on the same script:
 
 ```powershell
 .\scripts\build-all.ps1 -Clean
-.\scripts\build-all.ps1 -SkipDriver
-.\scripts\build-all.ps1 -SkipSoftware
 ```
 
-4. If the installer later reports `TESTSIGNING is OFF`, enable it once and reboot:
+Clean is the default behavior. The script always builds and stages the full package.
+During driver signing the build creates `.driver-package-work` as a temporary INF/catalog workspace. The final installable files are copied to `.\output`; installers should not read from `.driver-package-work`.
+
+## Install
+
+If the installer later reports `TESTSIGNING is OFF`, enable it once and reboot:
 
 ```powershell
 bcdedit /set testsigning on
 ```
 
-5. Open an elevated PowerShell window in the repo root and install from the single install script:
+Open an elevated PowerShell window in the repo root and install from the single install script:
 
 ```powershell
 .\scripts\install-all.ps1
@@ -70,15 +75,17 @@ bcdedit /set testsigning on
 
 This script is the only install entrypoint. It always installs from `.\output`.
 
-6. Launch the tray app:
+## Run
+
+Launch the tray app:
 
 ```powershell
 .\output\VirtuaCam.exe
 ```
 
-7. Use the tray icon to choose a source.
+Use the tray icon to choose a source.
 
-8. Open the target app and select `VirtuaCam` or `Virtual Camera Driver` as the camera.
+Open the target app and select `VirtuaCam` or `Virtual Camera Driver` as the camera.
 
 Staged artifact names are centralized in `scripts/tools/artifact-manifest.ps1`, which is shared by the build and install scripts.
 

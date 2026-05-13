@@ -1,6 +1,6 @@
 # VirtuaCam Kernel Driver
 
-Windows virtual camera driver using the AVStream `avshws` minidriver. It is the camera-device frame sink for **VirtuaCam v2**.
+Windows virtual camera driver using the AVStream `avshws` minidriver. It is the camera-device frame sink for **VirtuaCam**.
 
 ## Architecture
 - **Type**: Kernel-mode driver (AVStream).
