@@ -239,6 +239,13 @@ public:
         IN PIRP Irp
         );
 
+    static
+    NTSTATUS
+    DispatchClose (
+        IN PKSPIN Pin,
+        IN PIRP Irp
+        );
+
     //
     // DispatchSetState():
     //

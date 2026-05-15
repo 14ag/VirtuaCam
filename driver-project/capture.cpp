@@ -488,6 +488,29 @@ Return Value:
 
 /*************************************************/
 
+NTSTATUS
+CCapturePin::
+DispatchClose (
+    IN PKSPIN Pin,
+    IN PIRP Irp
+    )
+{
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(Irp);
+
+    CCapturePin *CapPin =
+        reinterpret_cast <CCapturePin *> (Pin -> Context);
+
+    if (CapPin) {
+        (void)CapPin -> SetState(KSSTATE_STOP, KSSTATE_RUN);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/*************************************************/
+
 #ifdef ALLOC_PRAGMA
 #pragma code_seg()
 #endif // ALLOC_PRAGMA
@@ -2206,7 +2229,7 @@ const
 KSPIN_DISPATCH
 CapturePinDispatch = {
     CCapturePin::DispatchCreate,            // Pin Create
-    NULL,                                   // Pin Close
+    CCapturePin::DispatchClose,             // Pin Close
     CCapturePin::DispatchProcess,           // Pin Process
     NULL,                                   // Pin Reset
     CCapturePin::DispatchSetFormat,         // Pin Set Data Format

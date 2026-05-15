@@ -35,6 +35,7 @@ private:
     // mechanism for resource acquisition on the device.
     //
     LONG m_PinsWithResources;
+    LONG m_RemovePending;
 
     //
     // Since we don't have physical hardware, this provides the hardware
@@ -147,6 +148,11 @@ private:
     PnpSurpriseRemoval (
         );
 
+    NTSTATUS
+    QueryCapabilities (
+        IN PDEVICE_CAPABILITIES Capabilities
+        );
+
     void
     QuiesceHardware (
         IN BOOLEAN ReleaseAdapter,
@@ -180,7 +186,22 @@ public:
     CCaptureDevice (
         IN PKSDEVICE Device
         ) :
-        m_Device (Device)
+        m_Device (Device),
+        m_PinsWithResources (0),
+        m_RemovePending (0),
+        m_HardwareSimulation (NULL),
+        m_ImageSynth (NULL),
+        m_VideoInfoHeaderStorage (),
+        m_InterruptTime (0),
+        m_LastMappingsCompleted (0),
+        m_DmaAdapterObject (NULL),
+        m_NumberOfMapRegisters (0),
+        m_CaptureSink (NULL),
+        m_CaptureSinks (),
+        m_CaptureSinkCount (0),
+        m_VideoInfoHeader (NULL),
+        m_PowerSavedHardwareState (HardwareStopped),
+        m_PowerRestartPending (FALSE)
     {
     }
 
@@ -333,6 +354,22 @@ public:
 
     static
     NTSTATUS
+    DispatchPnpQueryCapabilities (
+        IN PKSDEVICE Device,
+        IN PIRP Irp,
+        IN PDEVICE_CAPABILITIES Capabilities
+        )
+    {
+        UNREFERENCED_PARAMETER(Irp);
+        return
+            (reinterpret_cast <CCaptureDevice *> (Device -> Context)) ->
+            QueryCapabilities (
+                Capabilities
+                );
+    }
+
+    static
+    NTSTATUS
     DispatchQueryPower (
         IN PKSDEVICE Device,
         IN PIRP Irp,
@@ -399,6 +436,21 @@ public:
     ULONG
     GetAcquiredResourceCount (
         );
+
+    void
+    SetRemovePending (
+        IN BOOLEAN Pending
+        )
+    {
+        InterlockedExchange(&m_RemovePending, Pending ? 1 : 0);
+    }
+
+    BOOLEAN
+    IsRemovePending (
+        )
+    {
+        return (InterlockedCompareExchange(&m_RemovePending, 0, 0) != 0);
+    }
 
     //
     // Start():

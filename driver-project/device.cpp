@@ -342,6 +342,8 @@ Return Value:
     NTSTATUS Status = STATUS_SUCCESS;
 
     if (!m_Device -> Started) {
+        SetRemovePending(FALSE);
+
         // Create the Filter for the device
         WCHAR filterFactoryName[] = L"{6B2F0F9A-4FCB-4C93-9580-2152A76E2D44}";
         PKSFILTERFACTORY filterFactory = NULL;
@@ -479,7 +481,14 @@ CCaptureDevice::
 PnpQueryRemove (
     )
 {
-    DbgPrint("[avshws] PnpQueryRemove device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
+    LONG pinsWithResources = InterlockedCompareExchange(&m_PinsWithResources, 0, 0);
+    DbgPrint(
+        "[avshws] PnpQueryRemove device=%p pins=%ld irql=%lu\n",
+        this,
+        pinsWithResources,
+        (ULONG)KeGetCurrentIrql());
+
+    SetRemovePending(TRUE);
     return STATUS_SUCCESS;
 }
 
@@ -489,6 +498,7 @@ PnpCancelRemove (
     )
 {
     DbgPrint("[avshws] PnpCancelRemove device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
+    SetRemovePending(FALSE);
 }
 
 void
@@ -496,6 +506,7 @@ CCaptureDevice::
 PnpRemove (
     )
 {
+    SetRemovePending(TRUE);
     QuiesceHardware(TRUE, "PnpRemove");
 }
 
@@ -504,7 +515,33 @@ CCaptureDevice::
 PnpSurpriseRemoval (
     )
 {
+    SetRemovePending(TRUE);
     QuiesceHardware(TRUE, "PnpSurpriseRemoval");
+}
+
+NTSTATUS
+CCaptureDevice::
+QueryCapabilities (
+    IN PDEVICE_CAPABILITIES Capabilities
+    )
+{
+    PAGED_CODE();
+
+    if (!Capabilities || Capabilities->Version < 1) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Capabilities->Removable = TRUE;
+    Capabilities->SurpriseRemovalOK = TRUE;
+
+    DbgPrint(
+        "[avshws] QueryCapabilities device=%p removable=%lu surpriseRemovalOK=%lu irql=%lu\n",
+        this,
+        (ULONG)Capabilities->Removable,
+        (ULONG)Capabilities->SurpriseRemovalOK,
+        (ULONG)KeGetCurrentIrql());
+
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -1194,7 +1231,7 @@ CaptureDeviceDispatch = {
     CCaptureDevice::DispatchPnpQueryRemove, // Pnp Query Remove
     CCaptureDevice::DispatchPnpCancelRemove,// Pnp Cancel Remove
     CCaptureDevice::DispatchPnpRemove,      // Pnp Remove
-    NULL,                                   // Pnp Query Capabilities
+    CCaptureDevice::DispatchPnpQueryCapabilities, // Pnp Query Capabilities
     CCaptureDevice::DispatchPnpSurpriseRemoval, // Pnp Surprise Removal
     CCaptureDevice::DispatchQueryPower,     // Power Query Power
     CCaptureDevice::DispatchSetPower,       // Power Set Power

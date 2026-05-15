@@ -54,10 +54,7 @@ public:
     //
     CCaptureFilter (
         IN PKSFILTER Filter
-        ) :
-        m_Filter (Filter)
-    {
-    }
+        );
 
     //
     // ~CCaptureFilter():
@@ -68,6 +65,13 @@ public:
         )
     {
     }
+
+    static
+    NTSTATUS
+    DispatchClose (
+        IN PKSFILTER Filter,
+        IN PIRP Irp
+        );
 
     //
     // DispatchCreate():

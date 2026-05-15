@@ -291,6 +291,35 @@ namespace
 }
 
 
+CCaptureFilter::
+CCaptureFilter (
+    IN PKSFILTER Filter
+    ) :
+    m_Filter (Filter)
+{
+    PAGED_CODE();
+}
+
+/*************************************************/
+
+NTSTATUS
+CCaptureFilter::
+DispatchClose (
+    IN PKSFILTER Filter,
+    IN PIRP Irp
+    )
+{
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(Filter);
+    UNREFERENCED_PARAMETER(Irp);
+
+    return STATUS_SUCCESS;
+}
+
+/*************************************************/
+
+
 NTSTATUS
 CCaptureFilter::
 DispatchCreate (
@@ -325,6 +354,14 @@ Return Value:
     PAGED_CODE();
 
     NTSTATUS Status = STATUS_SUCCESS;
+    PKSDEVICE Device = KsFilterGetDevice(Filter);
+    if (Device && Device->Context) {
+        CCaptureDevice *CapDevice =
+            reinterpret_cast<CCaptureDevice*>(Device->Context);
+        if (CapDevice->IsRemovePending()) {
+            return STATUS_DELETE_PENDING;
+        }
+    }
 
     CCaptureFilter *CapFilter = new (NonPagedPoolNx, 'liFC') CCaptureFilter (Filter);
 
@@ -1189,7 +1226,7 @@ const
 KSFILTER_DISPATCH
 CaptureFilterDispatch = {
     CCaptureFilter::DispatchCreate,         // Filter Create
-    NULL,                                   // Filter Close
+    CCaptureFilter::DispatchClose,          // Filter Close
     NULL,                                   // Filter Process
     NULL                                    // Filter Reset
 };
