@@ -1,0 +1,8 @@
+Does SKILL.md have valid frontmatter with name and description?
+Does the description include realistic trigger phrases for "run tests" and vHLK test runs?
+Does SKILL.md route the agent to scripts/RUN-TESTS.md before repo scanning?
+Does SKILL.md name wiki/Testing.md and wiki/vHLK-Fix-Workflow.md as current-state references?
+Does SKILL.md state the local, driver-test, failed-only vHLK, final vHLK, and post-vHLK stages?
+Does SKILL.md include the 2-failure research gate, 10-failure hard stop, and 5-reconnect cap?
+Does SKILL.md forbid ready-to-ship assertions before all gates pass?
+Are all non-root files in the skill folder explicitly mentioned by SKILL.md?
