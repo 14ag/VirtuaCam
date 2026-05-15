@@ -39,57 +39,189 @@ namespace
     const GUID VirtuaCamCustomProfileGuid =
         { 0x0bb8a130, 0x17c4, 0x40a4, { 0xa1, 0x7a, 0x7c, 0xb4, 0x43, 0x7f, 0x90, 0xe2 } };
 
-    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileFullMediaInfos[] = {
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoRecordingPreviewMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
-    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileStandardMediaInfos[] = {
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoRecordingCaptureMediaInfos[] = {
+        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoRecordingStillMediaInfos[] = {
+        { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 0, 0 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoConferencingPreviewMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
-    KSCAMERA_PROFILE_PININFO CameraProfileFullPins[] = {
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoConferencingCaptureMediaInfos[] = {
+        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoConferencingStillMediaInfos[] = {
+        { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileHighQualityPhotoPreviewMediaInfos[] = {
+        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileHighQualityPhotoCaptureMediaInfos[] = {
+        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileHighQualityPhotoStillMediaInfos[] = {
+        { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileBalancedVideoAndPhotoPreviewMediaInfos[] = {
+        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileBalancedVideoAndPhotoCaptureMediaInfos[] = {
+        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileBalancedVideoAndPhotoStillMediaInfos[] = {
+        { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileCustomPreviewMediaInfos[] = {
+        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileCustomCaptureMediaInfos[] = {
+        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+    };
+
+    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileCustomStillMediaInfos[] = {
+        { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 }
+    };
+
+    KSCAMERA_PROFILE_PININFO CameraProfileVideoRecordingPins[] = {
         {
             STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
             { 0, KSCameraProfileSensorType_RGB },
-            SIZEOF_ARRAY(CameraProfileFullMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileFullMediaInfos)
+            SIZEOF_ARRAY(CameraProfileVideoRecordingPreviewMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoRecordingPreviewMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
             { 1, KSCameraProfileSensorType_RGB },
-            SIZEOF_ARRAY(CameraProfileFullMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileFullMediaInfos)
+            SIZEOF_ARRAY(CameraProfileVideoRecordingCaptureMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoRecordingCaptureMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_STILL),
             { 2, KSCameraProfileSensorType_RGB },
-            SIZEOF_ARRAY(CameraProfileFullMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileFullMediaInfos)
+            SIZEOF_ARRAY(CameraProfileVideoRecordingStillMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoRecordingStillMediaInfos)
         }
     };
 
-    KSCAMERA_PROFILE_PININFO CameraProfileStandardPins[] = {
+    KSCAMERA_PROFILE_PININFO CameraProfileVideoConferencingPins[] = {
         {
             STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
             { 0, KSCameraProfileSensorType_RGB },
-            SIZEOF_ARRAY(CameraProfileStandardMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileStandardMediaInfos)
+            SIZEOF_ARRAY(CameraProfileVideoConferencingPreviewMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoConferencingPreviewMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
             { 1, KSCameraProfileSensorType_RGB },
-            SIZEOF_ARRAY(CameraProfileStandardMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileStandardMediaInfos)
+            SIZEOF_ARRAY(CameraProfileVideoConferencingCaptureMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoConferencingCaptureMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_STILL),
             { 2, KSCameraProfileSensorType_RGB },
-            SIZEOF_ARRAY(CameraProfileStandardMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileStandardMediaInfos)
+            SIZEOF_ARRAY(CameraProfileVideoConferencingStillMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoConferencingStillMediaInfos)
+        }
+    };
+
+    KSCAMERA_PROFILE_PININFO CameraProfileHighQualityPhotoPins[] = {
+        {
+            STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
+            { 0, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileHighQualityPhotoPreviewMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileHighQualityPhotoPreviewMediaInfos)
+        },
+        {
+            STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
+            { 1, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileHighQualityPhotoCaptureMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileHighQualityPhotoCaptureMediaInfos)
+        },
+        {
+            STATICGUIDOF(PINNAME_VIDEO_STILL),
+            { 2, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileHighQualityPhotoStillMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileHighQualityPhotoStillMediaInfos)
+        }
+    };
+
+    KSCAMERA_PROFILE_PININFO CameraProfileBalancedVideoAndPhotoPins[] = {
+        {
+            STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
+            { 0, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileBalancedVideoAndPhotoPreviewMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileBalancedVideoAndPhotoPreviewMediaInfos)
+        },
+        {
+            STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
+            { 1, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileBalancedVideoAndPhotoCaptureMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileBalancedVideoAndPhotoCaptureMediaInfos)
+        },
+        {
+            STATICGUIDOF(PINNAME_VIDEO_STILL),
+            { 2, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileBalancedVideoAndPhotoStillMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileBalancedVideoAndPhotoStillMediaInfos)
+        }
+    };
+
+    KSCAMERA_PROFILE_PININFO CameraProfileCustomPins[] = {
+        {
+            STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
+            { 0, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileCustomPreviewMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileCustomPreviewMediaInfos)
+        },
+        {
+            STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
+            { 1, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileCustomCaptureMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileCustomCaptureMediaInfos)
+        },
+        {
+            STATICGUIDOF(PINNAME_VIDEO_STILL),
+            { 2, KSCameraProfileSensorType_RGB },
+            SIZEOF_ARRAY(CameraProfileCustomStillMediaInfos),
+            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileCustomStillMediaInfos)
         }
     };
 
@@ -103,28 +235,28 @@ namespace
     CameraProfileDescriptor CameraProfileDescriptors[] = {
         {
             STATICGUIDOF(KSCAMERAPROFILE_VideoRecording),
-            SIZEOF_ARRAY(CameraProfileFullPins),
-            CameraProfileFullPins
+            SIZEOF_ARRAY(CameraProfileVideoRecordingPins),
+            CameraProfileVideoRecordingPins
         },
         {
             STATICGUIDOF(KSCAMERAPROFILE_VideoConferencing),
-            SIZEOF_ARRAY(CameraProfileStandardPins),
-            CameraProfileStandardPins
+            SIZEOF_ARRAY(CameraProfileVideoConferencingPins),
+            CameraProfileVideoConferencingPins
         },
         {
             STATICGUIDOF(KSCAMERAPROFILE_HighQualityPhoto),
-            SIZEOF_ARRAY(CameraProfileStandardPins),
-            CameraProfileStandardPins
+            SIZEOF_ARRAY(CameraProfileHighQualityPhotoPins),
+            CameraProfileHighQualityPhotoPins
         },
         {
             STATICGUIDOF(KSCAMERAPROFILE_BalancedVideoAndPhoto),
-            SIZEOF_ARRAY(CameraProfileStandardPins),
-            CameraProfileStandardPins
+            SIZEOF_ARRAY(CameraProfileBalancedVideoAndPhotoPins),
+            CameraProfileBalancedVideoAndPhotoPins
         },
         {
             VirtuaCamCustomProfileGuid,
-            SIZEOF_ARRAY(CameraProfileStandardPins),
-            CameraProfileStandardPins
+            SIZEOF_ARRAY(CameraProfileCustomPins),
+            CameraProfileCustomPins
         }
     };
 
