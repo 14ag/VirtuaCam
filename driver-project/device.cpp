@@ -359,9 +359,13 @@ Return Value:
         KsReleaseDevice(m_Device);
 
         if (NT_SUCCESS(Status)) {
+            m_FilterFactory = filterFactory;
+            SetFilterFactoryDeviceClassesState(TRUE, "PnpStart");
             Status = VirtuaCamPublishCameraProfiles(filterFactory);
         }
 
+    } else {
+        SetFilterFactoryDeviceClassesState(TRUE, "PnpStart");
     }
     //
     // By PnP, it's possible to receive multiple starts without an intervening
@@ -403,6 +407,26 @@ Return Value:
 #ifdef ALLOC_PRAGMA
 #pragma code_seg(push, avshws_pnpstopseg, ".text")
 #endif // ALLOC_PRAGMA
+
+void
+CCaptureDevice::
+SetFilterFactoryDeviceClassesState (
+    IN BOOLEAN Enabled,
+    IN PCSTR Reason
+    )
+{
+    if (!m_FilterFactory) {
+        return;
+    }
+
+    NTSTATUS status = KsFilterFactorySetDeviceClassesState(m_FilterFactory, Enabled);
+    DbgPrint(
+        "[avshws] %s filterFactory=%p deviceClasses=%lu status=0x%08x\n",
+        Reason,
+        m_FilterFactory,
+        (ULONG)Enabled,
+        (ULONG)status);
+}
 
 void
 CCaptureDevice::
@@ -456,7 +480,9 @@ Return Value:
 --*/
 
 {
+    SetFilterFactoryDeviceClassesState(FALSE, "PnpStop");
     QuiesceHardware(FALSE, "PnpStop");
+    m_FilterFactory = NULL;
 }
 
 NTSTATUS
@@ -489,6 +515,12 @@ PnpQueryRemove (
         (ULONG)KeGetCurrentIrql());
 
     SetRemovePending(TRUE);
+    SetFilterFactoryDeviceClassesState(FALSE, "PnpQueryRemove");
+    if (pinsWithResources > 0 && m_HardwareSimulation) {
+        NotifyCameraState(FALSE);
+        (void)m_HardwareSimulation -> Stop ();
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -497,8 +529,22 @@ CCaptureDevice::
 PnpCancelRemove (
     )
 {
-    DbgPrint("[avshws] PnpCancelRemove device=%p irql=%lu\n", this, (ULONG)KeGetCurrentIrql());
+    LONG pinsWithResources = InterlockedCompareExchange(&m_PinsWithResources, 0, 0);
+    DbgPrint(
+        "[avshws] PnpCancelRemove device=%p pins=%ld irql=%lu\n",
+        this,
+        pinsWithResources,
+        (ULONG)KeGetCurrentIrql());
+
     SetRemovePending(FALSE);
+    SetFilterFactoryDeviceClassesState(TRUE, "PnpCancelRemove");
+    if (pinsWithResources > 0 && m_HardwareSimulation) {
+        NTSTATUS status = Start ();
+        DbgPrint("[avshws] PnpCancelRemove restart status=0x%08x\n", (ULONG)status);
+        if (NT_SUCCESS(status)) {
+            NotifyCameraState(TRUE);
+        }
+    }
 }
 
 void
@@ -507,7 +553,9 @@ PnpRemove (
     )
 {
     SetRemovePending(TRUE);
+    SetFilterFactoryDeviceClassesState(FALSE, "PnpRemove");
     QuiesceHardware(TRUE, "PnpRemove");
+    m_FilterFactory = NULL;
 }
 
 void
@@ -516,7 +564,9 @@ PnpSurpriseRemoval (
     )
 {
     SetRemovePending(TRUE);
+    SetFilterFactoryDeviceClassesState(FALSE, "PnpSurpriseRemoval");
     QuiesceHardware(TRUE, "PnpSurpriseRemoval");
+    m_FilterFactory = NULL;
 }
 
 NTSTATUS

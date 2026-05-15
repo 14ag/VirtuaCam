@@ -377,6 +377,16 @@ Return Value:
 
     NTSTATUS Status = STATUS_SUCCESS;
 
+    PKSDEVICE Device = KsPinGetDevice (Pin);
+    if (!Device) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    CCaptureDevice *CapDevice = reinterpret_cast <CCaptureDevice *> (Device -> Context);
+    if (!CapDevice || CapDevice -> IsRemovePending ()) {
+        return STATUS_DELETE_PENDING;
+    }
+
     CCapturePin *CapPin = new (NonPagedPoolNx, 'niPC') CCapturePin (Pin);
 
     if (!CapPin) {
@@ -942,6 +952,11 @@ Return Value:
             // This means we do not fail creation of a filter because of
             // limited hardware resources.
             //
+            if (!m_Device || m_Device -> IsRemovePending ()) {
+                Status = STATUS_DELETE_PENDING;
+                break;
+            }
+
             if (FromState == KSSTATE_STOP) {
                 Status = m_Device -> AcquireHardwareResources (
                     this,
@@ -1034,6 +1049,11 @@ Return Value:
             // Start the hardware simulation or unpause it depending on
             // whether we're initially running or we've paused and restarted.
             //
+            if (!m_Device || m_Device -> IsRemovePending ()) {
+                Status = STATUS_DELETE_PENDING;
+                break;
+            }
+
             if (m_HardwareState == HardwarePaused) {
                 Status = m_Device -> Pause (FALSE);
             } else {

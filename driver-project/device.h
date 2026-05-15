@@ -29,6 +29,7 @@ private:
     // The AVStream device we're associated with.
     //
     PKSDEVICE m_Device;
+    PKSFILTERFACTORY m_FilterFactory;
 
     //
     // Number of pins with resources acquired.  This is used as a locking
@@ -174,6 +175,12 @@ private:
         IN DEVICE_POWER_STATE From
         );
 
+    void
+    SetFilterFactoryDeviceClassesState (
+        IN BOOLEAN Enabled,
+        IN PCSTR Reason
+        );
+
 public:
 
     //
@@ -187,6 +194,7 @@ public:
         IN PKSDEVICE Device
         ) :
         m_Device (Device),
+        m_FilterFactory (NULL),
         m_PinsWithResources (0),
         m_RemovePending (0),
         m_HardwareSimulation (NULL),
