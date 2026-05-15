@@ -55,7 +55,7 @@ try {
     Write-HvLog -Message "Installing staged package in DUT for vHLK." -LogPath $logPath -Level STEP
     $install = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
         param($InstallScript)
-        $lines = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript 2>&1
+        $lines = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript -SkipWatcherService 2>&1
         [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Output = [string]::Join([Environment]::NewLine, @($lines | ForEach-Object { [string]$_ }))

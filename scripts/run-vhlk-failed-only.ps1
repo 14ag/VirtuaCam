@@ -3,6 +3,7 @@ param(
     [string]$TestNameListPath = "",
     [int]$ResearchGateFailureCount = 2,
     [int]$StopOnFailureCount = 10,
+    [int]$MaxControllerReconnectFailures = 5,
     [int]$PendingStartTimeoutSeconds = 300,
     [int]$TimeoutMinutes = 60,
     [switch]$SkipDutInstall,
@@ -43,6 +44,7 @@ if (-not $SkipDutInstall) {
     -PendingStartTimeoutSeconds $PendingStartTimeoutSeconds `
     -TimeoutMinutes $TimeoutMinutes `
     -ResearchGateFailureCount $ResearchGateFailureCount `
-    -StopOnFailureCount $StopOnFailureCount
+    -StopOnFailureCount $StopOnFailureCount `
+    -MaxControllerReconnectFailures $MaxControllerReconnectFailures
 
 exit $LASTEXITCODE

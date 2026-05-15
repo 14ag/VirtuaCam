@@ -10,6 +10,7 @@ param(
     [int]$PendingStartTimeoutSeconds = 90,
     [string]$TestNamePattern = "",
     [int]$MaxHeartbeatAgeMinutes = 10,
+    [int]$MaxControllerReconnectFailures = 5,
     [string]$LabSwitchName = "hlk-lab",
     [string]$LabHostIp = "192.168.240.1",
     [string]$LabControllerIp = "192.168.240.10",
@@ -640,6 +641,8 @@ try {
     $lastAnyStarted = $null
     $lastStatus = $null
     $tick = 0
+    $stopReason = ""
+    $controllerReconnectFailures = 0
     $spinner = @("|", "/", "-", "\")
 
     while ((Get-Date) -lt $deadline) {
@@ -660,9 +663,27 @@ try {
                     Remove-PSSession -Session $vhlkSession -ErrorAction SilentlyContinue
                 }
                 $vhlkSession = Wait-HvPowerShellDirect -VmName $VhlkVmName -Credential $vhlkCred -TimeoutSeconds 60 -LogPath $logPath 6>$null
+                $controllerReconnectFailures = 0
             }
             catch {
-                Write-HvLog -Message ("Controller session reopen failed; will retry. {0}" -f $_.Exception.Message) -LogPath $logPath -Level WARN
+                $controllerReconnectFailures++
+                Write-HvLog -Message ("Controller session reopen failed ({0}/{1}); will retry. {2}" -f $controllerReconnectFailures, $MaxControllerReconnectFailures, $_.Exception.Message) -LogPath $logPath -Level WARN
+                if ($controllerReconnectFailures -ge $MaxControllerReconnectFailures) {
+                    Write-DoneLine
+                    Write-Host ("[ERROR] Controller connection failed {0} times. Monitoring stopped." -f $MaxControllerReconnectFailures) -ForegroundColor Red
+                    $connectionGate = [pscustomobject]@{
+                        Trigger = "MaxControllerReconnectFailures"
+                        Threshold = $MaxControllerReconnectFailures
+                        ConsecutiveFailures = $controllerReconnectFailures
+                        LastError = $_.Exception.Message
+                        LastStatus = $lastStatus
+                        CheckedAt = (Get-Date).ToString("s")
+                    }
+                    $connectionGate | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactDir "controller-reconnect-limit.json") -Encoding UTF8
+                    $stopReason = "MaxControllerReconnectFailures"
+                    $exitCode = 1
+                    break
+                }
             }
         }
 
@@ -719,6 +740,7 @@ try {
                 Write-Host ("[FAIL] Smoke tests completed with {0} failed." -f $status.Failed) -ForegroundColor Red
                 $exitCode = 2
             }
+            $stopReason = "Completed"
             break
         }
 
@@ -744,6 +766,7 @@ try {
                 }
             } -ArgumentList @($ProjectName, @($queue.SelectedTests)) | Out-Null
             $exitCode = 3
+            $stopReason = "PendingStartTimeout"
             break
         }
 
@@ -771,6 +794,7 @@ try {
         Readiness = $readiness
         InitialQueue = $queue
         FinalStatus = $lastStatus
+        StopReason = $stopReason
         History = $history
     }
     $summary | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $artifactDir "monitor-summary.json") -Encoding UTF8

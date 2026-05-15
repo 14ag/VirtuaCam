@@ -39,6 +39,13 @@ function Assert-NotContains {
     }
 }
 
+$json = ConvertTo-Json -InputObject @("DF - PNP Remove Device Test (Reliability)", "DF - Reinstall with IO Before and After (Reliability)") -Depth 3 -Compress
+$decodedSelectedNames = ConvertFrom-Json -InputObject $json
+$roundTripNames = @($decodedSelectedNames | ForEach-Object { ([string]$_).Trim() })
+if ($roundTripNames.Count -ne 2) {
+    throw "PowerShell 5 JSON array parsing must preserve two selected vHLK test names."
+}
+
 $vhlkScripts = @("scripts\run-vhlk-tests.ps1", "scripts\run-vhlk-smoke-3tests.ps1")
 foreach ($path in $vhlkScripts) {
     Assert-Contains -Path $path -Pattern "\[Console\]::IsOutputRedirected" -Message "$path must avoid carriage-return live lines when stdout is redirected."
@@ -49,6 +56,8 @@ foreach ($path in $vhlkScripts) {
     Assert-Contains -Path $path -Pattern "StatusFresh" -Message "$path must mark stale reused status after poll failures."
     Assert-Contains -Path $path -Pattern "StatusPollError" -Message "$path must persist poll error text when status is stale."
     Assert-Contains -Path $path -Pattern "Remote status poll failed; using last known status" -Message "$path must warn on stale status polls."
+    Assert-Contains -Path $path -Pattern "MaxControllerReconnectFailures\s*=\s*5" -Message "$path must cap controller reconnect failures at five by default."
+    Assert-Contains -Path $path -Pattern "controller-reconnect-limit\.json" -Message "$path must persist controller reconnect stop metadata."
     Assert-NotContains -Path $path -Pattern "Select-Object\s+-First\s+5\s+\|\s+ForEach-Object\s*\{" -Message "$path must not truncate failed-name export to five failures."
 }
 
@@ -74,12 +83,18 @@ Assert-Contains -Path "scripts\run-vhlk-tests.ps1" -Pattern "research-gate\.json
 Assert-Contains -Path "scripts\run-vhlk-tests.ps1" -Pattern "MonitoringSelectedTests" -Message "failed-only monitor must count selected tests instead of whole project."
 Assert-Contains -Path "scripts\run-vhlk-tests.ps1" -Pattern "ProjectTotal" -Message "failed-only monitor must preserve whole-project total separately."
 Assert-Contains -Path "scripts\run-vhlk-tests.ps1" -Pattern "SelectedTestNamesJson" -Message "failed-only monitor must pass selected test names into remote status polling."
+Assert-Contains -Path "scripts\run-vhlk-tests.ps1" -Pattern 'decodedSelectedNames\s*=\s*ConvertFrom-Json -InputObject \$SelectedTestNamesJson' -Message "failed-only monitor must parse JSON arrays before enumeration on PowerShell 5."
+Assert-Contains -Path "scripts\run-vhlk-tests.ps1" -Pattern '\$monitoredTests\s*=\s*@\(\)' -Message "failed-only monitor must preserve array semantics for one selected test."
 Assert-Contains -Path "scripts\run-vhlk-tests.ps1" -Pattern "testsToManage" -Message "failed-only clean/cancel must be scoped to selected tests."
 Assert-Contains -Path "scripts\run-vhlk-tests.ps1" -Pattern "ManagedTests" -Message "failed-only clean/cancel scope must be persisted in queue/cancel metadata."
 Assert-Contains -Path "scripts\run-vhlk-failed-only.ps1" -Pattern "ResearchGateFailureCount\s*=\s*2" -Message "failed-only wrapper must default to 2-failure research gate."
+Assert-Contains -Path "scripts\run-vhlk-failed-only.ps1" -Pattern "MaxControllerReconnectFailures\s*=\s*5" -Message "failed-only wrapper must default to five controller reconnect failures."
 Assert-Contains -Path "scripts\run-vhlk-failed-only.ps1" -Pattern "install-driver-for-vhlk\.ps1" -Message "failed-only wrapper must install staged driver into DUT before vHLK."
 Assert-Contains -Path "scripts\run-vhlk-failed-only.ps1" -Pattern "No failed vHLK tests to run" -Message "failed-only wrapper must exit cleanly when controller export has no failures."
 Assert-Contains -Path "scripts\export-vhlk-failed-tests.ps1" -Pattern "failed-test-names\.txt" -Message "failed-name export script must write failed-test-names.txt."
+Assert-Contains -Path "scripts\install-all.ps1" -Pattern "function Stop-VirtuaCamRuntime" -Message "installer must stop runtime processes before driver install."
+Assert-Contains -Path "scripts\install-all.ps1" -Pattern "SkipWatcherService" -Message "installer must support vHLK installs without watcher service."
+Assert-Contains -Path "scripts\install-driver-for-vhlk.ps1" -Pattern "-SkipWatcherService" -Message "vHLK DUT install must not enable watcher service during HLK reliability tests."
 Assert-Contains -Path "batch-scripts\vhlk-tasklist.bat" -Pattern '\$ErrorActionPreference=''Stop''' -Message "batch local gate must stop on first failed PowerShell gate."
 Assert-Contains -Path "batch-scripts\vhlk-tasklist.bat" -Pattern "test-ai-window-cli\.ps1" -Message "batch local gate must include the AI window CLI whitebox test."
 Assert-Contains -Path "batch-scripts\binaries\selector.bat" -Pattern "GTR 9" -Message "selector must fail clearly when options exceed choice key range."

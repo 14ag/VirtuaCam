@@ -9,6 +9,7 @@ param(
     [int]$PendingStartTimeoutSeconds = 90,
     [int]$TimeoutMinutes = 0,
     [int]$MaxHeartbeatAgeMinutes = 10,
+    [int]$MaxControllerReconnectFailures = 5,
     [int]$ResearchGateFailureCount = 0,
     [int]$StopOnFailureCount = 0,
     [string]$TestNameListPath = "",
@@ -626,7 +627,8 @@ try {
         $tests = @($project.GetTests())
         $selectedNames = @()
         if (-not [string]::IsNullOrWhiteSpace($SelectedTestNamesJson)) {
-            $selectedNames = @($SelectedTestNamesJson | ConvertFrom-Json | ForEach-Object {
+            $decodedSelectedNames = ConvertFrom-Json -InputObject $SelectedTestNamesJson
+            $selectedNames = @($decodedSelectedNames | ForEach-Object {
                 $name = ([string]$_).Trim()
                 if (-not [string]::IsNullOrWhiteSpace($name)) {
                     $name
@@ -645,10 +647,11 @@ try {
         }
 
         $monitoringSelectedTests = $selectedNameSet.Count -gt 0
-        $monitoredTests = if ($monitoringSelectedTests) {
-            @($tests | Where-Object { $selectedNameSet.ContainsKey([string]$_.Name) })
+        $monitoredTests = @()
+        if ($monitoringSelectedTests) {
+            $monitoredTests = @($tests | Where-Object { $selectedNameSet.ContainsKey([string]$_.Name) })
         } else {
-            @($tests)
+            $monitoredTests = @($tests)
         }
         $missingSelectedTests = @($selectedNames | Where-Object { -not $projectNameSet.ContainsKey($_) })
 
@@ -665,7 +668,10 @@ try {
             [string]$_.Status -in @("Passed", "Failed", "Canceled", "Cancelled", "Blocked", "NotApplicable")
         }).Count
 
-        $current = $running | Select-Object -First 1
+        $current = $null
+        if ($running.Count -gt 0) {
+            $current = $running[0]
+        }
         $failures = @($monitoredTests | Where-Object { [string]$_.Status -eq "Failed" } | ForEach-Object {
             [pscustomobject]@{
                 Name = $_.Name
@@ -729,7 +735,8 @@ try {
         $tests = @($project.GetTests())
         $selectedNames = @()
         if (-not [string]::IsNullOrWhiteSpace($SelectedTestNamesJson)) {
-            $selectedNames = @($SelectedTestNamesJson | ConvertFrom-Json | ForEach-Object {
+            $decodedSelectedNames = ConvertFrom-Json -InputObject $SelectedTestNamesJson
+            $selectedNames = @($decodedSelectedNames | ForEach-Object {
                 $name = ([string]$_).Trim()
                 if (-not [string]::IsNullOrWhiteSpace($name)) {
                     $name
@@ -774,6 +781,7 @@ try {
     $lastStatus = $null
     $stopReason = ""
     $tick = 0
+    $controllerReconnectFailures = 0
     $spinner = @("|", "/", "-", "\")
 
     while ($true) {
@@ -794,9 +802,26 @@ try {
                     Remove-PSSession -Session $session -ErrorAction SilentlyContinue
                 }
                 $session = Wait-HvPowerShellDirect -VmName $VhlkVmName -Credential $cred -TimeoutSeconds 60 -LogPath $logPath 6>$null
+                $controllerReconnectFailures = 0
             }
             catch {
-                Write-HvLog -Message ("Controller session reopen failed; will retry. {0}" -f $_.Exception.Message) -LogPath $logPath -Level WARN
+                $controllerReconnectFailures++
+                Write-HvLog -Message ("Controller session reopen failed ({0}/{1}); will retry. {2}" -f $controllerReconnectFailures, $MaxControllerReconnectFailures, $_.Exception.Message) -LogPath $logPath -Level WARN
+                if ($controllerReconnectFailures -ge $MaxControllerReconnectFailures) {
+                    Write-DoneLine
+                    Write-Host ("Controller connection failed {0} times. Monitoring stopped." -f $MaxControllerReconnectFailures) -ForegroundColor Red
+                    $connectionGate = [pscustomobject]@{
+                        Trigger = "MaxControllerReconnectFailures"
+                        Threshold = $MaxControllerReconnectFailures
+                        ConsecutiveFailures = $controllerReconnectFailures
+                        LastError = $_.Exception.Message
+                        LastStatus = $lastStatus
+                        CheckedAt = (Get-Date).ToString("s")
+                    }
+                    $connectionGate | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactDir "controller-reconnect-limit.json") -Encoding UTF8
+                    $stopReason = "MaxControllerReconnectFailures"
+                    break
+                }
             }
         }
 
@@ -936,6 +961,9 @@ try {
     }
     $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "monitor-summary.json") -Encoding UTF8
 
+    if ($stopReason -eq "MaxControllerReconnectFailures") {
+        exit 1
+    }
     if ($lastStatus -and $lastStatus.Failed -gt 0) {
         exit 2
     }

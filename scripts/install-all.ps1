@@ -2,6 +2,7 @@
 param(
     [switch]$SkipDllRegister,
     [switch]$SkipCertificateImport,
+    [switch]$SkipWatcherService,
     [switch]$Uninstall
 )
 
@@ -354,6 +355,28 @@ function Uninstall-WatcherService {
     Write-Success "Watcher service removed: $watcherServiceName"
 }
 
+function Stop-VirtuaCamRuntime {
+    $service = Get-Service -Name $watcherServiceName -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -ne "Stopped") {
+        Write-Info "Stopping watcher service before driver install."
+        Invoke-NativeProcess -FilePath "$env:WINDIR\System32\sc.exe" -Arguments @("stop", $watcherServiceName) -AllowedExitCodes @(0, 1062)
+        try {
+            $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(15))
+        } catch {
+            $service.Refresh()
+            if ($service.Status -ne "Stopped") {
+                Fail "Timed out stopping watcher service before driver install: $watcherServiceName"
+            }
+        }
+    }
+
+    $processes = @(Get-Process -Name "VirtuaCam", "VirtuaCamProcess" -ErrorAction SilentlyContinue)
+    foreach ($process in $processes) {
+        Write-Info ("Stopping runtime process before driver install: {0} ({1})" -f $process.ProcessName, $process.Id)
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host " Install All"
 Write-Host "============================================================" -ForegroundColor Green
@@ -386,6 +409,7 @@ Assert-Administrator
 $null = New-Item -ItemType Directory -Force -Path $logsDir
 
 Write-Step "Install driver from output"
+Stop-VirtuaCamRuntime
 
 $bcdOut = & "$env:WINDIR\System32\bcdedit.exe" /enum "{current}" 2>&1
 $testLine = $bcdOut | Where-Object { $_ -match '^\s*testsigning\s+' } | Select-Object -First 1
@@ -476,8 +500,14 @@ Set-ItemProperty -Path $virtuaCamRegPath -Name "ProcessExeSha256" -Value $proces
 Protect-VirtuaCamRegistryKey -Path $virtuaCamRegPath
 Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCamProcess" -ErrorAction SilentlyContinue
 Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCam" -ErrorAction SilentlyContinue
-Install-WatcherService -ProcessPath $processExeCanonical
-Write-Success "Configured HKLM\SOFTWARE\VirtuaCam and watcher service startup"
+if ($SkipWatcherService) {
+    Uninstall-WatcherService
+    Write-Info "Skip watcher service install."
+    Write-Success "Configured HKLM\SOFTWARE\VirtuaCam without watcher service startup"
+} else {
+    Install-WatcherService -ProcessPath $processExeCanonical
+    Write-Success "Configured HKLM\SOFTWARE\VirtuaCam and watcher service startup"
+}
 
 Write-Host "`n============================================================" -ForegroundColor Green
 Write-Host " INSTALL-ALL SUCCEEDED"
