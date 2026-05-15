@@ -123,19 +123,19 @@ namespace
     KSCAMERA_PROFILE_PININFO CameraProfileVideoRecordingPins[] = {
         {
             STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
-            { 0, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileVideoRecordingPreviewMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoRecordingPreviewMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
-            { 1, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileVideoRecordingCaptureMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoRecordingCaptureMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_STILL),
-            { 2, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileVideoRecordingStillMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoRecordingStillMediaInfos)
         }
@@ -144,19 +144,19 @@ namespace
     KSCAMERA_PROFILE_PININFO CameraProfileVideoConferencingPins[] = {
         {
             STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
-            { 0, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileVideoConferencingPreviewMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoConferencingPreviewMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
-            { 1, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileVideoConferencingCaptureMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoConferencingCaptureMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_STILL),
-            { 2, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileVideoConferencingStillMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoConferencingStillMediaInfos)
         }
@@ -165,19 +165,19 @@ namespace
     KSCAMERA_PROFILE_PININFO CameraProfileHighQualityPhotoPins[] = {
         {
             STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
-            { 0, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileHighQualityPhotoPreviewMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileHighQualityPhotoPreviewMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
-            { 1, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileHighQualityPhotoCaptureMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileHighQualityPhotoCaptureMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_STILL),
-            { 2, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileHighQualityPhotoStillMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileHighQualityPhotoStillMediaInfos)
         }
@@ -186,19 +186,19 @@ namespace
     KSCAMERA_PROFILE_PININFO CameraProfileBalancedVideoAndPhotoPins[] = {
         {
             STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
-            { 0, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileBalancedVideoAndPhotoPreviewMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileBalancedVideoAndPhotoPreviewMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
-            { 1, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileBalancedVideoAndPhotoCaptureMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileBalancedVideoAndPhotoCaptureMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_STILL),
-            { 2, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileBalancedVideoAndPhotoStillMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileBalancedVideoAndPhotoStillMediaInfos)
         }
@@ -207,19 +207,19 @@ namespace
     KSCAMERA_PROFILE_PININFO CameraProfileCustomPins[] = {
         {
             STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
-            { 0, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileCustomPreviewMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileCustomPreviewMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
-            { 1, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileCustomCaptureMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileCustomCaptureMediaInfos)
         },
         {
             STATICGUIDOF(PINNAME_VIDEO_STILL),
-            { 2, KSCameraProfileSensorType_RGB },
+            { 0, 0 },
             SIZEOF_ARRAY(CameraProfileCustomStillMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileCustomStillMediaInfos)
         }
@@ -1018,6 +1018,18 @@ SetCameraProfile(
     CurrentCameraProfile = *Payload;
     WriteCameraProfilePayload(Header, CurrentCameraProfile);
 
+    PKSFILTER filter = KsGetFilterFromIrp(Irp);
+    if (filter) {
+        KsFilterGenerateEvents(
+            filter,
+            &KSEVENTSETID_ExtendedCameraControl,
+            KSPROPERTY_CAMERACONTROL_EXTENDED_PROFILE,
+            0,
+            NULL,
+            NULL,
+            NULL);
+    }
+
     Irp->IoStatus.Information = payloadSize;
     return STATUS_SUCCESS;
 }
@@ -1179,12 +1191,32 @@ DEFINE_KSPROPERTY_SET_TABLE(PropertySetTable)
 	DEFINE_STD_PROPERTY_SET(PROPSETID_VIDCAP_CUSTOMCONTROL, CustomPropertyTable)
 };
 
+DEFINE_KSEVENT_TABLE(ExtendedCameraControlEventTable)
+{
+    DEFINE_KSEVENT_ITEM(
+        KSPROPERTY_CAMERACONTROL_EXTENDED_PROFILE,
+        sizeof(KSEVENTDATA),
+        0,
+        NULL,
+        NULL,
+        NULL
+    )
+};
+
+DEFINE_KSEVENT_SET_TABLE(EventSetTable)
+{
+    DEFINE_KSEVENT_SET(
+        &KSEVENTSETID_ExtendedCameraControl,
+        SIZEOF_ARRAY(ExtendedCameraControlEventTable),
+        ExtendedCameraControlEventTable
+    )
+};
 
 DEFINE_KSAUTOMATION_TABLE(AvsFilterAutomationTable)
 {
 	DEFINE_KSAUTOMATION_PROPERTIES(PropertySetTable),
 	DEFINE_KSAUTOMATION_METHODS_NULL,
-	DEFINE_KSAUTOMATION_EVENTS_NULL
+	DEFINE_KSAUTOMATION_EVENTS(EventSetTable)
 };
 
 /**************************************************************************

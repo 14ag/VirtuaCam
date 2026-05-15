@@ -165,8 +165,9 @@ try {
             -CheckpointName $DutCheckpointName `
             -ArtifactRoot $dutInstallArtifact `
             -SkipFreshStart
-        if (-not $?) {
-            throw "DUT vHLK smoke install failed. See $dutInstallArtifact"
+        $installExitCode = $LASTEXITCODE
+        if ($installExitCode -ne 0) {
+            throw "DUT vHLK smoke install failed with exit code $installExitCode. See $dutInstallArtifact"
         }
     }
     Wait-HvVmReady -VmName $VhlkVmName -Credential $vhlkCred -TimeoutSeconds 240 -PollIntervalSeconds 3 -RequirePowerShellDirect -LogPath $logPath | Out-Null

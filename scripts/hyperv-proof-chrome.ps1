@@ -11,6 +11,7 @@ param(
     [string[]]$BrowserExtraArgs = @(),
     [switch]$EnableVerifier,
     [bool]$RevertAfterRun = $true,
+    [int]$HeldSessionTimeoutSeconds = 300,
     [string]$LogPath = ""
 )
 
@@ -884,7 +885,7 @@ try {
     $holdProc = Start-Process -FilePath "powershell.exe" -ArgumentList $holdArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $holdStdoutPath -RedirectStandardError $holdStderrPath
 
     $status = $null
-    $deadline = (Get-Date).AddSeconds(240)
+    $deadline = (Get-Date).AddSeconds($HeldSessionTimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         if (Test-Path -LiteralPath $sessionStatusPath) {
             $status = Read-JsonFile -Path $sessionStatusPath
@@ -902,8 +903,12 @@ try {
         Start-Sleep -Seconds 2
     }
 
+    if ((-not $status -or -not $status.Ready) -and (Test-Path -LiteralPath $sessionStatusPath)) {
+        $status = Read-JsonFile -Path $sessionStatusPath
+    }
+
     if (-not $status -or -not $status.Ready) {
-        throw "Timed out waiting for held guest session status."
+        throw ("Timed out waiting for held guest session status after {0} seconds." -f $HeldSessionTimeoutSeconds)
     }
 
     if ($status.BrowserCommandLine) {

@@ -15,6 +15,7 @@ Repository goal: build and install a virtual camera that appears to Windows came
 - `scripts\test-code-review-20260511.ps1`: whitebox checks for the 2026-05-11 code-review fixes
 - `scripts\test-performance-audit.ps1`: whitebox/runtime checks for the 2026-05-11 performance-audit fixes
 - `scripts\run-vhlk-tests.ps1`: vHLK queue/monitor helper that reads controller credentials from `.env`
+- `scripts\run-vhlk-failed-only.ps1`: one-call failed-only vHLK entry point; exports failed names, filters documented blockers, fresh-starts VMs, installs the DUT driver, runs selected tests, and writes status artifacts
 - `shared\`: driver/user-mode ABI constants and structures shared by both projects
 - `software-project/`: CMake-based user-mode code
 - `driver-project/`: Visual Studio / WDK driver code
@@ -162,13 +163,33 @@ Host-side proof helpers:
 
 `host-media-capture-auto-proof.ps1` runs the CPU-backed frame-reader path by default. Use `-IncludeAutoSurfaceProbe` when you also want to probe the WinRT `Auto` memory preference path.
 
+AI window enumeration:
+
+```powershell
+.\output\VirtuaCam.exe --windows
+```
+
+The command writes JSON for windows that can be captured and exits without starting the tray app.
+
 VM-only driver fuzz:
 
 ```powershell
 .\scripts\test-ks-invalid-buffer-fuzz.ps1 -VmName driver-test
 ```
 
-The latest retained vHLK report is `test-reports\vhlk-final-report-20260511.md`. It did not record a clean playlist pass: one executed run had 10 passed tests, one 480p record failure, one running test, and 101 queued tests, while the later queue attempt did not start tests within the monitor window. Current code advertises 480p and portrait modes; rerun targeted vHLK before treating the playlist as clean.
+The latest failed-only vHLK artifact is `test-reports\vhlk-oneclick-20260516-014142`. It selected 2 tests, completed 2 tests, passed `Camera Driver System Test - MediaCapture - TestEnumerateMediaFrameSourceGroupById`, and failed `Camera Driver Profiles Interface APIs (Device Test)`.
+
+Failed-only vHLK:
+
+```powershell
+.\scripts\run-vhlk-failed-only.ps1
+```
+
+Full vHLK sanity:
+
+```powershell
+.\scripts\run-vhlk-tests.ps1 -PendingStartTimeoutSeconds 300 -TimeoutMinutes 480 -ResearchGateFailureCount 2 -StopOnFailureCount 10 -MaxControllerReconnectFailures 5
+```
 
 Suggested bench order:
 

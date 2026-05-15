@@ -98,8 +98,9 @@ try {
             -ProjectName $ProjectName `
             -ArtifactRoot $exportRoot `
             -SkipFreshStart
-        if (-not $?) {
-            throw "Failed-name export failed. See $exportRoot"
+        $exportExitCode = $LASTEXITCODE
+        if ($exportExitCode -ne 0) {
+            throw "Failed-name export failed with exit code $exportExitCode. See $exportRoot"
         }
         $TestNameListPath = Join-Path $exportRoot "failed-test-names.txt"
     } else {
@@ -152,8 +153,9 @@ try {
             -CheckpointName $DutCheckpointName `
             -ArtifactRoot $dutInstallArtifact `
             -SkipFreshStart
-        if (-not $?) {
-            throw "DUT vHLK install failed. See $dutInstallArtifact"
+        $installExitCode = $LASTEXITCODE
+        if ($installExitCode -ne 0) {
+            throw "DUT vHLK install failed with exit code $installExitCode. See $dutInstallArtifact"
         }
     } else {
         Write-Host "[4/5] DUT install skipped by parameter" -ForegroundColor Yellow

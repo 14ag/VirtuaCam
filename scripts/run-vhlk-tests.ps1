@@ -184,8 +184,9 @@ try {
             -CheckpointName $DutCheckpointName `
             -ArtifactRoot $dutInstallArtifact `
             -SkipFreshStart
-        if (-not $?) {
-            throw "DUT vHLK install failed. See $dutInstallArtifact"
+        $installExitCode = $LASTEXITCODE
+        if ($installExitCode -ne 0) {
+            throw "DUT vHLK install failed with exit code $installExitCode. See $dutInstallArtifact"
         }
     }
 

@@ -7,6 +7,7 @@ param(
     [string]$ArtifactRoot = "test-reports\windows-camera",
     [ValidateSet("Chrome", "Edge")][string]$Browser = "Chrome",
     [ValidateSet("auto", "printwindow", "wgc", "bitblt")][string]$CaptureBackend = "wgc",
+    [int]$HeldSessionTimeoutSeconds = 300,
     [bool]$RevertAfterRun = $true
 )
 
@@ -52,6 +53,7 @@ $holdStdoutPath = Join-Path $runDir "vm-session-host.stdout.txt"
 $holdStderrPath = Join-Path $runDir "vm-session-host.stderr.txt"
 $cameraResultPath = Join-Path $runDir "windows-camera-proof.json"
 $hostScreenshotPath = Join-Path $runDir "windows-camera-proof.png"
+$sourceGroupResultPath = Join-Path $runDir "mediaframe-sourcegroup-proof.json"
 
 $envValues = Read-HvDotEnv
 if ([string]::IsNullOrWhiteSpace($GuestPasswordPlaintext) -and $envValues.ContainsKey("DRIVER_TEST_VM_PASSWORD")) {
@@ -113,6 +115,92 @@ try {
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 300 -LogPath $logPath
     }
 
+    Write-HvLog -Message "Checking MediaFrameSourceGroup and MFCreateSensorGroup." -LogPath $logPath -Level STEP
+    $sourceGroupProof = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
+        Add-Type -AssemblyName System.Runtime.WindowsRuntime
+        Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class VirtuaCamMfSensorGroupNative {
+    [DllImport("mfsensorgroup.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    public static extern int MFCreateSensorGroup(string symbolicLink, out IntPtr ppSensorGroup);
+}
+'@
+
+        function Await-AsyncOperation {
+            param(
+                [Parameter(Mandatory = $true)]$Operation,
+                [Parameter(Mandatory = $true)][type]$ResultType
+            )
+
+            $method = [System.WindowsRuntimeSystemExtensions].GetMethods() |
+                Where-Object {
+                    $_.Name -eq "AsTask" -and
+                    $_.IsGenericMethodDefinition -and
+                    $_.GetParameters().Count -eq 1 -and
+                    $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+                } |
+                Select-Object -First 1
+            if (-not $method) {
+                throw "System.WindowsRuntimeSystemExtensions.AsTask overload not found."
+            }
+
+            $task = $method.MakeGenericMethod($ResultType).Invoke($null, @($Operation))
+            $task.Wait()
+            return $task.Result
+        }
+
+        $deviceInfoType = [Windows.Devices.Enumeration.DeviceInformation, Windows.Devices.Enumeration, ContentType=WindowsRuntime]
+        $deviceCollectionType = [Windows.Devices.Enumeration.DeviceInformationCollection, Windows.Devices.Enumeration, ContentType=WindowsRuntime]
+        $mediaDeviceType = [Windows.Media.Devices.MediaDevice, Windows.Media.Devices, ContentType=WindowsRuntime]
+        $groupType = [Windows.Media.Capture.Frames.MediaFrameSourceGroup, Windows.Media.Capture, ContentType=WindowsRuntime]
+
+        $selector = $mediaDeviceType::GetVideoCaptureSelector()
+        $devices = Await-AsyncOperation -Operation ($deviceInfoType::FindAllAsync($selector)) -ResultType $deviceCollectionType
+        $target = @($devices | Where-Object { $_.Name -like "*Virtual Camera*" }) | Select-Object -First 1
+        if (-not $target) {
+            throw "Virtual Camera device not found in video capture enumeration."
+        }
+
+        $sensorGroupPointer = [IntPtr]::Zero
+        $sensorGroupHr = [VirtuaCamMfSensorGroupNative]::MFCreateSensorGroup([string]$target.Id, [ref]$sensorGroupPointer)
+        $sensorGroupOk = ($sensorGroupHr -eq 0 -and $sensorGroupPointer -ne [IntPtr]::Zero)
+        if ($sensorGroupPointer -ne [IntPtr]::Zero) {
+            [System.Runtime.InteropServices.Marshal]::Release($sensorGroupPointer) | Out-Null
+        }
+
+        $fromIdOk = $false
+        $fromIdError = ""
+        $sourceInfoCount = 0
+        try {
+            $group = Await-AsyncOperation -Operation ($groupType::FromIdAsync([string]$target.Id)) -ResultType $groupType
+            $fromIdOk = ($null -ne $group)
+            if ($group) {
+                $sourceInfos = @($group.SourceInfos)
+                $sourceInfoCount = [int]$sourceInfos.Count
+            }
+        }
+        catch {
+            $fromIdError = [string]$_.Exception.ToString()
+        }
+
+        [pscustomobject]@{
+            DeviceName = [string]$target.Name
+            DeviceId = [string]$target.Id
+            MFCreateSensorGroupHr = ("0x{0:X8}" -f ($sensorGroupHr -band 0xffffffff))
+            MFCreateSensorGroupOk = [bool]$sensorGroupOk
+            FromIdAsyncOk = [bool]$fromIdOk
+            SourceInfoCount = [int]$sourceInfoCount
+            FromIdAsyncError = $fromIdError
+            CheckedAtUtc = [DateTime]::UtcNow.ToString("o")
+        }
+    }
+    Write-JsonFile -Path $sourceGroupResultPath -Data $sourceGroupProof
+    if (-not $sourceGroupProof.MFCreateSensorGroupOk -or -not $sourceGroupProof.FromIdAsyncOk -or $sourceGroupProof.SourceInfoCount -lt 1) {
+        throw ("MediaFrameSourceGroup proof failed. See {0}" -f $sourceGroupResultPath)
+    }
+
     Remove-Item -LiteralPath $statusPath, $stopSignalPath -Force -ErrorAction SilentlyContinue
     $holdArgs = @(
         "-NoProfile",
@@ -139,7 +227,7 @@ try {
     $holdProc = Start-Process -FilePath "powershell.exe" -ArgumentList $holdArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $holdStdoutPath -RedirectStandardError $holdStderrPath
 
     $status = $null
-    $deadline = (Get-Date).AddSeconds(120)
+    $deadline = (Get-Date).AddSeconds($HeldSessionTimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         if (Test-Path -LiteralPath $statusPath) {
             $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
@@ -153,8 +241,11 @@ try {
         }
         Start-Sleep -Seconds 2
     }
+    if ((-not $status -or -not $status.Ready) -and (Test-Path -LiteralPath $statusPath)) {
+        $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
+    }
     if (-not $status -or -not $status.Ready) {
-        throw "Timed out waiting for held source session."
+        throw ("Timed out waiting for held source session after {0} seconds." -f $HeldSessionTimeoutSeconds)
     }
 
     Write-HvLog -Message "Launching Windows Camera app and taking desktop screenshot." -LogPath $logPath -Level STEP
@@ -296,6 +387,7 @@ finally {
         Success = (Test-Path -LiteralPath $hostScreenshotPath)
         RunDir = $runDir
         ScreenshotPath = $hostScreenshotPath
+        MediaFrameSourceGroup = $sourceGroupProof
         HeldSessionStatus = $status
         Camera = $camera
         CheckedAtUtc = [DateTime]::UtcNow.ToString("o")

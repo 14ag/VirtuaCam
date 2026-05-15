@@ -130,6 +130,7 @@ Direct export behavior:
 - Fresh-starts `vhlk` by default, then exports project status.
 - Writes `latest-status.json` and `failed-test-names.txt`.
 - Writes `export-incomplete.json` when export fails before completion.
+- Reads controller credentials inside its protected block so credential failures write `export-incomplete.json`.
 - Use `-SkipFreshStart` only when another wrapper already fresh-started the controller.
 
 Fallback list:
@@ -161,6 +162,7 @@ Runner behavior:
 - Exports failed names unless `-TestNameListPath` and `-NoExport` are used.
 - Filters `docs\vhlk-blocked-test-names.txt` unless `-SkipBlockerFilter` is used.
 - Installs staged `output\` package into `driver-test` unless `-SkipDutInstall` is used.
+- Checks child script status with `$LASTEXITCODE`.
 - Uses selected failed-test names as monitored total.
 - Scopes cleanup and cancellation to selected tests.
 - Stops at 2 failures for research.

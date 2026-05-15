@@ -27,16 +27,11 @@ if ([string]::IsNullOrWhiteSpace($GuestRoot)) {
     $GuestRoot = "C:\Temp\VirtuaCamVhlkInstall-{0}" -f (Get-HvTimestamp)
 }
 
-$envMap = Read-HvDotEnv
-$guestCred = Get-HvGuestCredential `
-    -GuestUser "Administrator" `
-    -EnvUserKey "DRIVER_TEST_VM_USERNAME" `
-    -EnvPasswordKey "DRIVER_TEST_VM_PASSWORD"
-
 $session = $null
 $guestScriptsRoot = Join-Path $GuestRoot "scripts"
 $guestToolsRoot = Join-Path $guestScriptsRoot "tools"
 $guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
+$exitCode = 1
 
 function Set-VhlkCameraDirectMode {
     param(
@@ -115,6 +110,11 @@ function Set-VhlkCameraDirectMode {
 }
 
 try {
+    $guestCred = Get-HvGuestCredential `
+        -GuestUser "Administrator" `
+        -EnvUserKey "DRIVER_TEST_VM_USERNAME" `
+        -EnvPasswordKey "DRIVER_TEST_VM_PASSWORD"
+
     if (-not $SkipFreshStart) {
         Write-HvLog -Message ("Fresh-starting DUT '{0}' from checkpoint '{1}' before vHLK install." -f $VmName, $CheckpointName) -LogPath $logPath -Level STEP
         $freshStart = Start-HvFreshCheckpointVm `
@@ -196,9 +196,19 @@ try {
     }
 
     Write-Host ("DUT driver installed for vHLK. Artifacts: {0}" -f $artifactDir)
+    $exitCode = 0
+}
+catch {
+    $errorPath = Join-Path $artifactDir "error.txt"
+    $_ | Out-String | Set-Content -LiteralPath $errorPath -Encoding UTF8
+    Write-Host ("[ERROR] {0}" -f $_.Exception.Message) -ForegroundColor Red
+    Write-Host ("Artifacts: {0}" -f $artifactDir) -ForegroundColor Yellow
+    $exitCode = 1
 }
 finally {
     if ($session) {
         Remove-PSSession -Session $session -ErrorAction SilentlyContinue
     }
 }
+
+exit $exitCode
