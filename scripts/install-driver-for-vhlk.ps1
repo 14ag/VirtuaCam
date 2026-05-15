@@ -38,6 +38,82 @@ $guestScriptsRoot = Join-Path $GuestRoot "scripts"
 $guestToolsRoot = Join-Path $guestScriptsRoot "tools"
 $guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
 
+function Set-VhlkCameraDirectMode {
+    param(
+        [Parameter(Mandatory = $true)][System.Management.Automation.Runspaces.PSSession]$GuestSession,
+        [Parameter(Mandatory = $true)][string]$OutputName
+    )
+
+    $state = Invoke-HvGuestCommand -Session $GuestSession -LogPath $logPath -ScriptBlock {
+        $registrySpecs = @(
+            [pscustomobject]@{
+                Path = "HKLM:\SOFTWARE\Microsoft\Windows Media Foundation\Platform"
+                View = [Microsoft.Win32.RegistryView]::Registry64
+                SubKey = "SOFTWARE\Microsoft\Windows Media Foundation\Platform"
+            },
+            [pscustomobject]@{
+                Path = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Media Foundation\Platform"
+                View = [Microsoft.Win32.RegistryView]::Registry32
+                SubKey = "SOFTWARE\Microsoft\Windows Media Foundation\Platform"
+            }
+        )
+
+        $registryState = foreach ($spec in $registrySpecs) {
+            $baseKey = $null
+            $key = $null
+            try {
+                $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $spec.View)
+                $key = $baseKey.CreateSubKey($spec.SubKey, $true)
+                if (-not $key) {
+                    throw "Failed to open registry subkey: $($spec.Path)"
+                }
+                $key.SetValue("EnableFrameServerMode", 0, [Microsoft.Win32.RegistryValueKind]::DWord)
+                $value = $key.GetValue("EnableFrameServerMode", $null)
+                [pscustomobject]@{
+                    Path = $spec.Path
+                    RegistryView = [string]$spec.View
+                    EnableFrameServerMode = [int]$value
+                }
+            }
+            finally {
+                if ($key) {
+                    $key.Close()
+                }
+                if ($baseKey) {
+                    $baseKey.Close()
+                }
+            }
+        }
+
+        $serviceState = foreach ($service in @(Get-Service -Name "FrameServer", "CaptureService_*" -ErrorAction SilentlyContinue)) {
+            if ($service.Status -ne "Stopped") {
+                try {
+                    Stop-Service -Name $service.Name -Force -ErrorAction SilentlyContinue
+                    $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(10))
+                }
+                catch {
+                }
+            }
+            $current = Get-Service -Name $service.Name -ErrorAction SilentlyContinue
+            [pscustomobject]@{
+                Name = $service.Name
+                DisplayName = $service.DisplayName
+                Status = if ($current) { [string]$current.Status } else { "Missing" }
+                StartType = if ($current) { [string]$current.StartType } else { "" }
+            }
+        }
+
+        [pscustomobject]@{
+            Registry = @($registryState)
+            Services = @($serviceState)
+            CheckedAtUtc = [DateTime]::UtcNow.ToString("o")
+        }
+    }
+
+    $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactDir $OutputName) -Encoding UTF8
+    return $state
+}
+
 try {
     if (-not $SkipFreshStart) {
         Write-HvLog -Message ("Fresh-starting DUT '{0}' from checkpoint '{1}' before vHLK install." -f $VmName, $CheckpointName) -LogPath $logPath -Level STEP
@@ -66,6 +142,9 @@ try {
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\install-all.ps1") -GuestPath $guestScriptsRoot -LogPath $logPath
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\tools\artifact-manifest.ps1") -GuestPath $guestToolsRoot -LogPath $logPath
 
+    Write-HvLog -Message "Configuring Media Foundation camera direct mode for vHLK." -LogPath $logPath -Level STEP
+    Set-VhlkCameraDirectMode -GuestSession $session -OutputName "camera-frame-server-mode-before-install.json" | Out-Null
+
     Write-HvLog -Message "Installing staged package in DUT for vHLK." -LogPath $logPath -Level STEP
     $install = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
         param($InstallScript)
@@ -88,7 +167,17 @@ try {
         Wait-HvVmRebootTransition -VmName $VmName -Credential $guestCred -TimeoutSeconds 120 -PollIntervalSeconds 3 -LogPath $logPath | Out-Null
         Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 360 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $logPath | Out-Null
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 180 -LogPath $logPath
+    } else {
+        Write-HvLog -Message "Restarting DUT to apply vHLK camera direct mode." -LogPath $logPath -Level STEP
+        Restart-HvGuest -Session $session -LogPath $logPath
+        Remove-PSSession -Session $session -ErrorAction SilentlyContinue
+        $session = $null
+        Wait-HvVmRebootTransition -VmName $VmName -Credential $guestCred -TimeoutSeconds 120 -PollIntervalSeconds 3 -LogPath $logPath | Out-Null
+        Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 360 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $logPath | Out-Null
+        $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 180 -LogPath $logPath
     }
+
+    Set-VhlkCameraDirectMode -GuestSession $session -OutputName "camera-frame-server-mode.json" | Out-Null
 
     $state = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
         $devices = @(pnputil /enum-devices /instanceid ROOT\AVSHWS\0000 2>&1 | ForEach-Object { [string]$_ })

@@ -172,9 +172,11 @@ try {
         Set-Content -LiteralPath $LauncherPath -Encoding ASCII -Value $launcherText
 
         schtasks /delete /tn $TaskName /f 2>$null | Out-Null
-        $startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
+        $taskStartAt = (Get-Date).AddMinutes(10)
+        $startTime = $taskStartAt.ToString("HH:mm")
+        $startDate = $taskStartAt.ToString((Get-Culture).DateTimeFormat.ShortDatePattern)
         $taskCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $LauncherPath + '"'
-        $createOutput = Join-GuestTextOutput @(schtasks /create /tn $TaskName /sc once /st $startTime /tr $taskCommand /ru $TaskUser /rp $TaskPassword /rl HIGHEST /it /f 2>&1)
+        $createOutput = Join-GuestTextOutput @(schtasks /create /tn $TaskName /sc once /sd $startDate /st $startTime /tr $taskCommand /ru $TaskUser /rp $TaskPassword /rl HIGHEST /it /f 2>&1)
         $runOutput = Join-GuestTextOutput @(schtasks /run /tn $TaskName 2>&1)
 
         [pscustomobject]@{

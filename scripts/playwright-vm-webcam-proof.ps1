@@ -3,6 +3,9 @@ param(
     [string]$StatusPath = "test-reports\playwright\vm-session-status.json",
     [string]$ArtifactRoot = "test-reports\playwright",
     [int]$TimeoutSeconds = 90,
+    [ValidateRange(1, 10)][int]$CdpConnectAttempts = 3,
+    [ValidateRange(5, 300)][int]$CdpConnectTimeoutSeconds = 90,
+    [ValidateRange(1, 60)][int]$CdpConnectRetryDelaySeconds = 5,
     [string]$LogPath = ""
 )
 
@@ -88,6 +91,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $runnerDir "node_modules\playwright-
 
 $runnerScript = @'
 const fs = require('fs');
+const http = require('http');
+const path = require('path');
 const { chromium } = require('playwright-core');
 
 function readJson(file) {
@@ -117,6 +122,93 @@ function mergeConsoleLines(consoleLines, statusLogs) {
     merged.push(line);
   }
   return merged;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fetchJson(url, timeoutMs) {
+  return new Promise((resolve) => {
+    const request = http.get(url, { timeout: timeoutMs }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        body += chunk;
+      });
+      response.on('end', () => {
+        let parsed = null;
+        let parseError = '';
+        try {
+          parsed = JSON.parse(body);
+        } catch (error) {
+          parseError = error && error.message ? error.message : String(error);
+        }
+        resolve({
+          url,
+          statusCode: response.statusCode || 0,
+          bodyLength: body.length,
+          parsed,
+          parseError,
+          error: ''
+        });
+      });
+    });
+    request.on('timeout', () => {
+      request.destroy(new Error(`Timed out after ${timeoutMs} ms`));
+    });
+    request.on('error', (error) => {
+      resolve({
+        url,
+        statusCode: 0,
+        bodyLength: 0,
+        parsed: null,
+        parseError: '',
+        error: error && error.message ? error.message : String(error)
+      });
+    });
+  });
+}
+
+async function collectCdpProbe(attachBase, probeTimeoutMs) {
+  const version = await fetchJson(`${attachBase}/json/version`, probeTimeoutMs);
+  const targets = await fetchJson(`${attachBase}/json/list`, probeTimeoutMs);
+  return {
+    checkedAt: new Date().toISOString(),
+    attachBase,
+    version,
+    targets
+  };
+}
+
+async function connectOverCdpWithRetry(attachBase, resultPath, consoleLines) {
+  const connectAttempts = Math.max(1, parseInt(process.env.CDP_CONNECT_ATTEMPTS || '3', 10));
+  const connectTimeoutMs = Math.max(5000, parseInt(process.env.CDP_CONNECT_TIMEOUT_MS || '90000', 10));
+  const retryDelayMs = Math.max(1000, parseInt(process.env.CDP_CONNECT_RETRY_DELAY_MS || '5000', 10));
+  const probeTimeoutMs = Math.min(10000, connectTimeoutMs);
+  const artifactDir = path.dirname(resultPath);
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= connectAttempts; attempt += 1) {
+    appendConsoleLine(consoleLines, `[cdp] attach attempt ${attempt}/${connectAttempts} timeoutMs=${connectTimeoutMs}`);
+    const probe = await collectCdpProbe(attachBase, probeTimeoutMs);
+    const probePath = path.join(artifactDir, `cdp-probe-attempt-${attempt}.json`);
+    writeJson(probePath, probe);
+
+    try {
+      return await chromium.connectOverCDP(attachBase, { timeout: connectTimeoutMs });
+    } catch (error) {
+      lastError = error;
+      const message = error && error.message ? error.message : String(error);
+      appendConsoleLine(consoleLines, `[cdp] attach attempt ${attempt} failed: ${message}`);
+      if (attempt < connectAttempts) {
+        await delay(retryDelayMs);
+      }
+    }
+  }
+
+  const lastMessage = lastError && lastError.message ? lastError.message : String(lastError || 'unknown CDP attach failure');
+  throw new Error(`CDP attach failed after ${connectAttempts} attempts: ${lastMessage}`);
 }
 
 (async () => {
@@ -199,7 +291,7 @@ function mergeConsoleLines(consoleLines, statusLogs) {
       process.exit(1);
     }
 
-    browser = await chromium.connectOverCDP(attachBase);
+    browser = await connectOverCdpWithRetry(attachBase, resultPath, consoleLines);
     const contexts = browser.contexts();
     if (!contexts.length) {
       throw new Error('No Chrome contexts exposed by CDP.');
@@ -284,12 +376,18 @@ $oldResultPath = $env:RESULT_PATH
 $oldScreenshotPath = $env:SCREENSHOT_PATH
 $oldConsolePath = $env:CONSOLE_PATH
 $oldTimeoutMs = $env:TIMEOUT_MS
+$oldCdpConnectAttempts = $env:CDP_CONNECT_ATTEMPTS
+$oldCdpConnectTimeoutMs = $env:CDP_CONNECT_TIMEOUT_MS
+$oldCdpConnectRetryDelayMs = $env:CDP_CONNECT_RETRY_DELAY_MS
 $oldNodePath = $env:NODE_PATH
 $env:STATUS_PATH = $statusPathResolved
 $env:RESULT_PATH = $resultPath
 $env:SCREENSHOT_PATH = $screenshotPath
 $env:CONSOLE_PATH = $consolePath
 $env:TIMEOUT_MS = [string]($TimeoutSeconds * 1000)
+$env:CDP_CONNECT_ATTEMPTS = [string]$CdpConnectAttempts
+$env:CDP_CONNECT_TIMEOUT_MS = [string]($CdpConnectTimeoutSeconds * 1000)
+$env:CDP_CONNECT_RETRY_DELAY_MS = [string]($CdpConnectRetryDelaySeconds * 1000)
 $env:NODE_PATH = Join-Path $runnerDir "node_modules"
 
 try {
@@ -309,6 +407,9 @@ finally {
     $env:SCREENSHOT_PATH = $oldScreenshotPath
     $env:CONSOLE_PATH = $oldConsolePath
     $env:TIMEOUT_MS = $oldTimeoutMs
+    $env:CDP_CONNECT_ATTEMPTS = $oldCdpConnectAttempts
+    $env:CDP_CONNECT_TIMEOUT_MS = $oldCdpConnectTimeoutMs
+    $env:CDP_CONNECT_RETRY_DELAY_MS = $oldCdpConnectRetryDelayMs
     $env:NODE_PATH = $oldNodePath
 }
 

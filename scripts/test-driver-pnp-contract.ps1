@@ -45,9 +45,49 @@ Assert-Contains `
     -Message "Device must track remove-pending state after query-remove."
 
 Assert-Contains `
+    -Path "driver-project\device.h" `
+    -Pattern "PKSFILTERFACTORY\s+m_FilterFactory;[\s\S]*SetFilterFactoryDeviceClassesState" `
+    -Message "Device must track its AVStream filter factory so PnP can disable and re-enable device classes."
+
+Assert-Contains `
     -Path "driver-project\device.cpp" `
     -Pattern "PnpQueryRemove[\s\S]*SetRemovePending\(TRUE\)[\s\S]*return STATUS_SUCCESS;" `
     -Message "PnpQueryRemove must enter remove-pending state and allow Device Fundamentals remove/restart."
+
+Assert-Contains `
+    -Path "driver-project\device.cpp" `
+    -Pattern "PnpStart[\s\S]*m_FilterFactory\s*=\s*filterFactory[\s\S]*SetFilterFactoryDeviceClassesState\(TRUE,\s*""PnpStart""\)" `
+    -Message "PnpStart must store and enable the AVStream filter factory device classes."
+
+Assert-Contains `
+    -Path "driver-project\device.cpp" `
+    -Pattern "PnpQueryRemove[\s\S]*SetFilterFactoryDeviceClassesState\(FALSE,\s*""PnpQueryRemove""\)" `
+    -Message "PnpQueryRemove must disable AVStream device classes before remove/restart."
+
+Assert-Contains `
+    -Path "driver-project\device.cpp" `
+    -Pattern "PnpQueryRemove[\s\S]*NotifyCameraState\(FALSE\)[\s\S]*m_HardwareSimulation\s*->\s*Stop\s*\(" `
+    -Message "PnpQueryRemove must quiesce active streaming hardware before remove/restart."
+
+Assert-Contains `
+    -Path "driver-project\device.cpp" `
+    -Pattern "PnpCancelRemove[\s\S]*SetRemovePending\(FALSE\)[\s\S]*Start\s*\([\s\S]*NotifyCameraState\(TRUE\)" `
+    -Message "PnpCancelRemove must restart active streaming hardware after a canceled remove."
+
+Assert-Contains `
+    -Path "driver-project\device.cpp" `
+    -Pattern "PnpCancelRemove[\s\S]*SetFilterFactoryDeviceClassesState\(TRUE,\s*""PnpCancelRemove""\)" `
+    -Message "PnpCancelRemove must re-enable AVStream device classes after a canceled remove."
+
+Assert-Contains `
+    -Path "driver-project\device.cpp" `
+    -Pattern "PnpRemove[\s\S]*SetFilterFactoryDeviceClassesState\(FALSE,\s*""PnpRemove""\)[\s\S]*m_FilterFactory\s*=\s*NULL" `
+    -Message "PnpRemove must disable AVStream device classes and clear the filter factory pointer."
+
+Assert-Contains `
+    -Path "driver-project\device.cpp" `
+    -Pattern "PnpSurpriseRemoval[\s\S]*SetFilterFactoryDeviceClassesState\(FALSE,\s*""PnpSurpriseRemoval""\)[\s\S]*m_FilterFactory\s*=\s*NULL" `
+    -Message "PnpSurpriseRemoval must disable AVStream device classes and clear the filter factory pointer."
 
 Assert-Contains `
     -Path "driver-project\device.cpp" `
@@ -103,6 +143,21 @@ Assert-Contains `
     -Path "driver-project\capture.cpp" `
     -Pattern "DispatchClose[\s\S]*SetState\(KSSTATE_STOP,\s*KSSTATE_RUN\)" `
     -Message "Pin close must force stop cleanup for Device Fundamentals PnP cycles."
+
+Assert-Contains `
+    -Path "driver-project\capture.cpp" `
+    -Pattern "DispatchCreate[\s\S]*IsRemovePending\s*\(\s*\)[\s\S]*STATUS_DELETE_PENDING" `
+    -Message "Pin create must fail while the device is remove-pending."
+
+Assert-Contains `
+    -Path "driver-project\capture.cpp" `
+    -Pattern "KSSTATE_ACQUIRE[\s\S]*IsRemovePending\s*\(\s*\)[\s\S]*STATUS_DELETE_PENDING" `
+    -Message "Pin acquire must fail while the device is remove-pending."
+
+Assert-Contains `
+    -Path "driver-project\capture.cpp" `
+    -Pattern "KSSTATE_RUN[\s\S]*IsRemovePending\s*\(\s*\)[\s\S]*STATUS_DELETE_PENDING" `
+    -Message "Pin run must fail while the device is remove-pending."
 
 Assert-Contains `
     -Path "driver-project\capture.cpp" `

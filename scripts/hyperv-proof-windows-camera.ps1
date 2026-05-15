@@ -185,6 +185,7 @@ public static class CameraProofWindowOps {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 }
 "@
 foreach ($capability in @("microphone", "webcam")) {
@@ -212,7 +213,10 @@ if ($cameraWindow) {
     Start-Sleep -Milliseconds 500
     [void][CameraProofWindowOps]::SetForegroundWindow($cameraWindow.MainWindowHandle)
     Start-Sleep -Seconds 2
-    [System.Windows.Forms.SendKeys]::SendWait("%y")
+    [CameraProofWindowOps]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+    [CameraProofWindowOps]::keybd_event(0x59, 0, 0, [UIntPtr]::Zero)
+    [CameraProofWindowOps]::keybd_event(0x59, 0, 0x0002, [UIntPtr]::Zero)
+    [CameraProofWindowOps]::keybd_event(0x12, 0, 0x0002, [UIntPtr]::Zero)
     Start-Sleep -Seconds 3
     $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
     $changeCameraX = [Math]::Max(1, $bounds.Width - 46)
@@ -259,9 +263,11 @@ finally {
         "& '$escapedScriptPath' -ScreenshotPath '$escapedScreenshotPath' -ResultPath '$escapedResultPath' > '$escapedStdoutPath' 2> '$escapedStderrPath'" |
             Set-Content -LiteralPath $launcherPath -Encoding ASCII
         & $schtasks /delete /tn $taskName /f 2>$null | Out-Null
-        $startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
+        $taskStartAt = (Get-Date).AddMinutes(10)
+        $startTime = $taskStartAt.ToString("HH:mm")
+        $startDate = $taskStartAt.ToString((Get-Culture).DateTimeFormat.ShortDatePattern)
         $taskCommand = '"' + $pwsh + '" -NoProfile -ExecutionPolicy Bypass -STA -File "' + $launcherPath + '"'
-        $createOutput = & $schtasks /create /tn $taskName /sc once /st $startTime /tr $taskCommand /ru $TaskUser /rp $TaskPassword /rl HIGHEST /it /f 2>&1 | Out-String
+        $createOutput = & $schtasks /create /tn $taskName /sc once /sd $startDate /st $startTime /tr $taskCommand /ru $TaskUser /rp $TaskPassword /rl HIGHEST /it /f 2>&1 | Out-String
         $runOutput = & $schtasks /run /tn $taskName 2>&1 | Out-String
 
         $deadline = (Get-Date).AddSeconds(90)
@@ -278,8 +284,11 @@ finally {
             Start-Sleep -Seconds 2
         }
 
+        $endOutput = & $schtasks /end /tn $taskName 2>&1 | Out-String
         $queryOutput = & $schtasks /query /tn $taskName /v /fo list 2>&1 | Out-String
-        throw ("Timed out waiting for Camera screenshot task. Create={0}`nRun={1}`nQuery={2}" -f $createOutput.Trim(), $runOutput.Trim(), $queryOutput.Trim())
+        $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        throw ("Timed out waiting for Camera screenshot task. Create={0}`nRun={1}`nEnd={2}`nQuery={3}`nSTDOUT={4}`nSTDERR={5}" -f $createOutput.Trim(), $runOutput.Trim(), $endOutput.Trim(), $queryOutput.Trim(), $stdout.Trim(), $stderr.Trim())
     } -ArgumentList $guestRoot, $guestScreenshotPath, $GuestUser, $GuestPasswordPlaintext
 
     Copy-HvFromGuest -Session $session -GuestPath $guestScreenshotPath -LocalPath $hostScreenshotPath -LogPath $logPath

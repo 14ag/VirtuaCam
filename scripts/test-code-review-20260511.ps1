@@ -81,5 +81,8 @@ Assert-Contains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern "Vir
 Assert-NotContains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern "VIRTUACAM_STARTUP_ARGS[\s\S]{0,600}Watcher service" -Message "Service launch must ignore VIRTUACAM_STARTUP_ARGS."
 Assert-Contains -Path "scripts\hyperv-proof-chrome.ps1" -Pattern 'EnvUserKey\s+"DRIVER_TEST_VM_USERNAME"' -Message "Chrome VM proof must use .env guest username in noninteractive runs."
 Assert-Contains -Path "scripts\hyperv-proof-chrome.ps1" -Pattern 'EnvPasswordKey\s+"DRIVER_TEST_VM_PASSWORD"' -Message "Chrome VM proof must use .env guest password in noninteractive runs."
+Assert-Contains -Path "scripts\playwright-vm-webcam-proof.ps1" -Pattern '\[ValidateRange\(1,\s*10\)\]\[int\]\$CdpConnectAttempts\s*=\s*3' -Message "Playwright proof must retry transient CDP attach failures by default."
+Assert-Contains -Path "scripts\playwright-vm-webcam-proof.ps1" -Pattern 'connectOverCDP\(attachBase,\s*\{\s*timeout:\s*connectTimeoutMs\s*\}\)' -Message "Playwright proof must pass an explicit CDP connect timeout."
+Assert-Contains -Path "scripts\playwright-vm-webcam-proof.ps1" -Pattern 'cdp-probe-attempt-\$\{attempt\}\.json' -Message "Playwright proof must write CDP probe artifacts for failed attach triage."
 
 Write-Host "Code review 20260511 whitebox checks passed."

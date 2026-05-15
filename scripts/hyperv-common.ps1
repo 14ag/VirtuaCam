@@ -449,7 +449,8 @@ function Test-HvTransientPowerShellDirectError {
 
     return ($Message -match "The credential is invalid" -or
         $Message -match "A remote session might have ended" -or
-        $Message -match "Windows PowerShell cannot handle")
+        $Message -match "Windows PowerShell cannot handle" -or
+        $Message -match "Cannot process request because the process .* has exited")
 }
 
 function Get-HvVmConnectionState {
@@ -532,8 +533,21 @@ function Get-HvVmConnectionState {
 
             $explorerAgeSeconds = $null
             if ($explorer) {
-                $oldest = $explorer | Sort-Object StartTime | Select-Object -First 1
-                $explorerAgeSeconds = [int]((Get-Date) - $oldest.StartTime).TotalSeconds
+                $explorerStartTimes = @($explorer | ForEach-Object {
+                    try {
+                        $_.StartTime
+                    }
+                    catch {
+                        $null
+                    }
+                } | Where-Object { $_ })
+
+                if ($explorerStartTimes.Count -gt 0) {
+                    $oldestStartTime = $explorerStartTimes | Sort-Object | Select-Object -First 1
+                    $explorerAgeSeconds = [int]((Get-Date) - $oldestStartTime).TotalSeconds
+                } else {
+                    $explorerAgeSeconds = 0
+                }
             }
 
             $svc = Get-Service -Name "vmicvmsession" -ErrorAction SilentlyContinue
@@ -878,7 +892,59 @@ function Copy-HvFromGuest {
     Write-HvLog -Message ("Copy guest -> host: {0} => {1}" -f $GuestPath, $resolvedLocal) -LogPath $LogPath
 
     if ($Recurse) {
-        Copy-Item -FromSession $Session -Path $GuestPath -Destination $resolvedLocal -Recurse -Force
+        $remoteArchive = $null
+        $localArchive = Join-Path ([System.IO.Path]::GetTempPath()) ("VirtuaCam-HvCopy-{0}.zip" -f ([guid]::NewGuid().ToString("N")))
+        try {
+            $remoteArchive = Invoke-Command -Session $Session -ScriptBlock {
+                param($Path)
+
+                if (-not (Test-Path -LiteralPath $Path)) {
+                    throw "Guest path not found: $Path"
+                }
+
+                $item = Get-Item -LiteralPath $Path -Force
+                $zipPath = Join-Path $env:TEMP ("VirtuaCam-HvCopy-{0}.zip" -f ([guid]::NewGuid().ToString("N")))
+                if ($item.PSIsContainer) {
+                    $children = @(Get-ChildItem -LiteralPath $Path -Force)
+                    if ($children.Count -eq 0) {
+                        return [pscustomobject]@{
+                            ZipPath = ""
+                            IsEmpty = $true
+                        }
+                    }
+
+                    Compress-Archive -LiteralPath @($children | ForEach-Object { $_.FullName }) -DestinationPath $zipPath -CompressionLevel Fastest -Force
+                } else {
+                    Compress-Archive -LiteralPath $Path -DestinationPath $zipPath -CompressionLevel Fastest -Force
+                }
+
+                [pscustomobject]@{
+                    ZipPath = $zipPath
+                    IsEmpty = $false
+                }
+            } -ArgumentList $GuestPath -ErrorAction Stop
+
+            if ($remoteArchive.IsEmpty) {
+                $null = New-Item -ItemType Directory -Force -Path $resolvedLocal
+                return
+            }
+
+            Copy-Item -FromSession $Session -Path ([string]$remoteArchive.ZipPath) -Destination $localArchive -Force
+            if (Test-Path -LiteralPath $resolvedLocal) {
+                Remove-Item -LiteralPath $resolvedLocal -Recurse -Force
+            }
+            $null = New-Item -ItemType Directory -Force -Path $resolvedLocal
+            Expand-Archive -LiteralPath $localArchive -DestinationPath $resolvedLocal -Force
+        }
+        finally {
+            if ($remoteArchive -and -not [string]::IsNullOrWhiteSpace([string]$remoteArchive.ZipPath)) {
+                Invoke-Command -Session $Session -ScriptBlock {
+                    param($Path)
+                    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+                } -ArgumentList ([string]$remoteArchive.ZipPath) -ErrorAction SilentlyContinue | Out-Null
+            }
+            Remove-Item -LiteralPath $localArchive -Force -ErrorAction SilentlyContinue
+        }
     } else {
         Copy-Item -FromSession $Session -Path $GuestPath -Destination $resolvedLocal -Force
     }
