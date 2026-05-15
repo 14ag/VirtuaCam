@@ -21,19 +21,16 @@
 
 ## Skip File
 
-Create a skip list containing the blocked test name before the next failed-only run:
+Machine-readable skip list:
 
 ```powershell
-@(
-  'Camera Driver Test - Photo Capture - Capture an NV12 photo from each format exposed on the preferred stream for video preview'
-) | Set-Content -LiteralPath '.\test-reports\vhlk-failed-export-20260515-060000\blocked-test-names.txt' -Encoding UTF8
+.\docs\vhlk-blocked-test-names.txt
 ```
 
-Filter the failed-name list before running failed-only vHLK:
+Failed-only runner behavior:
 
 ```powershell
-.\scripts\filter-vhlk-test-list.ps1 `
-  -InputPath '.\test-reports\vhlk-failed-export-20260515-060000\failed-test-names.txt' `
-  -SkipPath '.\test-reports\vhlk-failed-export-20260515-060000\blocked-test-names.txt' `
-  -OutputPath '.\test-reports\vhlk-failed-export-20260515-060000\failed-test-names.filtered.txt'
+.\scripts\run-vhlk-failed-only.ps1
 ```
+
+The runner filters `docs\vhlk-blocked-test-names.txt` unless `-SkipBlockerFilter` is used.
