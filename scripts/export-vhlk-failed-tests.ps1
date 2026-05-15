@@ -3,7 +3,10 @@ param(
     [string]$VhlkVmName = "vhlk",
     [string]$ProjectName = "VirtuaCam",
     [string]$ArtifactRoot = "",
-    [switch]$NoOpenController
+    [string]$ShortExportRoot = "C:\VhlkExport",
+    [switch]$NoOpenController,
+    [switch]$SkipFreshStart,
+    [switch]$ExportFailedResultDetails
 )
 
 Set-StrictMode -Version Latest
@@ -33,9 +36,15 @@ $cred = [pscredential]::new($user, (ConvertTo-SecureString $password -AsPlainTex
 $session = $null
 
 try {
+    if (-not $SkipFreshStart) {
+        Write-HvLog -Message ("Fresh-starting vHLK controller '{0}' before failed-name export." -f $VhlkVmName) -LogPath $logPath -Level STEP
+        $freshStart = Start-HvFreshControllerVm -VmName $VhlkVmName -Credential $cred -ReadyTimeoutSeconds 300 -LogPath $logPath
+        $freshStart | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "vm-fresh-start.json") -Encoding UTF8
+    }
+
     $session = Wait-HvPowerShellDirect -VmName $VhlkVmName -Credential $cred -TimeoutSeconds 180 -LogPath $logPath 6>$null
     $status = Invoke-Command -Session $session -ScriptBlock {
-        param($ProjectName)
+        param($ProjectName, $ExportFailedResultDetails, $ShortExportRoot)
 
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -59,6 +68,48 @@ try {
             }
         } | Sort-Object Name)
 
+        $detailRoot = ""
+        $detailManifest = @()
+        if ($ExportFailedResultDetails) {
+            if ([string]::IsNullOrWhiteSpace($ShortExportRoot)) {
+                $ShortExportRoot = "C:\VhlkExport"
+            }
+            $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $detailRoot = Join-Path $ShortExportRoot ("VirtuaCamFailedLogs-{0}" -f $stamp)
+            if (Test-Path -LiteralPath $detailRoot) {
+                Remove-Item -LiteralPath $detailRoot -Recurse -Force
+            }
+            $null = New-Item -ItemType Directory -Force -Path $detailRoot
+
+            foreach ($test in @($tests | Where-Object { [string]$_.Status -eq "Failed" } | Sort-Object Name)) {
+                $safeName = ([string]$test.Name) -replace '[\\/:*?"<>|]', '_'
+                if ($safeName.Length -gt 90) {
+                    $safeName = $safeName.Substring(0, 90)
+                }
+                $testDir = Join-Path $detailRoot $safeName
+                $null = New-Item -ItemType Directory -Force -Path $testDir
+                $index = 0
+                foreach ($result in @($test.GetTestResults() | Where-Object { [string]$_.Status -eq "Failed" })) {
+                    $index++
+                    $outDir = Join-Path $testDir ("result-{0}" -f $index)
+                    $null = New-Item -ItemType Directory -Force -Path $outDir
+                    $errorPath = Join-Path $testDir ("result-{0}-export-error.txt" -f $index)
+                    try {
+                        $result.Export($outDir)
+                    }
+                    catch {
+                        $_ | Out-String | Set-Content -LiteralPath $errorPath -Encoding UTF8
+                    }
+                    $detailManifest += [pscustomobject]@{
+                        Name = [string]$test.Name
+                        ResultIndex = $index
+                        ExportPath = $outDir
+                        ErrorPath = if (Test-Path -LiteralPath $errorPath) { $errorPath } else { "" }
+                    }
+                }
+            }
+        }
+
         [pscustomobject]@{
             CheckedAt = (Get-Date).ToString("s")
             Controller = $env:COMPUTERNAME
@@ -69,13 +120,28 @@ try {
             NotRun = @($tests | Where-Object { [string]$_.Status -eq "NotRun" }).Count
             Failures = $failures
             FailedTestNames = @($failures | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
+            FailedResultDetailsGuestRoot = $detailRoot
+            FailedResultDetails = $detailManifest
         }
-    } -ArgumentList $ProjectName
+    } -ArgumentList $ProjectName, ([bool]$ExportFailedResultDetails), $ShortExportRoot
 
     $status | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactDir "latest-status.json") -Encoding UTF8
     @($status.FailedTestNames) | Set-Content -LiteralPath (Join-Path $artifactDir "failed-test-names.txt") -Encoding UTF8
+    if ($ExportFailedResultDetails -and -not [string]::IsNullOrWhiteSpace([string]$status.FailedResultDetailsGuestRoot)) {
+        $detailHostRoot = Join-Path $artifactDir "failed-result-details"
+        Copy-HvFromGuest -Session $session -GuestPath ([string]$status.FailedResultDetailsGuestRoot) -LocalPath $detailHostRoot -Recurse -LogPath $logPath
+    }
     Write-Host ("Exported {0} failed names from {1} tests." -f $status.Failed, $status.Total)
     Write-Host ("Artifacts: {0}" -f $artifactDir)
+}
+catch {
+    [pscustomobject]@{
+        Completed = $false
+        Error = $_.Exception.Message
+        CheckedAt = (Get-Date).ToString("s")
+        ArtifactDir = $artifactDir
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $artifactDir "export-incomplete.json") -Encoding UTF8
+    throw
 }
 finally {
     if ($session) {

@@ -1,8 +1,10 @@
 [CmdletBinding()]
 param(
     [string]$VmName = "driver-test",
+    [string]$CheckpointName = "clean",
     [string]$ArtifactRoot = "",
-    [string]$GuestRoot = ""
+    [string]$GuestRoot = "",
+    [switch]$SkipFreshStart
 )
 
 Set-StrictMode -Version Latest
@@ -37,6 +39,18 @@ $guestToolsRoot = Join-Path $guestScriptsRoot "tools"
 $guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
 
 try {
+    if (-not $SkipFreshStart) {
+        Write-HvLog -Message ("Fresh-starting DUT '{0}' from checkpoint '{1}' before vHLK install." -f $VmName, $CheckpointName) -LogPath $logPath -Level STEP
+        $freshStart = Start-HvFreshCheckpointVm `
+            -VmName $VmName `
+            -CheckpointName $CheckpointName `
+            -Credential $guestCred `
+            -RequireInteractiveSession `
+            -ReadyTimeoutSeconds 420 `
+            -LogPath $logPath
+        $freshStart | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "vm-fresh-start.json") -Encoding UTF8
+    }
+
     Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 300 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $logPath | Out-Null
     $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 180 -LogPath $logPath
 

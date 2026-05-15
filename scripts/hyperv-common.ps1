@@ -208,6 +208,13 @@ function Stop-HvVmForRestore {
             return
         }
 
+        if ([string]$vm.State -eq "Saved") {
+            Write-HvLog -Message ("Removing saved state for VM '{0}' before fresh start." -f $VmName) -LogPath $LogPath -Level WARN
+            Remove-VMSavedState -VMName $VmName -Confirm:$false | Out-Null
+            Start-Sleep -Seconds 2
+            continue
+        }
+
         if (-not $stopRequested -and [string]$vm.State -ne "Stopping") {
             Write-HvLog -Message ("Stopping VM '{0}' from state {1} before checkpoint restore." -f $VmName, $vm.State) -LogPath $LogPath -Level WARN
             Stop-VM -Name $VmName -TurnOff -Force -Confirm:$false | Out-Null
@@ -234,6 +241,172 @@ function Restore-HvCheckpoint {
 
     Write-HvLog -Message ("Restoring checkpoint '{0}' on VM '{1}'." -f $CheckpointName, $VmName) -LogPath $LogPath
     Restore-VMSnapshot -VMName $VmName -Name $CheckpointName -Confirm:$false | Out-Null
+}
+
+function Get-HvVmPowerSnapshot {
+    param([Parameter(Mandatory = $true)][string]$VmName)
+
+    $vm = Get-VM -Name $VmName -ErrorAction Stop
+    [pscustomobject]@{
+        VmName = $VmName
+        State = [string]$vm.State
+        Status = [string]$vm.Status
+        Uptime = [string]$vm.Uptime
+        Generation = $vm.Generation
+        CheckedAtUtc = [DateTime]::UtcNow.ToString("o")
+    }
+}
+
+function Stop-HvVmHard {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [int]$TimeoutSeconds = 180,
+        [string]$LogPath = ""
+    )
+
+    Stop-HvVmForRestore -VmName $VmName -TimeoutSeconds $TimeoutSeconds -LogPath $LogPath
+}
+
+function Start-HvVmFromOff {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [int]$TimeoutSeconds = 180,
+        [string]$LogPath = ""
+    )
+
+    $vm = Get-VM -Name $VmName -ErrorAction Stop
+    if ([string]$vm.State -eq "Paused") {
+        Write-HvLog -Message ("Resuming VM '{0}'." -f $VmName) -LogPath $LogPath -Level STEP
+        Resume-VM -Name $VmName | Out-Null
+    } elseif ([string]$vm.State -ne "Running") {
+        Write-HvLog -Message ("Starting VM '{0}' from state {1}." -f $VmName, $vm.State) -LogPath $LogPath -Level STEP
+        Start-VM -Name $VmName | Out-Null
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $vm = Get-VM -Name $VmName -ErrorAction Stop
+        if ([string]$vm.State -eq "Running") {
+            return
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Timed out waiting for VM '$VmName' to enter Running state."
+}
+
+function Start-HvFreshCheckpointVm {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][string]$CheckpointName,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential,
+        [int]$StopTimeoutSeconds = 180,
+        [int]$StartTimeoutSeconds = 180,
+        [int]$ReadyTimeoutSeconds = 360,
+        [int]$PollIntervalSeconds = 3,
+        [int]$ReadyThresholdSeconds = 30,
+        [switch]$RequireInteractiveSession,
+        [string]$LogPath = ""
+    )
+
+    $before = Get-HvVmPowerSnapshot -VmName $VmName
+    Stop-HvVmHard -VmName $VmName -TimeoutSeconds $StopTimeoutSeconds -LogPath $LogPath
+    Restore-HvCheckpoint -VmName $VmName -CheckpointName $CheckpointName -LogPath $LogPath
+    Stop-HvVmHard -VmName $VmName -TimeoutSeconds $StopTimeoutSeconds -LogPath $LogPath
+    $afterRestore = Get-HvVmPowerSnapshot -VmName $VmName
+    Start-HvVmFromOff -VmName $VmName -TimeoutSeconds $StartTimeoutSeconds -LogPath $LogPath
+    $readyArgs = @{
+        VmName = $VmName
+        Credential = $Credential
+        TimeoutSeconds = $ReadyTimeoutSeconds
+        PollIntervalSeconds = $PollIntervalSeconds
+        ReadyThresholdSeconds = $ReadyThresholdSeconds
+        LogPath = $LogPath
+    }
+    if ($RequireInteractiveSession) {
+        $readyArgs.RequireInteractiveSession = $true
+    } else {
+        $readyArgs.RequirePowerShellDirect = $true
+    }
+    $ready = Wait-HvVmReady @readyArgs
+
+    [pscustomobject]@{
+        Role = "DUT"
+        VmName = $VmName
+        CheckpointName = $CheckpointName
+        Action = "RestoreCheckpointStartWait"
+        Before = $before
+        AfterRestore = $afterRestore
+        Ready = $ready
+        CompletedAtUtc = [DateTime]::UtcNow.ToString("o")
+    }
+}
+
+function Start-HvFreshControllerVm {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential,
+        [int]$StopTimeoutSeconds = 180,
+        [int]$StartTimeoutSeconds = 180,
+        [int]$ReadyTimeoutSeconds = 300,
+        [int]$PollIntervalSeconds = 3,
+        [string]$LogPath = ""
+    )
+
+    $before = Get-HvVmPowerSnapshot -VmName $VmName
+    Stop-HvVmHard -VmName $VmName -TimeoutSeconds $StopTimeoutSeconds -LogPath $LogPath
+    $afterStop = Get-HvVmPowerSnapshot -VmName $VmName
+    Start-HvVmFromOff -VmName $VmName -TimeoutSeconds $StartTimeoutSeconds -LogPath $LogPath
+    $ready = Wait-HvVmReady -VmName $VmName -Credential $Credential -TimeoutSeconds $ReadyTimeoutSeconds -PollIntervalSeconds $PollIntervalSeconds -RequirePowerShellDirect -LogPath $LogPath
+
+    [pscustomobject]@{
+        Role = "Controller"
+        VmName = $VmName
+        Action = "PowerCycleStartWait"
+        Before = $before
+        AfterStop = $afterStop
+        Ready = $ready
+        CompletedAtUtc = [DateTime]::UtcNow.ToString("o")
+    }
+}
+
+function Initialize-HvVhlkRunVms {
+    param(
+        [string]$VhlkVmName = "vhlk",
+        [string]$DutVmName = "driver-test",
+        [string]$DutCheckpointName = "clean",
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$VhlkCredential,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$DutCredential,
+        [switch]$SkipControllerFreshStart,
+        [switch]$SkipDutFreshStart,
+        [switch]$RequireDutInteractiveSession,
+        [string]$LogPath = ""
+    )
+
+    $steps = @()
+    if (-not $SkipControllerFreshStart) {
+        $steps += Start-HvFreshControllerVm -VmName $VhlkVmName -Credential $VhlkCredential -LogPath $LogPath
+    }
+    if (-not $SkipDutFreshStart) {
+        $dutArgs = @{
+            VmName = $DutVmName
+            CheckpointName = $DutCheckpointName
+            Credential = $DutCredential
+            LogPath = $LogPath
+        }
+        if ($RequireDutInteractiveSession) {
+            $dutArgs.RequireInteractiveSession = $true
+        }
+        $steps += Start-HvFreshCheckpointVm @dutArgs
+    }
+
+    [pscustomobject]@{
+        VhlkVmName = $VhlkVmName
+        DutVmName = $DutVmName
+        DutCheckpointName = $DutCheckpointName
+        Steps = $steps
+        CompletedAtUtc = [DateTime]::UtcNow.ToString("o")
+    }
 }
 
 function Test-HvVmConnectionStateAtLeast {
@@ -265,6 +438,18 @@ function Test-HvVmConnectionStateAtLeast {
     }
 
     return [int]$rank[$State] -ge [int]$rank[$MinimumState]
+}
+
+function Test-HvTransientPowerShellDirectError {
+    param([string]$Message)
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return $false
+    }
+
+    return ($Message -match "The credential is invalid" -or
+        $Message -match "A remote session might have ended" -or
+        $Message -match "Windows PowerShell cannot handle")
 }
 
 function Get-HvVmConnectionState {
@@ -545,7 +730,8 @@ function Wait-HvVmReady {
         if ($signature -ne $lastSignature) {
             Write-HvLog -Message ("VM readiness {0}: state={1}; status={2}; heartbeat={3}; psdirect={4}; connection={5}; detail={6}; vmicvmsession={7}; logonui={8}; userinit={9}; explorer={10}; explorerAge={11}" -f $VmName, $ready.State, $ready.Status, $ready.Heartbeat, $ready.PowerShellDirectReady, $ready.ConnectionState, $ready.ConnectionDetail, $ready.VmicVmSessionStatus, $ready.LogonUIRunning, $ready.UserinitRunning, $ready.ExplorerRunning, $ready.ExplorerAgeSeconds) -LogPath $LogPath
             if (-not [string]::IsNullOrWhiteSpace($ready.LastError)) {
-                Write-HvLog -Message ("VM readiness probe error {0}: {1}" -f $VmName, $ready.LastError) -LogPath $LogPath -Level WARN
+                $probeLevel = if (Test-HvTransientPowerShellDirectError -Message ([string]$ready.LastError)) { "INFO" } else { "WARN" }
+                Write-HvLog -Message ("VM readiness probe error {0}: {1}" -f $VmName, $ready.LastError) -LogPath $LogPath -Level $probeLevel
             }
             $lastSignature = $signature
         }

@@ -2,6 +2,7 @@
 param(
     [string]$VhlkVmName = "vhlk",
     [string]$DutVmName = "driver-test",
+    [string]$DutCheckpointName = "clean",
     [string]$ProjectName = "VirtuaCam",
     [string]$PlaylistPath = "C:\Users\Administrator\Desktop\Compat Playlists\HLK Version 2004 CompatPlaylist x86 x64 ARM64.xml",
     [int]$TestLimit = 3,
@@ -20,6 +21,8 @@ param(
     [switch]$NoSetDutReady,
     [switch]$AllowStaleDutHeartbeat,
     [switch]$SkipLabNetworkRepair,
+    [switch]$SkipFreshStart,
+    [switch]$SkipDutInstall,
     [switch]$DryRun
 )
 
@@ -144,6 +147,28 @@ try {
     $dutCred = New-CredentialFromEnv -EnvMap $envMap -UserKey "DRIVER_TEST_VM_USERNAME" -PasswordKey "DRIVER_TEST_VM_PASSWORD"
 
     Write-Host "[1/7] start/check VMs" -ForegroundColor Cyan
+    if (-not $SkipFreshStart) {
+        $freshStart = Initialize-HvVhlkRunVms `
+            -VhlkVmName $VhlkVmName `
+            -DutVmName $DutVmName `
+            -DutCheckpointName $DutCheckpointName `
+            -VhlkCredential $vhlkCred `
+            -DutCredential $dutCred `
+            -RequireDutInteractiveSession `
+            -LogPath $logPath
+        $freshStart | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $artifactDir "vm-fresh-start.json") -Encoding UTF8
+    }
+    if (-not $SkipDutInstall) {
+        $dutInstallArtifact = Join-Path $artifactDir "dut-install"
+        & (Join-Path $scriptDir "install-driver-for-vhlk.ps1") `
+            -VmName $DutVmName `
+            -CheckpointName $DutCheckpointName `
+            -ArtifactRoot $dutInstallArtifact `
+            -SkipFreshStart
+        if (-not $?) {
+            throw "DUT vHLK smoke install failed. See $dutInstallArtifact"
+        }
+    }
     Wait-HvVmReady -VmName $VhlkVmName -Credential $vhlkCred -TimeoutSeconds 240 -PollIntervalSeconds 3 -RequirePowerShellDirect -LogPath $logPath | Out-Null
     Wait-HvVmReady -VmName $DutVmName -Credential $dutCred -TimeoutSeconds 240 -PollIntervalSeconds 3 -RequirePowerShellDirect -LogPath $logPath | Out-Null
 
@@ -593,6 +618,7 @@ try {
 
         $selectedNames = @($SelectedTests | ForEach-Object { [string]$_ })
         $tests = @($project.GetTests() | Where-Object { $selectedNames -contains ([string]$_.Name) })
+        $selectedTotal = $selectedNames.Count
 
         $groups = @($tests | Group-Object { "{0},{1}" -f $_.Status, $_.ExecutionState } | Sort-Object Name | ForEach-Object {
             [pscustomobject]@{ Name = $_.Name; Count = $_.Count }
@@ -618,7 +644,8 @@ try {
 
         [pscustomobject]@{
             CheckedAt = (Get-Date).ToString("s")
-            Total = $tests.Count
+            Total = $selectedTotal
+            MatchedTotal = $tests.Count
             Completed = $completed
             Passed = $passed
             Failed = $failed
@@ -713,8 +740,16 @@ try {
         $elapsed = [int]((Get-Date) - $start).TotalSeconds
         $remaining = [Math]::Max(0, [int]($deadline - (Get-Date)).TotalSeconds)
         $glyph = $spinner[$tick % $spinner.Count]
-        $currentIndex = if ($status.RunningCount -gt 0) { [Math]::Min($status.Total, $status.Completed + 1) } else { $status.Completed }
-        $label = if ($status.RunningCount -gt 0) {
+        $currentIndex = if ($status.Total -gt 0 -and $status.Completed -ge $status.Total) {
+            $status.Total
+        } elseif ($status.RunningCount -gt 0) {
+            [Math]::Min($status.Total, $status.Completed + 1)
+        } else {
+            $status.Completed
+        }
+        $label = if ($status.Total -gt 0 -and $status.Completed -ge $status.Total) {
+            "completed"
+        } elseif ($status.RunningCount -gt 0) {
             "running: {0}" -f $status.CurrentName
         } elseif ($status.InQueue -gt 0) {
             "waiting scheduler ({0} queued)" -f $status.InQueue

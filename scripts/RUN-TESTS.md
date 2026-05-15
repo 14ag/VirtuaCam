@@ -38,7 +38,10 @@ $paths = @(
   '.\scripts\run-vhlk-tests.ps1',
   '.\scripts\run-vhlk-smoke-3tests.ps1',
   '.\scripts\run-vhlk-failed-only.ps1',
+  '.\scripts\export-vhlk-failed-tests.ps1',
+  '.\scripts\filter-vhlk-test-list.ps1',
   '.\scripts\test-vhlk-runner-flow.ps1',
+  '.\scripts\hyperv-common.ps1',
   '.\scripts\install-all.ps1',
   '.\scripts\install-driver-for-vhlk.ps1'
 )
@@ -63,6 +66,7 @@ Run local checks:
 .\scripts\test-code-review-20260511.ps1
 .\scripts\test-frame-ex-abi.ps1
 .\scripts\test-camera-profile-contract.ps1
+.\scripts\test-driver-pnp-contract.ps1
 .\scripts\test-ai-window-cli.ps1
 .\scripts\build-all.ps1 -Clean
 ```
@@ -72,6 +76,7 @@ Pass criteria:
 - All scripts exit `0`.
 - Build ends with `BUILD-ALL SUCCEEDED`.
 - `output\` contains staged driver, software, catalog, and test certificate artifacts.
+- `test-driver-pnp-contract.ps1` confirms PnP query-remove handling, close callbacks, device capabilities, INF hardware removal-policy override, and vHLK blocker filtering.
 
 ## Stage 2 - Driver-Test Gate
 
@@ -103,20 +108,29 @@ Pass criteria:
 
 ## Stage 3 - vHLK Prep
 
-Export current failed names from the controller:
+Use the one-call failed-only runner. It exports controller failed names when `-TestNameListPath` is not provided, filters documented blockers from `docs\vhlk-blocked-test-names.txt`, fresh-starts VMs, installs the staged DUT driver, queues selected tests, monitors counters, and writes artifacts.
+
+```powershell
+.\scripts\run-vhlk-failed-only.ps1 `
+  -PendingStartTimeoutSeconds 300 `
+  -TimeoutMinutes 180 `
+  -ResearchGateFailureCount 2 `
+  -StopOnFailureCount 10 `
+  -MaxControllerReconnectFailures 5
+```
+
+Direct export command:
 
 ```powershell
 .\scripts\export-vhlk-failed-tests.ps1
 ```
 
-Use the newest exported list:
+Direct export behavior:
 
-```powershell
-$failedList = Get-ChildItem .\test-reports -Directory -Filter 'vhlk-failed-export-*' |
-  Sort-Object LastWriteTime -Descending |
-  Select-Object -First 1 |
-  ForEach-Object { Join-Path $_.FullName 'failed-test-names.txt' }
-```
+- Fresh-starts `vhlk` by default, then exports project status.
+- Writes `latest-status.json` and `failed-test-names.txt`.
+- Writes `export-incomplete.json` when export fails before completion.
+- Use `-SkipFreshStart` only when another wrapper already fresh-started the controller.
 
 Fallback list:
 
@@ -124,16 +138,14 @@ Fallback list:
 $failedList = '.\test-reports\vhlk-oneclick-20260512-202918\failed-test-names.txt'
 ```
 
-Use fallback only when controller export is unavailable.
+Use fallback only when controller export is unavailable, then pass `-TestNameListPath $failedList -NoExport` to `run-vhlk-failed-only.ps1`.
 
 ## Stage 4 - Failed-Only vHLK
 
-Run failed-only list:
+Normal command:
 
 ```powershell
 .\scripts\run-vhlk-failed-only.ps1 `
-  -TestNameListPath $failedList `
-  -NoExport `
   -PendingStartTimeoutSeconds 300 `
   -TimeoutMinutes 180 `
   -ResearchGateFailureCount 2 `
@@ -143,6 +155,11 @@ Run failed-only list:
 
 Runner behavior:
 
+- Restores `driver-test` checkpoint `clean`, forces it off, starts it, and waits for readiness.
+- Forces `vhlk` off, starts it, and waits for PowerShell Direct.
+- Writes `vm-fresh-start.json`.
+- Exports failed names unless `-TestNameListPath` and `-NoExport` are used.
+- Filters `docs\vhlk-blocked-test-names.txt` unless `-SkipBlockerFilter` is used.
 - Installs staged `output\` package into `driver-test` unless `-SkipDutInstall` is used.
 - Uses selected failed-test names as monitored total.
 - Scopes cleanup and cancellation to selected tests.
@@ -166,7 +183,6 @@ If vHLK fails:
 After failed-only vHLK passes and all local/driver-test gates pass, run full vHLK sanity:
 
 ```powershell
-.\scripts\install-driver-for-vhlk.ps1
 .\scripts\run-vhlk-tests.ps1 `
   -PendingStartTimeoutSeconds 300 `
   -TimeoutMinutes 480 `
@@ -177,6 +193,7 @@ After failed-only vHLK passes and all local/driver-test gates pass, run full vHL
 
 Pass criteria:
 
+- `run-vhlk-tests.ps1` fresh-starts `vhlk` and `driver-test`, installs staged `output\` into DUT, then queues the full project.
 - Final vHLK run completes without failed status.
 - Any impossible lab/tool blocker is documented under `docs\` and skipped only on the next failed-only run.
 
