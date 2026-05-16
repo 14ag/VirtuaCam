@@ -26,6 +26,11 @@ private:
     // The AVStream filter object associated with this CCaptureFilter.
     //
     PKSFILTER m_Filter;
+
+    //
+    // Current software-trigger mode for the still image stream.
+    //
+    volatile LONG m_StillVideoControlMode;
    
     //
     // Cleanup():
@@ -99,7 +104,9 @@ public:
     DECLARE_PROPERTY_SET_HANDLER(RegisterEvent)
     DECLARE_PROPERTY_HANDLERS(VideoControlMode)
     DECLARE_PROPERTY_GET_HANDLER(VideoControlCaps)
+    DECLARE_PROPERTY_GET_HANDLER(ImagePinCapability)
     DECLARE_PROPERTY_HANDLERS(CameraProfile)
+    DECLARE_PROPERTY_GET_HANDLER(CameraProfileSupport)
 
 };
 

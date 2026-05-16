@@ -361,7 +361,6 @@ Return Value:
         if (NT_SUCCESS(Status)) {
             m_FilterFactory = filterFactory;
             SetFilterFactoryDeviceClassesState(TRUE, "PnpStart");
-            Status = VirtuaCamPublishCameraProfiles(filterFactory);
         }
 
     } else {

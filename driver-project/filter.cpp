@@ -222,10 +222,28 @@ namespace
         0
     };
 
+    constexpr ULONG StillImagePinIndex = 2;
+    constexpr LONG StillVideoControlSupportedModes =
+        KS_VideoControlFlag_Trigger |
+        KS_VideoControlFlag_IndependentImagePin;
+
     ULONG GetPropertyDataLength(_In_ PIRP Irp)
     {
         PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
         return irpStack->Parameters.DeviceIoControl.OutputBufferLength;
+    }
+
+    ULONG GetPropertyInputLength(_In_ PIRP Irp)
+    {
+        PIO_STACK_LOCATION irpStack = IoGetCurrentIrpStackLocation(Irp);
+        return irpStack->Parameters.DeviceIoControl.InputBufferLength;
+    }
+
+    ULONG GetCameraProfileSetBufferLength(_In_ PIRP Irp)
+    {
+        ULONG inputLength = GetPropertyInputLength(Irp);
+        ULONG outputLength = GetPropertyDataLength(Irp);
+        return inputLength > outputLength ? inputLength : outputLength;
     }
 
     NTSTATUS ValidatePrivatePropertyAccess(_In_ PIRP Irp, _In_ ACCESS_MASK desiredAccess)
@@ -376,6 +394,63 @@ namespace
             reinterpret_cast<PKSCAMERA_EXTENDEDPROP_PROFILE>(Header + 1);
         *Payload = Profile;
     }
+
+    const ULONG CameraProfilePayloadSize =
+        sizeof(KSCAMERA_EXTENDEDPROP_HEADER) +
+        sizeof(KSCAMERA_EXTENDEDPROP_PROFILE);
+    const ULONG CameraProfileBufferedHeaderOffset = 16;
+
+    bool IsCameraProfileHeaderValid(
+        _In_ const KSCAMERA_EXTENDEDPROP_HEADER* Header
+        )
+    {
+        if (!Header) {
+            return false;
+        }
+
+        return Header->Version == 1 &&
+            Header->PinId == KSCAMERA_EXTENDEDPROP_FILTERSCOPE &&
+            Header->Size == CameraProfilePayloadSize &&
+            Header->Capability == KSCAMERA_EXTENDEDPROP_CAPS_ASYNCCONTROL &&
+            Header->Flags == 0;
+    }
+
+    PKSCAMERA_EXTENDEDPROP_HEADER FindCameraProfileHeader(
+        _In_ PIRP Irp,
+        _Inout_ PVOID Data
+        )
+    {
+        if (!Data) {
+            return NULL;
+        }
+
+        ULONG bufferLength = GetCameraProfileSetBufferLength(Irp);
+        if (bufferLength >= CameraProfilePayloadSize) {
+            PKSCAMERA_EXTENDEDPROP_HEADER Header =
+                reinterpret_cast<PKSCAMERA_EXTENDEDPROP_HEADER>(Data);
+            if (IsCameraProfileHeaderValid(Header)) {
+                return Header;
+            }
+        }
+
+        if (bufferLength >= CameraProfileBufferedHeaderOffset + CameraProfilePayloadSize) {
+            PUCHAR Payload = reinterpret_cast<PUCHAR>(Data);
+            PKSCAMERA_EXTENDEDPROP_HEADER Header =
+                reinterpret_cast<PKSCAMERA_EXTENDEDPROP_HEADER>(
+                    Payload + CameraProfileBufferedHeaderOffset);
+            if (IsCameraProfileHeaderValid(Header)) {
+                return Header;
+            }
+        }
+
+        return NULL;
+    }
+
+    NTSTATUS CompleteCameraProfileSizeQuery(_In_ PIRP Irp, _In_ NTSTATUS Status)
+    {
+        Irp->IoStatus.Information = CameraProfilePayloadSize;
+        return Status;
+    }
 }
 
 
@@ -383,7 +458,8 @@ CCaptureFilter::
 CCaptureFilter (
     IN PKSFILTER Filter
     ) :
-    m_Filter (Filter)
+    m_Filter (Filter),
+    m_StillVideoControlMode (0)
 {
     PAGED_CODE();
 }
@@ -844,9 +920,27 @@ GetVideoControlMode(
         return STATUS_BUFFER_TOO_SMALL;
     }
 
+    if (!Request || GetPropertyInputLength(Irp) < sizeof(KSPROPERTY_VIDEOCONTROL_MODE_S)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    PKSPROPERTY_VIDEOCONTROL_MODE_S modeRequest =
+        reinterpret_cast<PKSPROPERTY_VIDEOCONTROL_MODE_S>(Request);
+    if (modeRequest->StreamIndex >= CAPTURE_FILTER_PIN_COUNT) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
+    if (!filter) {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
     PKSPROPERTY_VIDEOCONTROL_MODE_S mode =
         reinterpret_cast<PKSPROPERTY_VIDEOCONTROL_MODE_S>(Data);
-    mode->Mode = 0;
+    mode->StreamIndex = modeRequest->StreamIndex;
+    mode->Mode = modeRequest->StreamIndex == StillImagePinIndex ?
+        filter->m_StillVideoControlMode :
+        0;
 
     Irp->IoStatus.Information = sizeof(*mode);
     return STATUS_SUCCESS;
@@ -869,10 +963,34 @@ SetVideoControlMode(
         return STATUS_BUFFER_TOO_SMALL;
     }
 
+    if (!Request || GetPropertyInputLength(Irp) < sizeof(KSPROPERTY_VIDEOCONTROL_MODE_S)) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     PKSPROPERTY_VIDEOCONTROL_MODE_S mode =
         reinterpret_cast<PKSPROPERTY_VIDEOCONTROL_MODE_S>(Data);
-    if (mode->StreamIndex >= CAPTURE_FILTER_PIN_COUNT) {
+    PKSPROPERTY_VIDEOCONTROL_MODE_S modeRequest =
+        reinterpret_cast<PKSPROPERTY_VIDEOCONTROL_MODE_S>(Request);
+    ULONG streamIndex = modeRequest->StreamIndex;
+    if (streamIndex >= CAPTURE_FILTER_PIN_COUNT) {
         return STATUS_INVALID_PARAMETER;
+    }
+
+    LONG requestedMode = mode->Mode;
+    LONG supportedModeMask = streamIndex == StillImagePinIndex ?
+        StillVideoControlSupportedModes :
+        0;
+    if ((requestedMode & ~supportedModeMask) != 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (streamIndex == StillImagePinIndex) {
+        CCaptureFilter* filter = reinterpret_cast<CCaptureFilter*>(KsGetFilterFromIrp(Irp)->Context);
+        if (!filter) {
+            return STATUS_INVALID_DEVICE_STATE;
+        }
+
+        InterlockedExchange(&filter->m_StillVideoControlMode, requestedMode);
     }
 
     Irp->IoStatus.Information = sizeof(*mode);
@@ -896,13 +1014,48 @@ GetVideoControlCaps(
         return STATUS_BUFFER_TOO_SMALL;
     }
 
-    PKSPROPERTY_VIDEOCONTROL_CAPS_S caps =
-        reinterpret_cast<PKSPROPERTY_VIDEOCONTROL_CAPS_S>(Data);
-    if (caps->StreamIndex >= CAPTURE_FILTER_PIN_COUNT) {
+    if (!Request || GetPropertyInputLength(Irp) < sizeof(KSPROPERTY_VIDEOCONTROL_CAPS_S)) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    caps->VideoControlCaps = 0;
+    PKSPROPERTY_VIDEOCONTROL_CAPS_S capsRequest =
+        reinterpret_cast<PKSPROPERTY_VIDEOCONTROL_CAPS_S>(Request);
+    if (capsRequest->StreamIndex >= CAPTURE_FILTER_PIN_COUNT) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    PKSPROPERTY_VIDEOCONTROL_CAPS_S caps =
+        reinterpret_cast<PKSPROPERTY_VIDEOCONTROL_CAPS_S>(Data);
+
+    caps->StreamIndex = capsRequest->StreamIndex;
+    caps->VideoControlCaps = capsRequest->StreamIndex == StillImagePinIndex ?
+        static_cast<ULONG>(StillVideoControlSupportedModes) :
+        0;
+    Irp->IoStatus.Information = sizeof(*caps);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+CCaptureFilter::
+GetImagePinCapability(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    PAGED_CODE();
+    UNREFERENCED_PARAMETER(Request);
+
+    ULONG bufferLength = GetPropertyDataLength(Irp);
+    if (!Data || bufferLength < sizeof(KSPROPERTY_CAMERACONTROL_IMAGE_PIN_CAPABILITY_S)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    PKSPROPERTY_CAMERACONTROL_IMAGE_PIN_CAPABILITY_S caps =
+        reinterpret_cast<PKSPROPERTY_CAMERACONTROL_IMAGE_PIN_CAPABILITY_S>(Data);
+    caps->Capabilities = 0;
+    caps->Reserved0 = 0;
+
     Irp->IoStatus.Information = sizeof(*caps);
     return STATUS_SUCCESS;
 }
@@ -918,19 +1071,15 @@ GetCameraProfile(
     PAGED_CODE();
     UNREFERENCED_PARAMETER(Request);
 
-    const ULONG payloadSize =
-        sizeof(KSCAMERA_EXTENDEDPROP_HEADER) +
-        sizeof(KSCAMERA_EXTENDEDPROP_PROFILE);
-
-    if (!Data || GetPropertyDataLength(Irp) < payloadSize) {
-        return STATUS_BUFFER_TOO_SMALL;
+    if (!Data || GetPropertyDataLength(Irp) < CameraProfilePayloadSize) {
+        return CompleteCameraProfileSizeQuery(Irp, STATUS_BUFFER_OVERFLOW);
     }
 
     WriteCameraProfilePayload(
         reinterpret_cast<PKSCAMERA_EXTENDEDPROP_HEADER>(Data),
         CurrentCameraProfile);
 
-    Irp->IoStatus.Information = payloadSize;
+    Irp->IoStatus.Information = CameraProfilePayloadSize;
     return STATUS_SUCCESS;
 }
 
@@ -945,29 +1094,24 @@ SetCameraProfile(
     PAGED_CODE();
     UNREFERENCED_PARAMETER(Request);
 
-    const ULONG payloadSize =
-        sizeof(KSCAMERA_EXTENDEDPROP_HEADER) +
-        sizeof(KSCAMERA_EXTENDEDPROP_PROFILE);
-
-    if (!Data || GetPropertyDataLength(Irp) < payloadSize) {
-        return STATUS_BUFFER_TOO_SMALL;
+    if (!Data || GetCameraProfileSetBufferLength(Irp) < CameraProfilePayloadSize) {
+        return CompleteCameraProfileSizeQuery(Irp, STATUS_BUFFER_TOO_SMALL);
     }
 
     PKSCAMERA_EXTENDEDPROP_HEADER Header =
-        reinterpret_cast<PKSCAMERA_EXTENDEDPROP_HEADER>(Data);
+        FindCameraProfileHeader(Irp, Data);
+    if (!Header) {
+        return CompleteCameraProfileSizeQuery(Irp, STATUS_INVALID_PARAMETER);
+    }
+
     PKSCAMERA_EXTENDEDPROP_PROFILE Payload =
         reinterpret_cast<PKSCAMERA_EXTENDEDPROP_PROFILE>(Header + 1);
 
-    if (Header->Version != 1 ||
-        Header->PinId != KSCAMERA_EXTENDEDPROP_FILTERSCOPE ||
-        Header->Size != payloadSize ||
-        Header->Capability != KSCAMERA_EXTENDEDPROP_CAPS_ASYNCCONTROL ||
-        Header->Flags != 0 ||
-        Payload->Index != 0 ||
+    if (Payload->Index != 0 ||
         Payload->Reserved != 0 ||
         !IsSupportedCameraProfileSelection(Payload->ProfileId)) {
         Header->Result = static_cast<ULONG>(STATUS_INVALID_PARAMETER);
-        Irp->IoStatus.Information = payloadSize;
+        Irp->IoStatus.Information = CameraProfilePayloadSize;
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -986,8 +1130,66 @@ SetCameraProfile(
             NULL);
     }
 
-    Irp->IoStatus.Information = payloadSize;
+    Irp->IoStatus.Information = CameraProfilePayloadSize;
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+CCaptureFilter::
+GetCameraProfileSupport(
+    _In_ PIRP Irp,
+    _In_ PKSIDENTIFIER Request,
+    _Inout_ PVOID Data
+)
+{
+    PAGED_CODE();
+
+    const ULONG accessFlags =
+        KSPROPERTY_TYPE_GET |
+        KSPROPERTY_TYPE_SET |
+        KSPROPERTY_TYPE_GETPAYLOADSIZE |
+        KSPROPERTY_TYPE_BASICSUPPORT;
+
+    ULONG outputLength = GetPropertyDataLength(Irp);
+
+    if (Request->Flags & KSPROPERTY_TYPE_GETPAYLOADSIZE) {
+        if (!Data || outputLength < sizeof(ULONG)) {
+            Irp->IoStatus.Information = sizeof(ULONG);
+            return STATUS_BUFFER_OVERFLOW;
+        }
+
+        *reinterpret_cast<PULONG>(Data) = CameraProfilePayloadSize;
+        Irp->IoStatus.Information = sizeof(ULONG);
+        return STATUS_SUCCESS;
+    }
+
+    if (Request->Flags & KSPROPERTY_TYPE_BASICSUPPORT) {
+        if (!Data || outputLength < sizeof(ULONG)) {
+            Irp->IoStatus.Information = sizeof(ULONG);
+            return STATUS_BUFFER_OVERFLOW;
+        }
+
+        if (outputLength >= sizeof(KSPROPERTY_DESCRIPTION)) {
+            PKSPROPERTY_DESCRIPTION Description =
+                reinterpret_cast<PKSPROPERTY_DESCRIPTION>(Data);
+            RtlZeroMemory(Description, sizeof(*Description));
+            Description->AccessFlags = accessFlags;
+            Description->DescriptionSize = sizeof(*Description);
+            Description->PropTypeSet.Set = KSPROPTYPESETID_General;
+            Description->PropTypeSet.Id = VT_ILLEGAL;
+            Description->PropTypeSet.Flags = 0;
+            Description->MembersListCount = 0;
+            Description->Reserved = 0;
+            Irp->IoStatus.Information = sizeof(*Description);
+            return STATUS_SUCCESS;
+        }
+
+        *reinterpret_cast<PULONG>(Data) = accessFlags;
+        Irp->IoStatus.Information = sizeof(ULONG);
+        return STATUS_SUCCESS;
+    }
+
+    return STATUS_NOT_SUPPORTED;
 }
 
 /**************************************************************************
@@ -1101,7 +1303,7 @@ DEFINE_KSPROPERTY_TABLE(FilterVidcapPropertyTable)
     DEFINE_KSPROPERTY_ITEM(
         KSPROPERTY_VIDEOCONTROL_MODE,
         CCaptureFilter::GetVideoControlMode,
-        sizeof(KSPROPERTY),
+        sizeof(KSPROPERTY_VIDEOCONTROL_MODE_S),
         sizeof(KSPROPERTY_VIDEOCONTROL_MODE_S),
         CCaptureFilter::SetVideoControlMode,
         NULL,
@@ -1113,8 +1315,24 @@ DEFINE_KSPROPERTY_TABLE(FilterVidcapPropertyTable)
     DEFINE_KSPROPERTY_ITEM(
         KSPROPERTY_VIDEOCONTROL_CAPS,
         CCaptureFilter::GetVideoControlCaps,
-        sizeof(KSPROPERTY),
         sizeof(KSPROPERTY_VIDEOCONTROL_CAPS_S),
+        sizeof(KSPROPERTY_VIDEOCONTROL_CAPS_S),
+        NULL,
+        NULL,
+        0,
+        NULL,
+        NULL,
+        0
+    )
+};
+
+DEFINE_KSPROPERTY_TABLE(CameraControlImagePinCapabilityPropertyTable)
+{
+    DEFINE_KSPROPERTY_ITEM(
+        KSPROPERTY_CAMERACONTROL_IMAGE_PIN_CAPABILITY_PROPERTY_ID,
+        CCaptureFilter::GetImagePinCapability,
+        sizeof(KSPROPERTY),
+        sizeof(KSPROPERTY_CAMERACONTROL_IMAGE_PIN_CAPABILITY_S),
         NULL,
         NULL,
         0,
@@ -1135,7 +1353,7 @@ DEFINE_KSPROPERTY_TABLE(ExtendedCameraControlPropertyTable)
         NULL,
         0,
         NULL,
-        NULL,
+        CCaptureFilter::GetCameraProfileSupport,
         0
     )
 };
@@ -1143,6 +1361,7 @@ DEFINE_KSPROPERTY_TABLE(ExtendedCameraControlPropertyTable)
 DEFINE_KSPROPERTY_SET_TABLE(PropertySetTable)
 {
     DEFINE_STD_PROPERTY_SET(PROPSETID_VIDCAP_VIDEOCONTROL, FilterVidcapPropertyTable),
+    DEFINE_STD_PROPERTY_SET(PROPSETID_VIDCAP_CAMERACONTROL_IMAGE_PIN_CAPABILITY, CameraControlImagePinCapabilityPropertyTable),
     DEFINE_STD_PROPERTY_SET(KSPROPERTYSETID_ExtendedCameraControl, ExtendedCameraControlPropertyTable),
 	DEFINE_STD_PROPERTY_SET(PROPSETID_VIDCAP_CUSTOMCONTROL, CustomPropertyTable)
 };
@@ -1183,7 +1402,7 @@ DEFINE_KSAUTOMATION_TABLE(AvsFilterAutomationTable)
 
 GUID g_PINNAME_VIDEO_PREVIEW = {STATIC_PINNAME_VIDEO_PREVIEW};
 GUID g_PINNAME_VIDEO_CAPTURE = {STATIC_PINNAME_VIDEO_CAPTURE};
-GUID g_PINNAME_VIDEO_STILL = {STATIC_PINNAME_VIDEO_STILL};
+GUID g_PINNAME_IMAGE = {STATIC_PINNAME_IMAGE};
 
 NTSTATUS
 VirtuaCamPublishCameraProfiles (
@@ -1321,8 +1540,8 @@ CaptureFilterPinDescriptors [CAPTURE_FILTER_PIN_COUNT] = {
             CapturePinDataRanges,           // Ranges
             KSPIN_DATAFLOW_OUT,             // Dataflow
             KSPIN_COMMUNICATION_BOTH,       // Communication
-            &PIN_CATEGORY_STILL,            // Category
-            &g_PINNAME_VIDEO_STILL,         // Name
+            &g_PINNAME_IMAGE,               // Category
+            &g_PINNAME_IMAGE,               // Name
             0                               // Reserved
         },
         KSPIN_FLAG_PROCESS_IN_RUN_STATE_ONLY |
