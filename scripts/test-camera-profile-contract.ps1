@@ -104,11 +104,11 @@ $requiredProfiles = @(
     "KSCAMERAPROFILE_VideoRecording",
     "KSCAMERAPROFILE_VideoConferencing",
     "KSCAMERAPROFILE_HighQualityPhoto",
-    "KSCAMERAPROFILE_BalancedVideoAndPhoto",
-    "{0BB8A130-17C4-40A4-A17A-7CB4437F90E2}"
+    "KSCAMERAPROFILE_BalancedVideoAndPhoto"
 )
 $requiredProfileV2 = @("KSCAMERAPROFILE_Legacy") + $requiredProfiles
 $requiredPins = @("PINNAME_VIDEO_PREVIEW", "PINNAME_VIDEO_CAPTURE", "PINNAME_VIDEO_STILL")
+$customProfileGuidPattern = '\{0BB8A130-17C4-40A4-A17A-7CB4437F90E2\}'
 
 foreach ($profile in $requiredProfiles) {
     if (-not $infCounts.ContainsKey($profile)) {
@@ -150,13 +150,13 @@ foreach ($profile in $requiredProfileV2) {
     }
 }
 
-if ($infProfileV2["KSCAMERAPROFILE_Legacy,0"]["MTF0"] -notmatch 'RES==;FRT==;SUT==ALL') {
+if ($infProfileV2["KSCAMERAPROFILE_Legacy,0"]["MTF0"] -notmatch 'RES==;FRT<=30,1;SUT==') {
     throw "INF Camera Profile V2 legacy profile must allow all preview media."
 }
-if ($infProfileV2["KSCAMERAPROFILE_Legacy,0"]["MTF1"] -notmatch 'RES==;FRT==;SUT==ALL') {
+if ($infProfileV2["KSCAMERAPROFILE_Legacy,0"]["MTF1"] -notmatch 'RES==;FRT<=30,1;SUT==') {
     throw "INF Camera Profile V2 legacy profile must allow all capture media."
 }
-if ($infProfileV2["KSCAMERAPROFILE_Legacy,0"]["MTF2"] -notmatch 'RES==;FRT==;SUT==ALL') {
+if ($infProfileV2["KSCAMERAPROFILE_Legacy,0"]["MTF2"] -notmatch 'RES==;FRT<=30,1;SUT==') {
     throw "INF Camera Profile V2 legacy profile must allow all still media."
 }
 
@@ -191,7 +191,7 @@ foreach ($pin in $requiredPins) {
     }
 }
 
-foreach ($profile in @("KSCAMERAPROFILE_VideoConferencing", "KSCAMERAPROFILE_HighQualityPhoto", "KSCAMERAPROFILE_BalancedVideoAndPhoto", "{0BB8A130-17C4-40A4-A17A-7CB4437F90E2}")) {
+foreach ($profile in @("KSCAMERAPROFILE_VideoConferencing", "KSCAMERAPROFILE_HighQualityPhoto", "KSCAMERAPROFILE_BalancedVideoAndPhoto")) {
     foreach ($pin in $requiredPins) {
         if ($infCounts[$profile][$pin] -ne 2) {
             throw "$profile $pin must keep 2 INF media entries."
@@ -199,16 +199,17 @@ foreach ($profile in @("KSCAMERAPROFILE_VideoConferencing", "KSCAMERAPROFILE_Hig
     }
 }
 
+Assert-NotContains -Text $inf -Pattern $customProfileGuidPattern -Message "INF profile declarations must not publish the optional custom profile during vHLK profile-interface validation."
 Assert-Match -Text $filter -Pattern 'CameraProfileVideoRecordingPreviewMediaInfos[\s\S]*\{\s*\{\s*1080,\s*1920\s*\},\s*\{\s*30,\s*1\s*\}' -Message "Runtime VideoRecording preview media must include portrait entry at 30/1."
 Assert-Match -Text $filter -Pattern 'CameraProfileVideoRecordingStillMediaInfos[\s\S]*\{\s*\{\s*1080,\s*1920\s*\},\s*\{\s*0,\s*0\s*\}' -Message "Runtime VideoRecording still media must include portrait entry at 0/0."
 Assert-Match -Text $filter -Pattern 'CameraProfileBalancedVideoAndPhotoStillMediaInfos[\s\S]*\{\s*\{\s*640,\s*480\s*\},\s*\{\s*0,\s*0\s*\}' -Message "Runtime BalancedVideoAndPhoto still media must keep 640x480 fallback at 0/0."
 Assert-NotContains -Text $filter -Pattern 'KSCameraProfileSensorType_RGB' -Message "Runtime KSCAMERA_PROFILE_PININFO Reserved field must remain 0."
 Assert-NotContains -Text $filter -Pattern 'ProfileId\s*=\s*STATICGUIDOF\(KSCAMERAPROFILE_Legacy\)|STATICGUIDOF\(KSCAMERAPROFILE_Legacy\)[\s\S]{0,140}CameraProfile' -Message "Runtime KS profile publishing must not publish KSCAMERAPROFILE_Legacy."
+Assert-NotContains -Text $filter -Pattern 'VirtuaCamCustomProfileGuid|CameraProfileCustom|0BB8A130' -Message "Runtime KS profile publishing must not publish the optional custom profile during vHLK profile-interface validation."
 Assert-Match -Text $filter -Pattern 'KSCAMERAPROFILE_VideoRecording[\s\S]{0,260}CameraProfileVideoRecordingPins' -Message "Runtime VideoRecording profile must use profile-specific pins."
 Assert-Match -Text $filter -Pattern 'KSCAMERAPROFILE_VideoConferencing[\s\S]{0,260}CameraProfileVideoConferencingPins' -Message "Runtime VideoConferencing profile must use profile-specific pins."
 Assert-Match -Text $filter -Pattern 'KSCAMERAPROFILE_HighQualityPhoto[\s\S]{0,260}CameraProfileHighQualityPhotoPins' -Message "Runtime HighQualityPhoto profile must use profile-specific pins."
 Assert-Match -Text $filter -Pattern 'KSCAMERAPROFILE_BalancedVideoAndPhoto[\s\S]{0,260}CameraProfileBalancedVideoAndPhotoPins' -Message "Runtime BalancedVideoAndPhoto profile must use profile-specific pins."
-Assert-Match -Text $filter -Pattern 'VirtuaCamCustomProfileGuid[\s\S]{0,260}CameraProfileCustomPins' -Message "Runtime custom profile must use profile-specific pins."
 Assert-NotContains -Text $filter -Pattern 'CameraProfileFullPins|CameraProfileStandardPins' -Message "Runtime profiles must not reuse shared profile pin tables."
 Assert-Match -Text $filter -Pattern 'IsEqualGUID\(ProfileId,\s*GUID_NULL\)' -Message "Profile control must accept GUID_NULL profile selection."
 Assert-Match -Text $filter -Pattern 'Header->Version\s*!=\s*1' -Message "Profile control must validate header Version."

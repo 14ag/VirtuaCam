@@ -36,9 +36,6 @@ namespace
     const GUID VirtuaCamFilterReferenceGuid =
         { 0x6b2f0f9a, 0x4fcb, 0x4c93, { 0x95, 0x80, 0x21, 0x52, 0xa7, 0x6e, 0x2d, 0x44 } };
 
-    const GUID VirtuaCamCustomProfileGuid =
-        { 0x0bb8a130, 0x17c4, 0x40a4, { 0xa1, 0x7a, 0x7c, 0xb4, 0x43, 0x7f, 0x90, 0xe2 } };
-
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoRecordingPreviewMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
@@ -101,21 +98,6 @@ namespace
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileBalancedVideoAndPhotoStillMediaInfos[] = {
-        { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 }
-    };
-
-    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileCustomPreviewMediaInfos[] = {
-        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
-    };
-
-    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileCustomCaptureMediaInfos[] = {
-        { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
-    };
-
-    const KSCAMERA_PROFILE_MEDIAINFO CameraProfileCustomStillMediaInfos[] = {
         { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
         { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 }
     };
@@ -204,27 +186,6 @@ namespace
         }
     };
 
-    KSCAMERA_PROFILE_PININFO CameraProfileCustomPins[] = {
-        {
-            STATICGUIDOF(PINNAME_VIDEO_PREVIEW),
-            { 0, 0 },
-            SIZEOF_ARRAY(CameraProfileCustomPreviewMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileCustomPreviewMediaInfos)
-        },
-        {
-            STATICGUIDOF(PINNAME_VIDEO_CAPTURE),
-            { 0, 0 },
-            SIZEOF_ARRAY(CameraProfileCustomCaptureMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileCustomCaptureMediaInfos)
-        },
-        {
-            STATICGUIDOF(PINNAME_VIDEO_STILL),
-            { 0, 0 },
-            SIZEOF_ARRAY(CameraProfileCustomStillMediaInfos),
-            const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileCustomStillMediaInfos)
-        }
-    };
-
     struct CameraProfileDescriptor
     {
         GUID ProfileId;
@@ -252,11 +213,6 @@ namespace
             STATICGUIDOF(KSCAMERAPROFILE_BalancedVideoAndPhoto),
             SIZEOF_ARRAY(CameraProfileBalancedVideoAndPhotoPins),
             CameraProfileBalancedVideoAndPhotoPins
-        },
-        {
-            VirtuaCamCustomProfileGuid,
-            SIZEOF_ARRAY(CameraProfileCustomPins),
-            CameraProfileCustomPins
         }
     };
 

@@ -66,6 +66,15 @@ $logPath = Join-Path $artifactDir "driver-test-dshow.log"
 $envMap = Read-DotEnv -Path (Join-Path $repoRoot ".env")
 $guestCred = New-CredentialFromEnv -EnvMap $envMap -UserKey "DRIVER_TEST_VM_USERNAME" -PasswordKey "DRIVER_TEST_VM_PASSWORD"
 
+$probeBuildScript = Join-Path $scriptDir "build-dshow-probe.ps1"
+if (-not (Test-Path -LiteralPath $probeBuildScript)) {
+    throw "Missing DirectShow probe build script: $probeBuildScript"
+}
+& powershell.exe -ExecutionPolicy Bypass -File $probeBuildScript
+if ($LASTEXITCODE -ne 0) {
+    throw "DirectShow probe build failed with exit code $LASTEXITCODE."
+}
+
 $session = $null
 $guestRoot = "C:\Temp\VirtuaCamDshowGate"
 $guestScriptsRoot = Join-Path $guestRoot "scripts"
@@ -156,22 +165,39 @@ try {
         $localLog = Join-Path $artifactDir ("dshow-{0}.txt" -f $mode)
         $probe.Text | Set-Content -LiteralPath $localLog -Encoding UTF8
         $text = [string]$probe.Text
+        $hasVideoInfo2 = [bool]($text -match '(?i)format=VideoInfo2')
+        $hasNv12 = [bool]($text -match '(?i)subtype=MEDIASUBTYPE_NV12')
+        $hasYuy2 = [bool]($text -match '(?i)subtype=MEDIASUBTYPE_YUY2')
+        $hasRgb32 = [bool]($text -match '(?i)subtype=MEDIASUBTYPE_RGB32')
+        $hasSetFormatSuccess = [bool]($text -match '(?i)SetFormat\s+hr=0x0')
+        $hasRunSuccess = [bool]($text -match '(?i)Run\s+hr=0x0')
+        $isLegacyReducedSet = $hasYuy2 -and $hasRgb32 -and (-not $hasNv12) -and (-not $hasVideoInfo2)
         $results += [pscustomobject]@{
             Mode = $mode
             ExitCode = [int]$probe.ExitCode
             CapabilityCount = [regex]::Matches($text, '(?m)^\s*\[\d+\]\s+').Count
-            HasVideoInfo2 = [bool]($text -match '(?i)format=VideoInfo2')
-            HasSetFormatSuccess = [bool]($text -match '(?i)SetFormat\s+hr=0x0')
-            HasRunSuccess = [bool]($text -match '(?i)Run\s+hr=0x0')
+            HasVideoInfo2 = $hasVideoInfo2
+            HasNv12 = $hasNv12
+            HasYuy2 = $hasYuy2
+            HasRgb32 = $hasRgb32
+            HasProfileAwareNoProfile = [bool]($text -match '(?i)SetProfileAwareNoProfile\((source|pin)\)\s+hr=0x0')
+            HasLegacyReducedSet = $isLegacyReducedSet
+            HasSetFormatSuccess = $hasSetFormatSuccess
+            HasRunSuccess = $hasRunSuccess
             Log = $localLog
         }
     }
 
     $results | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $artifactDir "summary.json") -Encoding UTF8
     $bad = @($results | Where-Object {
+        $expectedLegacyReduction = (
+            ($_.Mode -eq "nv12" -or $_.Mode -eq "video2") -and
+            $_.HasLegacyReducedSet -and
+            $_.HasRunSuccess
+        )
         $_.ExitCode -ne 0 -or
         $_.CapabilityCount -lt 1 -or
-        (($_.Mode -ne "list") -and (-not $_.HasSetFormatSuccess -or -not $_.HasRunSuccess))
+        ((-not $expectedLegacyReduction) -and (($_.Mode -ne "list") -and (-not $_.HasSetFormatSuccess -or -not $_.HasRunSuccess)))
     })
     if ($bad.Count -gt 0) {
         $bad | Format-List | Out-String | Set-Content -LiteralPath (Join-Path $artifactDir "failures.txt") -Encoding UTF8

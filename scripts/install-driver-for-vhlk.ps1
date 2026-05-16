@@ -33,7 +33,7 @@ $guestToolsRoot = Join-Path $guestScriptsRoot "tools"
 $guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
 $exitCode = 1
 
-function Set-VhlkCameraDirectMode {
+function Set-VhlkCameraFrameServerMode {
     param(
         [Parameter(Mandatory = $true)][System.Management.Automation.Runspaces.PSSession]$GuestSession,
         [Parameter(Mandatory = $true)][string]$OutputName
@@ -62,7 +62,7 @@ function Set-VhlkCameraDirectMode {
                 if (-not $key) {
                     throw "Failed to open registry subkey: $($spec.Path)"
                 }
-                $key.SetValue("EnableFrameServerMode", 0, [Microsoft.Win32.RegistryValueKind]::DWord)
+                $key.SetValue("EnableFrameServerMode", 1, [Microsoft.Win32.RegistryValueKind]::DWord)
                 $value = $key.GetValue("EnableFrameServerMode", $null)
                 [pscustomobject]@{
                     Path = $spec.Path
@@ -142,8 +142,8 @@ try {
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\install-all.ps1") -GuestPath $guestScriptsRoot -LogPath $logPath
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\tools\artifact-manifest.ps1") -GuestPath $guestToolsRoot -LogPath $logPath
 
-    Write-HvLog -Message "Configuring Media Foundation camera direct mode for vHLK." -LogPath $logPath -Level STEP
-    Set-VhlkCameraDirectMode -GuestSession $session -OutputName "camera-frame-server-mode-before-install.json" | Out-Null
+    Write-HvLog -Message "Configuring Media Foundation frame server for vHLK." -LogPath $logPath -Level STEP
+    Set-VhlkCameraFrameServerMode -GuestSession $session -OutputName "camera-frame-server-mode-before-install.json" | Out-Null
 
     Write-HvLog -Message "Installing staged package in DUT for vHLK." -LogPath $logPath -Level STEP
     $install = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
@@ -168,7 +168,7 @@ try {
         Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 360 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $logPath | Out-Null
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 180 -LogPath $logPath
     } else {
-        Write-HvLog -Message "Restarting DUT to apply vHLK camera direct mode." -LogPath $logPath -Level STEP
+        Write-HvLog -Message "Restarting DUT to apply vHLK camera frame-server mode." -LogPath $logPath -Level STEP
         Restart-HvGuest -Session $session -LogPath $logPath
         Remove-PSSession -Session $session -ErrorAction SilentlyContinue
         $session = $null
@@ -177,7 +177,7 @@ try {
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 180 -LogPath $logPath
     }
 
-    Set-VhlkCameraDirectMode -GuestSession $session -OutputName "camera-frame-server-mode.json" | Out-Null
+    Set-VhlkCameraFrameServerMode -GuestSession $session -OutputName "camera-frame-server-mode.json" | Out-Null
 
     $state = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
         $devices = @(pnputil /enum-devices /instanceid ROOT\AVSHWS\0000 2>&1 | ForEach-Object { [string]$_ })

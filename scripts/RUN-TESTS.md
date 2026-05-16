@@ -162,6 +162,7 @@ Runner behavior:
 - Exports failed names unless `-TestNameListPath` and `-NoExport` are used.
 - Filters `docs\vhlk-blocked-test-names.txt` unless `-SkipBlockerFilter` is used.
 - Installs staged `output\` package into `driver-test` unless `-SkipDutInstall` is used.
+- Keeps Media Foundation `EnableFrameServerMode` set to `1` for Camera Profile V2 profile discovery.
 - Checks child script status with `$LASTEXITCODE`.
 - Uses selected failed-test names as monitored total.
 - Scopes cleanup and cancellation to selected tests.

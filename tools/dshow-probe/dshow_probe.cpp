@@ -1,11 +1,14 @@
 #include <windows.h>
 #include <dshow.h>
 #include <dvdmedia.h>
+#include <ks.h>
+#include <ksmedia.h>
 #include <string>
 #include <vector>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+#include <cwctype>
 
 #pragma comment(lib, "strmiids.lib")
 #pragma comment(lib, "ole32.lib")
@@ -79,21 +82,45 @@ static void FreeMediaType(AM_MEDIA_TYPE& mt) {
     }
 }
 
+static std::wstring GetMonikerString(IMoniker* moniker, LPCOLESTR propertyName);
+
 static std::wstring GetFriendlyName(IMoniker* moniker) {
+    return GetMonikerString(moniker, L"FriendlyName");
+}
+
+static std::wstring GetMonikerString(IMoniker* moniker, LPCOLESTR propertyName) {
     IPropertyBag* bag = nullptr;
     VARIANT value;
     VariantInit(&value);
-    std::wstring name;
+    std::wstring text;
 
     if (SUCCEEDED(moniker->BindToStorage(nullptr, nullptr, IID_IPropertyBag, reinterpret_cast<void**>(&bag)))) {
-        if (SUCCEEDED(bag->Read(L"FriendlyName", &value, nullptr)) && value.vt == VT_BSTR) {
-            name = value.bstrVal;
+        if (SUCCEEDED(bag->Read(propertyName, &value, nullptr)) && value.vt == VT_BSTR) {
+            text = value.bstrVal;
         }
     }
 
     VariantClear(&value);
     SafeRelease(&bag);
-    return name;
+    return text;
+}
+
+static int ScoreDevicePath(const std::wstring& devicePath) {
+    std::wstring lower = devicePath;
+    for (auto& ch : lower) {
+        ch = static_cast<wchar_t>(towlower(ch));
+    }
+
+    if (lower.find(L"{65e8773d-8f56-11d0-a3b9-00a0c9223196}") != std::wstring::npos) {
+        return 300;
+    }
+    if (lower.find(L"{6994ad05-93ef-11d0-a3cc-00a0c9223196}") != std::wstring::npos) {
+        return 200;
+    }
+    if (lower.find(L"{e5323777-f976-4f5b-9b55-b94699c46e44}") != std::wstring::npos) {
+        return 100;
+    }
+    return 0;
 }
 
 static HRESULT FindSourceFilter(const std::wstring& friendlyName, IBaseFilter** filterOut, std::wstring* resolvedName) {
@@ -117,15 +144,24 @@ static HRESULT FindSourceFilter(const std::wstring& friendlyName, IBaseFilter** 
     }
 
     IMoniker* moniker = nullptr;
+    int bestScore = -1;
     while (enumMoniker->Next(1, &moniker, nullptr) == S_OK) {
         std::wstring name = GetFriendlyName(moniker);
         if (_wcsicmp(name.c_str(), friendlyName.c_str()) == 0) {
-            hr = moniker->BindToObject(nullptr, nullptr, IID_IBaseFilter, reinterpret_cast<void**>(filterOut));
-            if (SUCCEEDED(hr) && resolvedName) {
-                *resolvedName = name;
+            std::wstring devicePath = GetMonikerString(moniker, L"DevicePath");
+            int score = ScoreDevicePath(devicePath);
+            IBaseFilter* candidate = nullptr;
+            hr = moniker->BindToObject(nullptr, nullptr, IID_IBaseFilter, reinterpret_cast<void**>(&candidate));
+            if (SUCCEEDED(hr) && candidate && score > bestScore) {
+                SafeRelease(filterOut);
+                *filterOut = candidate;
+                candidate = nullptr;
+                bestScore = score;
+                if (resolvedName) {
+                    *resolvedName = name + L" DevicePath=" + devicePath;
+                }
             }
-            moniker->Release();
-            break;
+            SafeRelease(&candidate);
         }
         moniker->Release();
         moniker = nullptr;
@@ -182,6 +218,45 @@ struct CapabilityInfo {
     GUID subtype = GUID_NULL;
     GUID formatType = GUID_NULL;
 };
+
+struct CameraProfilePayload {
+    KSCAMERA_EXTENDEDPROP_HEADER header;
+    KSCAMERA_EXTENDEDPROP_PROFILE profile;
+};
+
+static HRESULT SetProfileAwareNoProfile(IUnknown* target) {
+    if (!target) {
+        return E_POINTER;
+    }
+
+    IKsPropertySet* propertySet = nullptr;
+    HRESULT hr = target->QueryInterface(IID_IKsPropertySet, reinterpret_cast<void**>(&propertySet));
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    CameraProfilePayload payload = {};
+    payload.header.Version = 1;
+    payload.header.PinId = KSCAMERA_EXTENDEDPROP_FILTERSCOPE;
+    payload.header.Size = sizeof(payload);
+    payload.header.Result = 0;
+    payload.header.Capability = KSCAMERA_EXTENDEDPROP_CAPS_ASYNCCONTROL;
+    payload.header.Flags = 0;
+    payload.profile.ProfileId = GUID_NULL;
+    payload.profile.Index = 0;
+    payload.profile.Reserved = 0;
+
+    hr = propertySet->Set(
+        KSPROPERTYSETID_ExtendedCameraControl,
+        KSPROPERTY_CAMERACONTROL_EXTENDED_PROFILE,
+        nullptr,
+        0,
+        &payload,
+        sizeof(payload));
+
+    SafeRelease(&propertySet);
+    return hr;
+}
 
 static bool ExtractCapability(const AM_MEDIA_TYPE& mt, CapabilityInfo* info) {
     if (!info) {
@@ -350,12 +425,20 @@ static HRESULT RunGraphProbe(const std::wstring& friendlyName, const CapabilityI
         return hr;
     }
 
+    HRESULT profileHr = SetProfileAwareNoProfile(source);
+    std::wcout << L"SetProfileAwareNoProfile(source) hr=0x" << std::hex << profileHr << std::dec << std::endl;
+
     IPin* capturePin = nullptr;
     hr = FindCapturePin(source, &capturePin);
     if (FAILED(hr)) {
         std::wcout << L"FindCapturePin failed hr=0x" << std::hex << hr << std::dec << std::endl;
         SafeRelease(&source);
         return hr;
+    }
+
+    if (FAILED(profileHr)) {
+        HRESULT pinProfileHr = SetProfileAwareNoProfile(capturePin);
+        std::wcout << L"SetProfileAwareNoProfile(pin) hr=0x" << std::hex << pinProfileHr << std::dec << std::endl;
     }
 
     std::vector<CapabilityInfo> caps;

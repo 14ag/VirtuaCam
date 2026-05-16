@@ -412,6 +412,16 @@ foreach ($name in (Get-VirtuaCamSetupArtifacts)) {
 }
 Write-Success "Software staged -> $OutputRoot"
 
+Write-Step "Build DirectShow probe"
+$dshowProbeBuildScript = Join-Path $scriptDir "build-dshow-probe.ps1"
+if (-not (Test-Path -LiteralPath $dshowProbeBuildScript)) {
+    Fail "DirectShow probe build script missing: $dshowProbeBuildScript"
+}
+& powershell.exe -ExecutionPolicy Bypass -File $dshowProbeBuildScript -Force
+if ($LASTEXITCODE -ne 0) {
+    Fail "DirectShow probe build failed with exit code $LASTEXITCODE."
+}
+
 Write-Step "Build driver"
 
 $targets = if ($Clean) { "Clean;Build" } else { "Build" }
