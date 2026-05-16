@@ -6,6 +6,7 @@ param(
     [string]$GuestPasswordPlaintext = "",
     [string]$ArtifactRoot = "test-reports\windows-camera",
     [ValidateSet("Chrome", "Edge")][string]$Browser = "Chrome",
+    [ValidateSet("Notepad", "Settings", "Explorer", "ProofPanel")][string]$SourceWindowMode = "Notepad",
     [ValidateSet("auto", "printwindow", "wgc", "bitblt")][string]$CaptureBackend = "wgc",
     [int]$HeldSessionTimeoutSeconds = 300,
     [bool]$RevertAfterRun = $true
@@ -212,7 +213,7 @@ public static class VirtuaCamMfSensorGroupNative {
         "-GuestPackageRoot", $guestPackageRoot,
         "-GuestWebcamHtml", $guestWebcamHtml,
         "-Browser", $Browser,
-        "-SourceWindowMode", "ProofPanel",
+        "-SourceWindowMode", $SourceWindowMode,
         "-CaptureBackend", $CaptureBackend,
         "-SkipBrowser",
         "-AttemptId", "camera-proof",
