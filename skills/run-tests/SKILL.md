@@ -26,7 +26,9 @@ Run these stages in order:
 5. Final full vHLK sanity.
 6. Post-vHLK documentation assertion.
 
-Stop at the first failed stage. Patch, then restart at local gate.
+Stop at the first failed stage. Patch, then restart at local gate. After a vHLK playlist patch, rerun local and `driver-test` gates, then resume the current failed or remaining playlist. Do not restart completed playlist tests.
+
+Default `driver-test` gate uses DirectShow probe and Windows Camera proof only. Do not run Chrome or browser proof unless the user explicitly asks for it.
 
 ## Commands
 

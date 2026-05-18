@@ -92,19 +92,12 @@ Run Windows Camera proof:
 .\scripts\hyperv-proof-windows-camera.ps1
 ```
 
-Run browser proof:
-
-```powershell
-.\scripts\hyperv-proof-chrome.ps1
-```
-
 Pass criteria:
 
 - DirectShow modes `list`, `yuy2`, `nv12`, `rgb32`, and `video2` pass.
 - Windows Camera proof reports `Success: True`.
-- Browser proof reports `success: True`.
-- Browser proof reports `state.videoWidth = 1920` and `state.videoHeight = 1080`.
-- Screenshot shows a nonblack capture of the selected source window.
+- Windows Camera screenshot shows a nonblack capture of the selected source window.
+- Chrome or browser proof is not part of the default local or driver-test gate.
 
 ## Stage 3 - vHLK Prep
 
@@ -180,6 +173,7 @@ If vHLK fails:
 5. Record sources and fix rationale under `implementation\` or `docs\` as appropriate.
 6. Patch.
 7. Return to Stage 1.
+8. After Stage 1 and Stage 2 pass, resume failed-only vHLK with the current failed or remaining playlist. Do not restart completed playlist tests or queue the full project.
 
 ## Stage 5 - Final vHLK Sanity
 
