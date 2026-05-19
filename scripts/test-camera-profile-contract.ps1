@@ -211,5 +211,10 @@ Assert-Match -Text $hwsim -Pattern 'CopyImageToStreamHeader\s*\(\s*[\s\S]{0,120}
 Assert-Match -Text $capture -Pattern 'StartPinStream\s*\(\s*\)' -Message "Pin RUN transitions must use the running-pin refcount wrapper."
 Assert-Match -Text $capture -Pattern 'PausePinStream\s*\(\s*\)' -Message "Pin PAUSE/STOP transitions must use the running-pin refcount wrapper."
 Assert-Match -Text $capture -Pattern 'CopyImageToStreamHeader\s*\(\s*[\r\n\s]*leading->StreamHeader,\s*[\r\n\s]*m_VideoInfoHeader' -Message "Pin processing must pass the selected per-pin format to frame copy."
+Assert-Match -Text $capture -Pattern '#define\s+D_720P_X\s+1280' -Message "Capture data ranges must expose 1280x720 for vHLK H264 record scenarios."
+Assert-Match -Text $capture -Pattern '#define\s+D_720P_Y\s+720' -Message "Capture data ranges must expose 1280x720 for vHLK H264 record scenarios."
+Assert-Match -Text $capture -Pattern 'FormatYUY2_720p_Capture2' -Message "Capture pin must expose a 1280x720 YUY2 VIDEOINFO2 range."
+Assert-Match -Text $capture -Pattern 'FormatNV12_720p_Capture2' -Message "Capture pin must expose a 1280x720 NV12 VIDEOINFO2 range."
+Assert-Match -Text $capture -Pattern 'FormatRGB32Bpp_720p_Capture2' -Message "Capture pin must expose a 1280x720 RGB32 VIDEOINFO2 range."
 
 Write-Host "Camera profile contract whitebox checks passed."
