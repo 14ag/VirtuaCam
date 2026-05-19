@@ -68,8 +68,8 @@ try {
         throw "Missing DRIVER_TEST_VM_USERNAME or DRIVER_TEST_VM_PASSWORD in .env"
     }
 
-    $vhlkCred = [pscredential]::new($vhlkUser, (ConvertTo-SecureString $vhlkPassword -AsPlainText -Force))
-    $dutCred = [pscredential]::new($dutUser, (ConvertTo-SecureString $dutPassword -AsPlainText -Force))
+    $vhlkCred = [pscredential]::new($vhlkUser, (New-HvSecureString -PlainText $vhlkPassword))
+    $dutCred = [pscredential]::new($dutUser, (New-HvSecureString -PlainText $dutPassword))
 
     if (-not $SkipFreshStart) {
         Write-Host "[1/5] Fresh-start vHLK controller and DUT" -ForegroundColor Cyan

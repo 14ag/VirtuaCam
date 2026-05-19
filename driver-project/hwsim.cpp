@@ -1669,6 +1669,258 @@ Exit:
     return status;
 }
 
+namespace
+{
+    ULONG
+    AbsoluteBitmapHeight(
+        _In_ LONG Height
+        )
+    {
+        if (Height == MINLONG) {
+            return 0;
+        }
+
+        return static_cast<ULONG>(Height < 0 ? -Height : Height);
+    }
+
+    BOOLEAN
+    GetVideoHeaderGeometry(
+        _In_ PKS_VIDEOINFOHEADER VideoInfoHeader,
+        _Out_ PULONG Width,
+        _Out_ PULONG Height,
+        _Out_ PULONG ImageSize,
+        _Out_ PULONG BytesPerPixel,
+        _Out_ PULONG OutputFormat
+        )
+    {
+        if (!VideoInfoHeader ||
+            !Width ||
+            !Height ||
+            !ImageSize ||
+            !BytesPerPixel ||
+            !OutputFormat ||
+            VideoInfoHeader->bmiHeader.biWidth <= 0) {
+            return FALSE;
+        }
+
+        const ULONG width = static_cast<ULONG>(VideoInfoHeader->bmiHeader.biWidth);
+        const ULONG height = AbsoluteBitmapHeight(VideoInfoHeader->bmiHeader.biHeight);
+        const ULONG imageSize = VideoInfoHeader->bmiHeader.biSizeImage;
+        if (width == 0 || height == 0 || imageSize == 0) {
+            return FALSE;
+        }
+
+        ULONG bytesPerPixel = 0;
+        ULONG outputFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+        if (VideoInfoHeader->bmiHeader.biCompression == KS_BI_RGB &&
+            VideoInfoHeader->bmiHeader.biBitCount == 24) {
+            bytesPerPixel = 3;
+            outputFormat = VIRTUACAM_FRAME_FORMAT_BGR24;
+        } else if (VideoInfoHeader->bmiHeader.biCompression == KS_BI_RGB &&
+            VideoInfoHeader->bmiHeader.biBitCount == 32) {
+            bytesPerPixel = 4;
+            outputFormat = VIRTUACAM_FRAME_FORMAT_RGB32;
+        } else if (VideoInfoHeader->bmiHeader.biCompression == FOURCC_YUY2 &&
+            VideoInfoHeader->bmiHeader.biBitCount == 16) {
+            bytesPerPixel = 2;
+            outputFormat = VIRTUACAM_FRAME_FORMAT_YUY2;
+        } else if (VideoInfoHeader->bmiHeader.biCompression == FOURCC_NV12 &&
+            VideoInfoHeader->bmiHeader.biBitCount == 12) {
+            bytesPerPixel = 1;
+            outputFormat = VIRTUACAM_FRAME_FORMAT_NV12;
+        } else {
+            return FALSE;
+        }
+
+        *Width = width;
+        *Height = height;
+        *ImageSize = imageSize;
+        *BytesPerPixel = bytesPerPixel;
+        *OutputFormat = outputFormat;
+        return TRUE;
+    }
+
+    NTSTATUS
+    FillDirectFrame(
+        _Inout_ CHardwareSimulation* Hardware,
+        _In_ PKSSTREAM_HEADER StreamHeader,
+        _In_ ULONG Width,
+        _In_ ULONG Height,
+        _In_ ULONG ImageSize,
+        _In_ ULONG BytesPerPixel,
+        _In_ ULONG OutputFormat,
+        _Out_ PULONG BytesWritten
+        )
+    {
+        PUCHAR buffer = reinterpret_cast<PUCHAR>(StreamHeader->Data);
+        if (!buffer || !BytesWritten || StreamHeader->FrameExtent == 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        BOOLEAN bottomUp = FALSE;
+        LONG stride = static_cast<LONG>(GetTightStride0(OutputFormat, Width));
+        if (StreamHeader->Size >= sizeof(KSSTREAM_HEADER) + sizeof(KS_FRAME_INFO)) {
+            PKS_FRAME_INFO frameInfo = reinterpret_cast<PKS_FRAME_INFO>(StreamHeader + 1);
+            if (frameInfo->lSurfacePitch != 0) {
+                if (frameInfo->lSurfacePitch == LONG_MIN) {
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                bottomUp = frameInfo->lSurfacePitch < 0;
+                stride = bottomUp ? -frameInfo->lSurfacePitch : frameInfo->lSurfacePitch;
+            }
+        }
+
+        if (OutputFormat == VIRTUACAM_FRAME_FORMAT_NV12) {
+            if (stride <= 0 || static_cast<ULONG>(stride) < Width) {
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            const ULONGLONG requiredBytes =
+                (static_cast<ULONGLONG>(stride) * Height) +
+                ((static_cast<ULONGLONG>(stride) * Height) / 2ull);
+            if (requiredBytes > StreamHeader->FrameExtent) {
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            for (ULONG y = 0; y < Height; ++y) {
+                PUCHAR row = buffer + (static_cast<ULONGLONG>(stride) * y);
+                for (ULONG x = 0; x < Width; ++x) {
+                    row[x] = static_cast<UCHAR>(64 + ((x + y) & 0x7F));
+                }
+            }
+
+            PUCHAR uvPlane = buffer + (static_cast<ULONGLONG>(stride) * Height);
+            for (ULONG y = 0; y < Height / 2; ++y) {
+                PUCHAR row = uvPlane + (static_cast<ULONGLONG>(stride) * y);
+                for (ULONG x = 0; x + 1 < Width; x += 2) {
+                    row[x] = 96;
+                    row[x + 1] = 160;
+                }
+            }
+
+            *BytesWritten = ImageSize;
+            UNREFERENCED_PARAMETER(Hardware);
+            return STATUS_SUCCESS;
+        }
+
+        const ULONG widthBytes = Width * BytesPerPixel;
+        if (stride <= 0 || static_cast<ULONG>(stride) < widthBytes) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        ULONGLONG requiredBytes = widthBytes;
+        if (Height > 0) {
+            requiredBytes += static_cast<ULONGLONG>(stride) * (Height - 1);
+        }
+        if (requiredBytes > StreamHeader->FrameExtent) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        PUCHAR destinationBase = buffer;
+        if (bottomUp && Height > 1) {
+            destinationBase += static_cast<ULONGLONG>(stride) * (Height - 1);
+        }
+
+        for (ULONG y = 0; y < Height; ++y) {
+            PUCHAR row = bottomUp ?
+                (destinationBase - (static_cast<ULONGLONG>(stride) * y)) :
+                (destinationBase + (static_cast<ULONGLONG>(stride) * y));
+
+            if (OutputFormat == VIRTUACAM_FRAME_FORMAT_YUY2) {
+                for (ULONG x = 0; x + 1 < Width; x += 2) {
+                    PUCHAR pixel = row + (x * 2);
+                    pixel[0] = static_cast<UCHAR>(48 + ((x + y) & 0x7F));
+                    pixel[1] = 96;
+                    pixel[2] = static_cast<UCHAR>(96 + ((x + y) & 0x7F));
+                    pixel[3] = 160;
+                }
+            } else {
+                for (ULONG x = 0; x < Width; ++x) {
+                    PUCHAR pixel = row + (x * BytesPerPixel);
+                    pixel[0] = static_cast<UCHAR>(32 + (x & 0x7F));
+                    pixel[1] = static_cast<UCHAR>(48 + (y & 0x7F));
+                    pixel[2] = 192;
+                    if (BytesPerPixel == 4) {
+                        pixel[3] = 0xFF;
+                    }
+                }
+            }
+        }
+
+        *BytesWritten = ImageSize;
+        UNREFERENCED_PARAMETER(Hardware);
+        return STATUS_SUCCESS;
+    }
+}
+
+NTSTATUS
+CHardwareSimulation::
+CopyImageToStreamHeader (
+    IN PKSSTREAM_HEADER StreamHeader,
+    IN PKS_VIDEOINFOHEADER VideoInfoHeader,
+    OUT PULONG BytesWritten
+    )
+{
+    ULONG width = 0;
+    ULONG height = 0;
+    ULONG imageSize = 0;
+    ULONG bytesPerPixel = 0;
+    ULONG outputFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+    if (!GetVideoHeaderGeometry(
+            VideoInfoHeader,
+            &width,
+            &height,
+            &imageSize,
+            &bytesPerPixel,
+            &outputFormat)) {
+        return CopyImageToStreamHeader(StreamHeader, BytesWritten);
+    }
+
+    HARDWARE_STATE hardwareState = HardwareStopped;
+    ULONG currentWidth = 0;
+    ULONG currentHeight = 0;
+    ULONG currentImageSize = 0;
+    ULONG currentOutputFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+    KIRQL irql;
+    KeAcquireSpinLock(&m_FrameLock, &irql);
+    hardwareState = m_HardwareState;
+    currentWidth = m_Width;
+    currentHeight = m_Height;
+    currentImageSize = m_ImageSize;
+    currentOutputFormat = m_OutputFormat;
+    KeReleaseSpinLock(&m_FrameLock, irql);
+
+    if (hardwareState != HardwareRunning) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    if (currentWidth == width &&
+        currentHeight == height &&
+        currentImageSize == imageSize &&
+        currentOutputFormat == outputFormat) {
+        return CopyImageToStreamHeader(StreamHeader, BytesWritten);
+    }
+
+    NTSTATUS status = FillDirectFrame(
+        this,
+        StreamHeader,
+        width,
+        height,
+        imageSize,
+        bytesPerPixel,
+        outputFormat,
+        BytesWritten);
+
+    if (NT_SUCCESS(status)) {
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_NumMappingsCompleted));
+        m_LastCompletedDelta = 1;
+    }
+
+    m_LastFillStatus = static_cast<ULONG>(status);
+    return status;
+}
+
 /*************************************************/
 
 

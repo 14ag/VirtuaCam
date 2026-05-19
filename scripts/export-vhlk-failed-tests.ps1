@@ -35,7 +35,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($user) -or [string]::IsNullOrWhiteSpace($password)) {
         throw "Missing vhlk_VM_USERNAME or vhlk_VM_PASSWORD in .env"
     }
-    $cred = [pscredential]::new($user, (ConvertTo-SecureString $password -AsPlainText -Force))
+    $cred = [pscredential]::new($user, (New-HvSecureString -PlainText $password))
 
     if (-not $SkipFreshStart) {
         Write-HvLog -Message ("Fresh-starting vHLK controller '{0}' before failed-name export." -f $VhlkVmName) -LogPath $logPath -Level STEP

@@ -145,6 +145,19 @@ Stop rules:
 - Stop after `5` consecutive controller reconnect failures. Report `controller-reconnect-limit.json`.
 - If vHLK fails and driver work is needed, read PDF table of contents and relevant section before patching.
 
+After a failed set passes, export live non-passed tests and resume only that list:
+
+```powershell
+.\scripts\export-vhlk-remaining-tests.ps1
+.\scripts\run-vhlk-tests.ps1 `
+  -TestNameListPath .\test-reports\vhlk-remaining-export-<timestamp>\remaining-test-names.txt `
+  -PendingStartTimeoutSeconds 300 `
+  -TimeoutMinutes 480 `
+  -ResearchGateFailureCount 2 `
+  -StopOnFailureCount 10 `
+  -MaxControllerReconnectFailures 5
+```
+
 ## Stage 5 - Final vHLK Sanity
 
 Run only after failed-only vHLK, local gate, and `driver-test` gate pass.

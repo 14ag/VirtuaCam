@@ -753,6 +753,7 @@ Return Value:
     NTSTATUS status =
         m_Device->CopyImageToStreamHeader(
             leading->StreamHeader,
+            m_VideoInfoHeader,
             &bytesWritten);
 
     if (!NT_SUCCESS(status)) {

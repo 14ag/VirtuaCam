@@ -50,7 +50,7 @@ function New-CredentialFromEnv {
         throw "Missing $UserKey or $PasswordKey in .env"
     }
 
-    $secure = ConvertTo-SecureString $password -AsPlainText -Force
+    $secure = New-HvSecureString -PlainText $password
     return [System.Management.Automation.PSCredential]::new($user, $secure)
 }
 

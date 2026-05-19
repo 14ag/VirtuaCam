@@ -41,6 +41,7 @@ $paths = @(
   '.\scripts\run-vhlk-smoke-3tests.ps1',
   '.\scripts\run-vhlk-failed-only.ps1',
   '.\scripts\export-vhlk-failed-tests.ps1',
+  '.\scripts\export-vhlk-remaining-tests.ps1',
   '.\scripts\filter-vhlk-test-list.ps1',
   '.\scripts\test-vhlk-runner-flow.ps1',
   '.\scripts\test-setup-registry-debug-mic.ps1',
@@ -184,7 +185,20 @@ If vHLK fails:
 7. Return to Stage 1 and Stage 2.
 8. Retest the failed vHLK set first.
 9. If the failed set still fails, repeat this failure loop.
-10. If the failed set passes, resume vHLK with tests after the failed set plus any current non-passed tests. Do not restart completed playlist tests or queue the full project.
+10. If the failed set passes, run `.\scripts\export-vhlk-remaining-tests.ps1`, then pass `remaining-test-names.txt` to `run-vhlk-tests.ps1 -TestNameListPath`. Do not restart completed playlist tests or queue the full project.
+
+Resume command:
+
+```powershell
+.\scripts\export-vhlk-remaining-tests.ps1
+.\scripts\run-vhlk-tests.ps1 `
+  -TestNameListPath .\test-reports\vhlk-remaining-export-<timestamp>\remaining-test-names.txt `
+  -PendingStartTimeoutSeconds 300 `
+  -TimeoutMinutes 480 `
+  -ResearchGateFailureCount 2 `
+  -StopOnFailureCount 10 `
+  -MaxControllerReconnectFailures 5
+```
 
 ## Stage 5 - Final vHLK Sanity
 

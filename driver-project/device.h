@@ -521,6 +521,7 @@ public:
     NTSTATUS
     CopyImageToStreamHeader (
         IN PKSSTREAM_HEADER StreamHeader,
+        IN PKS_VIDEOINFOHEADER VideoInfoHeader,
         OUT PULONG BytesWritten
         );
 

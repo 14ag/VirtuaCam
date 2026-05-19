@@ -75,7 +75,7 @@ function New-CredentialFromEnv {
 
     return [System.Management.Automation.PSCredential]::new(
         $user,
-        (ConvertTo-SecureString $password -AsPlainText -Force))
+        (New-HvSecureString -PlainText $password))
 }
 
 function Write-LiveLine {
