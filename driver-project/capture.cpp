@@ -877,6 +877,7 @@ Return Value:
 
 {
     NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN releaseLastResource = FALSE;
     DbgPrint(
         "[avshws] SetState pin=%p %s->%s hw=%lu irql=%lu\n",
         m_Pin,
@@ -890,15 +891,18 @@ Return Value:
         case KSSTATE_STOP:
 
             //
-            // First, stop the hardware if we actually did anything to it.
+            // First, leave the running stream set if this pin was active.
             //
-            if (m_HardwareState != HardwareStopped &&
-                (!m_AcquiredResources || m_Device -> GetAcquiredResourceCount () <= 1)) {
-                Status = m_Device -> Stop ();
+            if (m_HardwareState == HardwareRunning) {
+                Status = m_Device -> PausePinStream ();
                 NT_ASSERT (NT_SUCCESS (Status));
+            }
 
-                m_HardwareState = HardwareStopped;
-            } else if (m_AcquiredResources) {
+            releaseLastResource =
+                m_AcquiredResources &&
+                m_Device -> GetAcquiredResourceCount () <= 1;
+
+            if (m_HardwareState != HardwareStopped) {
                 m_HardwareState = HardwareStopped;
             }
 
@@ -922,6 +926,11 @@ Return Value:
             // Release any hardware resources related to this pin.
             //
             if (m_AcquiredResources) {
+                if (releaseLastResource) {
+                    Status = m_Device -> Stop ();
+                    NT_ASSERT (NT_SUCCESS (Status));
+                }
+
                 //
                 // If we got an interface to the clock, we must release it.
                 //
@@ -1011,13 +1020,12 @@ Return Value:
                 // hang when it is stopped running on a configuration such as
                 // Win2K + DX8. 
                 //
-                if (m_HardwareState != HardwareStopped) {
-                    Status = m_Device -> Stop ();
+                if (m_HardwareState == HardwareRunning) {
+                    Status = m_Device -> PausePinStream ();
                     NT_ASSERT (NT_SUCCESS (Status));
-
-                    m_HardwareState = HardwareStopped;
                 }
 
+                m_HardwareState = HardwareStopped;
                 Status = CleanupReferences ();
             }
 
@@ -1033,7 +1041,7 @@ Return Value:
             //
             if (FromState == KSSTATE_RUN) {
 
-                Status = m_Device -> Pause (TRUE);
+                Status = m_Device -> PausePinStream ();
 
                 if (NT_SUCCESS (Status)) {
                     m_HardwareState = HardwarePaused;
@@ -1054,11 +1062,7 @@ Return Value:
                 break;
             }
 
-            if (m_HardwareState == HardwarePaused) {
-                Status = m_Device -> Pause (FALSE);
-            } else {
-                Status = m_Device -> Start ();
-            }
+            Status = m_Device -> StartPinStream ();
 
             if (NT_SUCCESS (Status)) {
                 m_HardwareState = HardwareRunning;

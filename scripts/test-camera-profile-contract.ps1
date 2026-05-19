@@ -7,14 +7,20 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $filterPath = Join-Path $repoRoot "driver-project\filter.cpp"
 $devicePath = Join-Path $repoRoot "driver-project\device.cpp"
+$deviceHeaderPath = Join-Path $repoRoot "driver-project\device.h"
+$capturePath = Join-Path $repoRoot "driver-project\capture.cpp"
 $infPath = Join-Path $repoRoot "driver-project\avshws.inf"
 
 if (-not (Test-Path -LiteralPath $filterPath)) { throw "Missing filter.cpp" }
 if (-not (Test-Path -LiteralPath $devicePath)) { throw "Missing device.cpp" }
+if (-not (Test-Path -LiteralPath $deviceHeaderPath)) { throw "Missing device.h" }
+if (-not (Test-Path -LiteralPath $capturePath)) { throw "Missing capture.cpp" }
 if (-not (Test-Path -LiteralPath $infPath)) { throw "Missing avshws.inf" }
 
 $filter = Get-Content -LiteralPath $filterPath -Raw
 $device = Get-Content -LiteralPath $devicePath -Raw
+$deviceHeader = Get-Content -LiteralPath $deviceHeaderPath -Raw
+$capture = Get-Content -LiteralPath $capturePath -Raw
 $inf = Get-Content -LiteralPath $infPath -Raw
 
 function Assert-Match {
@@ -193,5 +199,10 @@ Assert-Match -Text $filter -Pattern 'KSPROPERTY_VIDEOCONTROL_MODE[\s\S]{0,220}si
 Assert-Match -Text $filter -Pattern 'KSPROPERTY_VIDEOCONTROL_CAPS[\s\S]{0,220}sizeof\(KSPROPERTY_VIDEOCONTROL_CAPS_S\)[\s\S]{0,120}sizeof\(KSPROPERTY_VIDEOCONTROL_CAPS_S\)' -Message "Video-control caps property must use full CAPS_S descriptor and value sizes."
 Assert-Match -Text $filter -Pattern 'PROPSETID_VIDCAP_CAMERACONTROL_IMAGE_PIN_CAPABILITY' -Message "Filter must expose image-pin capability property set."
 Assert-Match -Text $filter -Pattern 'KSPROPERTY_CAMERACONTROL_IMAGE_PIN_CAPABILITY_S' -Message "Image-pin capability GET must return the documented capability structure."
+Assert-Match -Text $deviceHeader -Pattern 'LONG\s+m_RunningPinCount' -Message "Device must track running pin count separately from acquired resources."
+Assert-Match -Text $device -Pattern 'StartPinStream[\s\S]*InterlockedIncrement\(&m_RunningPinCount\)[\s\S]*HardwareRunning[\s\S]*STATUS_SUCCESS[\s\S]*Pause\(FALSE\)[\s\S]*Start\(\)' -Message "Concurrent preview/capture/still streams must join the active hardware simulation instead of restarting it."
+Assert-Match -Text $device -Pattern 'PausePinStream[\s\S]*InterlockedDecrement\(&m_RunningPinCount\)[\s\S]*runningPins > 0[\s\S]*STATUS_SUCCESS[\s\S]*Pause\(TRUE\)' -Message "Pausing one stream must not pause hardware while other streams keep running."
+Assert-Match -Text $capture -Pattern 'StartPinStream\s*\(\s*\)' -Message "Pin RUN transitions must use the running-pin refcount wrapper."
+Assert-Match -Text $capture -Pattern 'PausePinStream\s*\(\s*\)' -Message "Pin PAUSE/STOP transitions must use the running-pin refcount wrapper."
 
 Write-Host "Camera profile contract whitebox checks passed."

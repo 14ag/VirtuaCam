@@ -97,6 +97,11 @@ function Get-AvshwsDevices {
         Where-Object { $_.PNPDeviceID -like "ROOT\AVSHWS\*" }
 }
 
+function Get-VirtuaCamMicDevices {
+    Get-CimInstance Win32_PnPEntity |
+        Where-Object { $_.PNPDeviceID -like "ROOT\VIRTUACAMMIC\*" }
+}
+
 function Remove-DriverPackagesForDevicePattern {
     param([Parameter(Mandatory = $true)][string]$DeviceIdPattern)
 
@@ -256,6 +261,9 @@ $processExe = Join-Path $installDir "VirtuaCamProcess.exe"
 $driverInf = Join-Path $OutputRoot "avshws.inf"
 $driverSys = Join-Path $OutputRoot "avshws.sys"
 $driverCat = Join-Path $OutputRoot "avshws.cat"
+$audioDriverInf = Join-Path $OutputRoot "virtuacam-mic.inf"
+$audioDriverSys = Join-Path $OutputRoot "virtuacam_mic.sys"
+$audioDriverCat = Join-Path $OutputRoot "virtuacam-mic.cat"
 $driverCer = Join-Path $OutputRoot "VirtualCameraDriver-TestSign.cer"
 $clientDll = Join-Path $OutputRoot "DirectPortClient.dll"
 
@@ -386,6 +394,7 @@ if ($Uninstall) {
     Assert-Administrator
     Write-Step "Uninstall startup and VirtuaCam registry entries"
     Uninstall-WatcherService
+    Remove-DriverPackagesForDevicePattern -DeviceIdPattern "ROOT\VIRTUACAMMIC\*"
     Remove-DriverPackagesForDevicePattern -DeviceIdPattern "ROOT\AVSHWS\*"
     Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCamProcess" -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCam" -ErrorAction SilentlyContinue
@@ -423,6 +432,7 @@ if (-not $isTestSigningOn) {
 
 Import-TestCertificateIfPresent -Path $driverCer
 Remove-ExistingDriverPackage -DeviceIdPattern "ROOT\AVSHWS\*"
+Remove-ExistingDriverPackage -DeviceIdPattern "ROOT\VIRTUACAMMIC\*"
 
 Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $driverInf, "/install") -AllowedExitCodes @(0, 2, 259, 3010)
 
@@ -475,6 +485,60 @@ if ($rebootRequired) {
 }
 
 Write-Success "Fresh driver install OK from $OutputRoot"
+
+Write-Step "Install virtual microphone driver from output"
+
+Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/add-driver", $audioDriverInf, "/install") -AllowedExitCodes @(0, 2, 259, 3010)
+
+$audioHardwareId = "ROOT\VIRTUACAMMIC"
+$existingMicDevices = @(Get-VirtuaCamMicDevices)
+if ($existingMicDevices.Count -eq 0) {
+    Write-Info "No ROOT\VIRTUACAMMIC device present. Creating it now."
+    $mediaClassGuid = [Guid]::Parse("{4d36e96c-e325-11ce-bfc1-08002be10318}")
+    [AvshwsInstallerNative]::CreateRootDevice($audioHardwareId, "VIRTUACAMMIC", "VirtuaCam Microphone", $mediaClassGuid)
+}
+else {
+    Write-Info "ROOT\VIRTUACAMMIC already exists. Reusing existing device node."
+}
+
+$audioRebootRequired = $false
+[int]$audioLastError = 0
+$audioBindOutcome = [AvshwsInstallerNative]::TryBindDriver($audioHardwareId, $audioDriverInf, $true, [ref]$audioRebootRequired, [ref]$audioLastError)
+if (-not $audioBindOutcome -and $audioLastError -ne 0) {
+    $hexError = ("0x{0:X8}" -f ([uint32]$audioLastError))
+    Fail "Audio UpdateDriverForPlugAndPlayDevices failed with $hexError."
+}
+
+Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/scan-devices")
+
+$finalMicDevices = @(Get-VirtuaCamMicDevices)
+if ($finalMicDevices.Count -eq 0) {
+    Fail "Install finished but no ROOT\VIRTUACAMMIC device was found."
+}
+
+foreach ($device in $finalMicDevices) {
+    if (-not [string]::IsNullOrWhiteSpace($device.PNPDeviceID)) {
+        Write-Info ("Restarting mic device node: {0}" -f $device.PNPDeviceID)
+        Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/restart-device", $device.PNPDeviceID) -AllowedExitCodes @(0, 2, 259, 3010)
+    }
+}
+
+Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/scan-devices")
+
+$finalMicDevices = @(Get-VirtuaCamMicDevices)
+$badMic = @($finalMicDevices | Where-Object { $_.Status -and $_.Status -ne "OK" })
+if ($badMic.Count -gt 0) {
+    foreach ($device in $badMic) {
+        Write-Info ("Bad mic device: Name='{0}' PNPDeviceID='{1}' Status='{2}' ConfigManagerErrorCode='{3}'" -f $device.Name, $device.PNPDeviceID, $device.Status, $device.ConfigManagerErrorCode)
+    }
+    Fail "Installed VirtuaCam microphone device present but not OK status."
+}
+
+if ($audioRebootRequired) {
+    Write-Info "A reboot is required to finalize microphone installation."
+}
+
+Write-Success "VirtuaCam Microphone driver install OK from $OutputRoot"
 
 if (-not $SkipDllRegister) {
     Write-Step "Register software components from output"

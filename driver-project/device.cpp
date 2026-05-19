@@ -435,6 +435,7 @@ QuiesceHardware (
     )
 {
     DbgPrint("[avshws] %s begin device=%p irql=%lu\n", Reason, this, (ULONG)KeGetCurrentIrql());
+    InterlockedExchange(&m_RunningPinCount, 0);
     m_PowerRestartPending = FALSE;
     m_PowerSavedHardwareState = HardwareStopped;
 
@@ -911,6 +912,7 @@ Return Value:
     m_CaptureSink = NULL;
     RtlZeroMemory(m_CaptureSinks, sizeof(m_CaptureSinks));
     m_CaptureSinkCount = 0;
+    InterlockedExchange(&m_RunningPinCount, 0);
 
     //
     // Release our "lock" on hardware resources.  This will allow another
@@ -994,6 +996,59 @@ GetAcquiredResourceCount (
     )
 {
     return m_CaptureSinkCount;
+}
+
+NTSTATUS
+CCaptureDevice::
+StartPinStream (
+    )
+{
+    LONG runningPins = InterlockedIncrement(&m_RunningPinCount);
+    if (runningPins > 1 && m_HardwareSimulation &&
+        m_HardwareSimulation->GetHardwareState() == HardwareRunning) {
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS status = STATUS_DEVICE_NOT_READY;
+    if (m_HardwareSimulation) {
+        HARDWARE_STATE hardwareState = m_HardwareSimulation->GetHardwareState();
+        if (hardwareState == HardwareRunning) {
+            status = STATUS_SUCCESS;
+        } else if (hardwareState == HardwarePaused) {
+            status = Pause(FALSE);
+        } else {
+            status = Start();
+        }
+    }
+
+    if (!NT_SUCCESS(status)) {
+        InterlockedDecrement(&m_RunningPinCount);
+    }
+
+    return status;
+}
+
+NTSTATUS
+CCaptureDevice::
+PausePinStream (
+    )
+{
+    LONG runningPins = InterlockedCompareExchange(&m_RunningPinCount, 0, 0);
+    if (runningPins <= 0) {
+        return STATUS_SUCCESS;
+    }
+
+    runningPins = InterlockedDecrement(&m_RunningPinCount);
+    if (runningPins > 0) {
+        return STATUS_SUCCESS;
+    }
+
+    if (!m_HardwareSimulation ||
+        m_HardwareSimulation->GetHardwareState() != HardwareRunning) {
+        return STATUS_SUCCESS;
+    }
+
+    return Pause(TRUE);
 }
 
 #ifdef ALLOC_PRAGMA

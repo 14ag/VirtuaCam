@@ -19,6 +19,7 @@ output*/
 *.obj
 *.exe
 *.inf
+!audio-driver-project/virtuacam-mic.inf
 *.dll
 *.lib
 *.pdb

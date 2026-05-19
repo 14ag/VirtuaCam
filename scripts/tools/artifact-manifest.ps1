@@ -24,12 +24,27 @@ function Get-VirtuaCamSetupArtifacts {
     )
 }
 
-function Get-VirtuaCamDriverArtifacts {
+function Get-VirtuaCamCameraDriverArtifacts {
     @(
         "avshws.sys",
         "avshws.inf",
         "avshws.cat",
         "VirtualCameraDriver-TestSign.cer"
+    )
+}
+
+function Get-VirtuaCamAudioDriverArtifacts {
+    @(
+        "virtuacam_mic.sys",
+        "virtuacam-mic.inf",
+        "virtuacam-mic.cat"
+    )
+}
+
+function Get-VirtuaCamDriverArtifacts {
+    @(
+        (Get-VirtuaCamCameraDriverArtifacts) +
+        (Get-VirtuaCamAudioDriverArtifacts)
     )
 }
 

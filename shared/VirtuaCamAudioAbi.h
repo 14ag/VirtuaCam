@@ -1,0 +1,49 @@
+#pragma once
+
+#include <stdint.h>
+
+#ifndef CTL_CODE
+#if defined(_WIN32) && !defined(_KERNEL_MODE)
+#include <winioctl.h>
+#endif
+#endif
+
+#ifndef CTL_CODE
+#error Include Windows or WDK IOCTL definitions before VirtuaCamAudioAbi.h.
+#endif
+
+#define VIRTUACAM_MIC_WIN32_DEVICE_PATH L"\\\\.\\VirtuaCamMicBridge"
+#define VIRTUACAM_MIC_NT_DEVICE_NAME L"\\Device\\VirtuaCamMicBridge"
+#define VIRTUACAM_MIC_DOS_DEVICE_NAME L"\\DosDevices\\VirtuaCamMicBridge"
+
+#define FILE_DEVICE_VIRTUACAM_MIC 0x8337
+
+#define IOCTL_VIRTUACAM_MIC_WRITE_PACKET \
+    CTL_CODE(FILE_DEVICE_VIRTUACAM_MIC, 0x800, METHOD_BUFFERED, FILE_WRITE_DATA)
+
+#define IOCTL_VIRTUACAM_MIC_GET_STATUS \
+    CTL_CODE(FILE_DEVICE_VIRTUACAM_MIC, 0x801, METHOD_BUFFERED, FILE_READ_DATA)
+
+#define VIRTUACAM_MIC_SAMPLE_RATE 48000u
+#define VIRTUACAM_MIC_CHANNELS 2u
+#define VIRTUACAM_MIC_BITS_PER_SAMPLE 16u
+#define VIRTUACAM_MIC_BYTES_PER_SAMPLE 2u
+#define VIRTUACAM_MIC_FRAME_BYTES (VIRTUACAM_MIC_CHANNELS * VIRTUACAM_MIC_BYTES_PER_SAMPLE)
+#define VIRTUACAM_MIC_PACKET_MS 10u
+#define VIRTUACAM_MIC_PACKET_FRAMES ((VIRTUACAM_MIC_SAMPLE_RATE * VIRTUACAM_MIC_PACKET_MS) / 1000u)
+#define VIRTUACAM_MIC_PACKET_BYTES (VIRTUACAM_MIC_PACKET_FRAMES * VIRTUACAM_MIC_FRAME_BYTES)
+#define VIRTUACAM_MIC_BYTES_PER_SECOND (VIRTUACAM_MIC_SAMPLE_RATE * VIRTUACAM_MIC_FRAME_BYTES)
+
+typedef struct VIRTUACAM_MIC_PACKET_HEADER {
+    uint32_t size;
+    uint32_t frameCount;
+    uint64_t sequence;
+} VIRTUACAM_MIC_PACKET_HEADER;
+
+typedef struct VIRTUACAM_MIC_STATUS {
+    uint64_t packets;
+    uint64_t frames;
+    uint64_t underruns;
+    uint64_t drops;
+    uint32_t queuedBytes;
+} VIRTUACAM_MIC_STATUS;

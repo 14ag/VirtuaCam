@@ -136,6 +136,26 @@ namespace VirtuaCamConfig
         }
     }
 
+    AudioRoutingMode ParseAudioRoutingMode(const std::wstring& value)
+    {
+        if (_wcsicmp(value.c_str(), L"Manual") == 0) return AudioRoutingMode::Manual;
+        return AudioRoutingMode::Auto;
+    }
+
+    const wchar_t* AudioRoutingModeName(AudioRoutingMode mode)
+    {
+        switch (mode) {
+        case AudioRoutingMode::Manual: return L"Manual";
+        case AudioRoutingMode::Auto:
+        default: return L"Auto";
+        }
+    }
+
+    const wchar_t* AudioRoutingModeConfigValue(AudioRoutingMode mode)
+    {
+        return AudioRoutingModeName(mode);
+    }
+
     AppSettings LoadSettings()
     {
         AppSettings settings;
@@ -159,6 +179,9 @@ namespace VirtuaCamConfig
         if (ReadString(key.get(), L"AspectRatio", text)) {
             settings.aspectRatio = ParseAspectRatio(text);
         }
+        if (ReadString(key.get(), L"AudioRoutingMode", text)) {
+            settings.audioRoutingMode = ParseAudioRoutingMode(text);
+        }
         if (ReadString(key.get(), L"AudioCaptureDeviceName", text)) {
             settings.audioCaptureDeviceName = text;
         }
@@ -179,6 +202,7 @@ namespace VirtuaCamConfig
             WriteDword(key.get(), L"ShowPipTopRight", settings.showPipTopRight ? 1u : 0u) &&
             WriteDword(key.get(), L"ShowPipBottomLeft", settings.showPipBottomLeft ? 1u : 0u) &&
             WriteString(key.get(), L"AspectRatio", AspectRatioConfigValue(settings.aspectRatio)) &&
+            WriteString(key.get(), L"AudioRoutingMode", AudioRoutingModeConfigValue(settings.audioRoutingMode)) &&
             WriteString(key.get(), L"AudioCaptureDeviceName", settings.audioCaptureDeviceName);
 
         if (!ok) {

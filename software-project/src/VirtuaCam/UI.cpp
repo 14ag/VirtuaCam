@@ -693,6 +693,7 @@ void ShowContextMenu(HWND hwnd) {
 
     HMENU audioSubMenu = CreatePopupMenu();
     if (audioSubMenu) {
+        AddNativeMenuItem(audioSubMenu, L"Auto", ID_AUDIO_DEVICE_AUTO, g_currentAudioDevice == ID_AUDIO_DEVICE_AUTO);
         AddNativeMenuItem(audioSubMenu, L"None", ID_AUDIO_DEVICE_NONE, g_currentAudioDevice == ID_AUDIO_DEVICE_NONE);
         if (!g_captureDeviceNames.empty()) {
             AddNativeSeparator(audioSubMenu);

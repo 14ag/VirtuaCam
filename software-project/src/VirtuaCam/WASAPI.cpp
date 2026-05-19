@@ -5,6 +5,10 @@
 #include <propkey.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <avrt.h>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #pragma comment(lib, "avrt.lib")
 
 WASAPICapture::WASAPICapture() {
@@ -101,6 +105,7 @@ HRESULT WASAPICapture::StartCapture(int deviceIndex, bool isLoopback) {
     RETURN_IF_FAILED(m_audioClient->GetMixFormat(&rawFormat));
     wil::unique_cotaskmem_ptr<WAVEFORMATEX> format(rawFormat);
     WAVEFORMATEX* pwfx = format.get();
+    CopySourceFormat(pwfx);
 
     REFERENCE_TIME hnsRequestedDuration = 10000000; // 1 second buffer
 
@@ -116,8 +121,23 @@ HRESULT WASAPICapture::StartCapture(int deviceIndex, bool isLoopback) {
 
     RETURN_IF_FAILED(m_audioClient->GetService(IID_PPV_ARGS(&m_captureClient)));
 
+    m_hMicBridge.reset(CreateFileW(
+        VIRTUACAM_MIC_WIN32_DEVICE_PATH,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr));
+    if (!m_hMicBridge) {
+        VirtuaCamLog::LogWin32(L"VirtuaCam microphone bridge open failed", GetLastError());
+    }
+
     ResetEvent(m_hShutdownEvent.get());
     m_loggedFirstPacket = false;
+    m_loggedBridgeError = false;
+    m_packetSequence = 0;
+    m_bridgeFrameBuffer.clear();
     m_hCaptureThread.reset(CreateThread(NULL, 0, CaptureThread, this, 0, NULL));
     RETURN_HR_IF_NULL(E_FAIL, m_hCaptureThread.get());
 
@@ -150,6 +170,8 @@ void WASAPICapture::StopCapture() {
     }
 
     m_hAudioEvent.reset();
+    m_hMicBridge.reset();
+    m_bridgeFrameBuffer.clear();
     m_captureClient.reset();
     m_audioClient.reset();
     m_isCapturing = false;
@@ -170,30 +192,198 @@ void WASAPICapture::CaptureThreadImpl() {
     DWORD taskIndex = 0;
     HANDLE hTask = AvSetMmThreadCharacteristics(L"Audio", &taskIndex);
 
-    while (WaitForSingleObject(m_hShutdownEvent.get(), 100) == WAIT_TIMEOUT) {
-        BYTE* pData;
-        UINT32 numFramesAvailable;
-        DWORD flags;
+    HANDLE waitHandles[] = { m_hShutdownEvent.get(), m_hAudioEvent.get() };
+    for (;;) {
+        DWORD wait = WaitForMultipleObjects(2, waitHandles, FALSE, 100);
+        if (wait == WAIT_OBJECT_0) {
+            break;
+        }
+        if (wait != WAIT_OBJECT_0 + 1 && wait != WAIT_TIMEOUT) {
+            continue;
+        }
 
-        HRESULT hr = m_captureClient->GetBuffer(&pData, &numFramesAvailable, &flags, NULL, NULL);
+        UINT32 nextPacketFrames = 0;
+        while (m_captureClient && SUCCEEDED(m_captureClient->GetNextPacketSize(&nextPacketFrames)) && nextPacketFrames > 0) {
+            BYTE* pData = nullptr;
+            UINT32 numFramesAvailable = 0;
+            DWORD flags = 0;
 
-        if (SUCCEEDED(hr) && numFramesAvailable > 0) {
+            HRESULT hr = m_captureClient->GetBuffer(&pData, &numFramesAvailable, &flags, NULL, NULL);
+            if (FAILED(hr)) {
+                break;
+            }
+
             if (!m_loggedFirstPacket) {
                 m_loggedFirstPacket = true;
                 VirtuaCamLog::LogLine(std::format(
-                    L"Audio capture packet: frames={} silent={}",
+                    L"Audio capture packet: frames={} silent={} sourceRate={} sourceBits={} sourceChannels={}",
                     numFramesAvailable,
-                    (flags & AUDCLNT_BUFFERFLAGS_SILENT) ? 1 : 0));
+                    (flags & AUDCLNT_BUFFERFLAGS_SILENT) ? 1 : 0,
+                    m_sourceSampleRate,
+                    m_sourceBitsPerSample,
+                    m_sourceChannels));
             }
-            if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                // Audio is silent, no data to process.
-            } else {
-                // TODO: Process captured audio data from 'pData' buffer.
-                // The size of the data is numFramesAvailable * pwfx->nBlockAlign.
-            }
+            PublishAudioToBridge(pData, numFramesAvailable, flags);
             m_captureClient->ReleaseBuffer(numFramesAvailable);
         }
     }
 
     if (hTask) AvRevertMmThreadCharacteristics(hTask);
+}
+
+void WASAPICapture::CopySourceFormat(const WAVEFORMATEX* format) {
+    ZeroMemory(&m_sourceFormat, sizeof(m_sourceFormat));
+    m_sourceSubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    m_sourceFormatTag = format ? format->wFormatTag : WAVE_FORMAT_PCM;
+    m_sourceSampleRate = format && format->nSamplesPerSec ? format->nSamplesPerSec : VIRTUACAM_MIC_SAMPLE_RATE;
+    m_sourceChannels = format && format->nChannels ? format->nChannels : VIRTUACAM_MIC_CHANNELS;
+    m_sourceBitsPerSample = format && format->wBitsPerSample ? format->wBitsPerSample : VIRTUACAM_MIC_BITS_PER_SAMPLE;
+    m_sourceBlockAlign = format && format->nBlockAlign ? format->nBlockAlign : VIRTUACAM_MIC_FRAME_BYTES;
+
+    if (format && format->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+        format->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+        m_sourceFormat = *reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
+        m_sourceSubFormat = m_sourceFormat.SubFormat;
+        if (m_sourceFormat.Samples.wValidBitsPerSample != 0) {
+            m_sourceBitsPerSample = m_sourceFormat.Samples.wValidBitsPerSample;
+        }
+    } else if (format) {
+        m_sourceFormat.Format = *format;
+        m_sourceSubFormat = (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
+            ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+            : KSDATAFORMAT_SUBTYPE_PCM;
+    }
+}
+
+void WASAPICapture::PublishAudioToBridge(const BYTE* data, UINT32 frameCount, DWORD flags) {
+    if (!m_hMicBridge || frameCount == 0 || m_sourceSampleRate == 0 || m_sourceBlockAlign == 0) {
+        return;
+    }
+
+    const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || !data;
+    const size_t outputFrames = std::max<size_t>(
+        1,
+        static_cast<size_t>(std::llround(
+            static_cast<double>(frameCount) * VIRTUACAM_MIC_SAMPLE_RATE / m_sourceSampleRate)));
+
+    std::vector<int16_t> converted(outputFrames * VIRTUACAM_MIC_CHANNELS);
+    if (!silent) {
+        for (size_t outFrame = 0; outFrame < outputFrames; ++outFrame) {
+            UINT32 sourceFrame = static_cast<UINT32>(std::min<size_t>(
+                frameCount - 1,
+                static_cast<size_t>(
+                    (static_cast<double>(outFrame) * m_sourceSampleRate) / VIRTUACAM_MIC_SAMPLE_RATE)));
+
+            const float left = ReadSourceSampleAsFloat(data, sourceFrame, 0);
+            const float right = ReadSourceSampleAsFloat(
+                data,
+                sourceFrame,
+                m_sourceChannels > 1 ? 1 : 0);
+            converted[(outFrame * 2) + 0] = FloatToPcm16(left);
+            converted[(outFrame * 2) + 1] = FloatToPcm16(right);
+        }
+    }
+
+    m_bridgeFrameBuffer.insert(m_bridgeFrameBuffer.end(), converted.begin(), converted.end());
+
+    size_t offsetFrames = 0;
+    while ((m_bridgeFrameBuffer.size() / VIRTUACAM_MIC_CHANNELS) - offsetFrames >= VIRTUACAM_MIC_PACKET_FRAMES) {
+        SendMicPacket(
+            m_bridgeFrameBuffer.data() + (offsetFrames * VIRTUACAM_MIC_CHANNELS),
+            VIRTUACAM_MIC_PACKET_FRAMES);
+        offsetFrames += VIRTUACAM_MIC_PACKET_FRAMES;
+    }
+
+    if (offsetFrames > 0) {
+        m_bridgeFrameBuffer.erase(
+            m_bridgeFrameBuffer.begin(),
+            m_bridgeFrameBuffer.begin() + (offsetFrames * VIRTUACAM_MIC_CHANNELS));
+    }
+}
+
+void WASAPICapture::SendMicPacket(const int16_t* frames, size_t frameCount) {
+    std::vector<BYTE> packet(sizeof(VIRTUACAM_MIC_PACKET_HEADER) + VIRTUACAM_MIC_PACKET_BYTES);
+    auto* header = reinterpret_cast<VIRTUACAM_MIC_PACKET_HEADER*>(packet.data());
+    header->size = VIRTUACAM_MIC_PACKET_BYTES;
+    header->frameCount = VIRTUACAM_MIC_PACKET_FRAMES;
+    header->sequence = ++m_packetSequence;
+
+    BYTE* payload = packet.data() + sizeof(VIRTUACAM_MIC_PACKET_HEADER);
+    ZeroMemory(payload, VIRTUACAM_MIC_PACKET_BYTES);
+    if (frames && frameCount > 0) {
+        const size_t bytesToCopy = std::min<size_t>(
+            frameCount * VIRTUACAM_MIC_FRAME_BYTES,
+            VIRTUACAM_MIC_PACKET_BYTES);
+        CopyMemory(payload, frames, bytesToCopy);
+    }
+
+    DWORD bytesReturned = 0;
+    if (!DeviceIoControl(
+            m_hMicBridge.get(),
+            IOCTL_VIRTUACAM_MIC_WRITE_PACKET,
+            packet.data(),
+            static_cast<DWORD>(packet.size()),
+            nullptr,
+            0,
+            &bytesReturned,
+            nullptr) &&
+        !m_loggedBridgeError) {
+        m_loggedBridgeError = true;
+        VirtuaCamLog::LogWin32(L"VirtuaCam microphone bridge write failed", GetLastError());
+    }
+}
+
+float WASAPICapture::ReadSourceSampleAsFloat(const BYTE* data, UINT32 frameIndex, WORD channel) const {
+    if (!data || m_sourceChannels == 0 || m_sourceBlockAlign == 0) {
+        return 0.0f;
+    }
+
+    const WORD selectedChannel = std::min<WORD>(channel, static_cast<WORD>(m_sourceChannels - 1));
+    const BYTE* frame = data + (static_cast<size_t>(frameIndex) * m_sourceBlockAlign);
+    const WORD containerBytes = static_cast<WORD>(std::max<WORD>(1, m_sourceFormat.Format.wBitsPerSample / 8));
+    const BYTE* sample = frame + (static_cast<size_t>(selectedChannel) * containerBytes);
+
+    if (IsEqualGUID(m_sourceSubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) &&
+        m_sourceFormat.Format.wBitsPerSample == 32) {
+        float value = 0.0f;
+        CopyMemory(&value, sample, sizeof(value));
+        return value;
+    }
+
+    if (!IsEqualGUID(m_sourceSubFormat, KSDATAFORMAT_SUBTYPE_PCM) &&
+        m_sourceFormatTag != WAVE_FORMAT_PCM) {
+        return 0.0f;
+    }
+
+    switch (m_sourceFormat.Format.wBitsPerSample) {
+    case 8:
+        return (static_cast<int>(*sample) - 128) / 128.0f;
+    case 16:
+    {
+        int16_t value = 0;
+        CopyMemory(&value, sample, sizeof(value));
+        return static_cast<float>(value) / 32768.0f;
+    }
+    case 24:
+    {
+        int32_t value = sample[0] | (sample[1] << 8) | (sample[2] << 16);
+        if (value & 0x00800000) {
+            value |= static_cast<int32_t>(0xFF000000);
+        }
+        return static_cast<float>(value) / 8388608.0f;
+    }
+    case 32:
+    {
+        int32_t value = 0;
+        CopyMemory(&value, sample, sizeof(value));
+        return static_cast<float>(value) / 2147483648.0f;
+    }
+    default:
+        return 0.0f;
+    }
+}
+
+int16_t WASAPICapture::FloatToPcm16(float value) {
+    const float clipped = std::clamp(value, -1.0f, 1.0f);
+    return static_cast<int16_t>(std::lrintf(clipped * 32767.0f));
 }

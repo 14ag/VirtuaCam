@@ -28,7 +28,7 @@ Run these stages in order:
 
 Stop at the first failed stage. Patch, then restart at local gate. After a vHLK playlist patch, rerun local and `driver-test` gates, retest the failed vHLK set first, then resume the current failed or remaining playlist after the failed set passes. Do not restart completed playlist tests.
 
-Default `driver-test` gate uses DirectShow probe and Windows Camera proof only. Do not run Chrome or browser proof unless the user explicitly asks for it.
+Default `driver-test` gate uses DirectShow probe and Windows Camera proof only. Windows Camera proof checks the virtual microphone endpoint inside `driver-test`; when `VIRTUACAM_MIC_ENABLE_USERMODE_FEED` is `0`, `audio-ioctl-fuzz.txt` reports endpoint OK status instead of IOCTL packet fuzz. Do not run Chrome or browser proof unless the user explicitly asks for it.
 
 Iteration loop:
 

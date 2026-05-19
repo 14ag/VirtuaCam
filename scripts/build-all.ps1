@@ -178,6 +178,22 @@ function Assert-WdkPresent {
     Write-Success "WDK detected at: $wdkRoot"
 }
 
+function Get-WdkIncludeVersion {
+    $wdkRoot = Get-WdkRoot
+    if (-not $wdkRoot) { return $null }
+
+    $includeRoot = Join-Path $wdkRoot "Include"
+    if (-not (Test-Path -LiteralPath $includeRoot)) { return $null }
+
+    $verDir = Get-ChildItem -Path $includeRoot -Directory |
+        Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+
+    if ($verDir) { return $verDir.Name }
+    return $null
+}
+
 function Get-SdkToolPath {
     param(
         [Parameter(Mandatory = $true)][string]$ToolName,
@@ -245,9 +261,16 @@ $wizardDir = Join-Path $repoRoot "wizard-project"
 $wizardBuildDir = Join-Path $wizardDir "build"
 $driverRoot = Join-Path $repoRoot "driver-project"
 $driverSolutionPath = Join-Path $driverRoot "avshws.sln"
+$audioDriverRoot = Join-Path $repoRoot "audio-driver-project"
+$audioDriverProjects = @(
+    (Join-Path $audioDriverRoot "Source\Filters\Filters.vcxproj"),
+    (Join-Path $audioDriverRoot "Source\Utilities\Utilities.vcxproj"),
+    (Join-Path $audioDriverRoot "Source\Main\Main.vcxproj")
+)
 $OutputRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "output"))
 $driverPackageTmp = Join-Path $repoRoot ".driver-package-work"
-foreach ($pathToGuard in @($OutputRoot, $driverPackageTmp, $softwareBuildDir, $wizardBuildDir)) {
+$audioDriverPackageTmp = Join-Path $repoRoot ".audio-driver-package-work"
+foreach ($pathToGuard in @($OutputRoot, $driverPackageTmp, $audioDriverPackageTmp, $softwareBuildDir, $wizardBuildDir)) {
     Assert-PathInsideRoot -Path $pathToGuard -Root $repoRoot
 }
 
@@ -270,6 +293,14 @@ if (-not (Test-Path -LiteralPath (Join-Path $wizardDir "CMakeLists.txt"))) {
 if (-not (Test-Path -LiteralPath $driverSolutionPath)) {
     Fail "Driver solution missing: $driverSolutionPath"
 }
+foreach ($project in $audioDriverProjects) {
+    if (-not (Test-Path -LiteralPath $project)) {
+        Fail "Audio driver project missing: $project"
+    }
+}
+if (-not (Test-Path -LiteralPath (Join-Path $audioDriverRoot "virtuacam-mic.inf"))) {
+    Fail "Audio driver INF missing: $(Join-Path $audioDriverRoot "virtuacam-mic.inf")"
+}
 
 if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) {
     if ($env:VCPKG_ROOT -and (Test-Path -LiteralPath $env:VCPKG_ROOT)) {
@@ -287,7 +318,7 @@ Write-Step "Prepare output layout"
 if ($Clean -and (Test-Path -LiteralPath $OutputRoot)) {
     Remove-Item -LiteralPath $OutputRoot -Recurse -Force
 }
-$null = New-Item -ItemType Directory -Force -Path $OutputRoot, $driverPackageTmp
+$null = New-Item -ItemType Directory -Force -Path $OutputRoot, $driverPackageTmp, $audioDriverPackageTmp
 Write-Info "OutputRoot: $OutputRoot"
 Write-Info ".driver-package-work is a temporary INF/catalog signing workspace; final install artifacts are staged in output."
 
@@ -474,14 +505,14 @@ Invoke-NativeProcess -FilePath $signtool -Arguments @(
     $catPath
 )
 
-foreach ($artifact in @((Get-VirtuaCamDriverArtifacts) + "avshws.pdb")) {
+foreach ($artifact in @((Get-VirtuaCamCameraDriverArtifacts) + "avshws.pdb")) {
     $dst = Join-Path $OutputRoot $artifact
     if (Test-Path -LiteralPath $dst) {
         Remove-Item -LiteralPath $dst -Force
     }
 }
 
-foreach ($artifact in (Get-VirtuaCamDriverArtifacts)) {
+foreach ($artifact in (Get-VirtuaCamCameraDriverArtifacts)) {
     Copy-Item -LiteralPath (Join-Path $driverPackageTmp $artifact) -Destination (Join-Path $OutputRoot $artifact) -Force
 }
 if (Test-Path -LiteralPath $driverPdb) {
@@ -489,6 +520,69 @@ if (Test-Path -LiteralPath $driverPdb) {
 }
 
 Write-Success "Driver staged -> $OutputRoot"
+
+Write-Step "Build virtual microphone driver"
+
+$wdkVersion = Get-WdkIncludeVersion
+if (-not $wdkVersion) {
+    Fail "Unable to determine WDK include version."
+}
+
+foreach ($project in $audioDriverProjects) {
+    Invoke-NativeProcess -FilePath $msbuild -Arguments @(
+        $project,
+        "/t:$targets",
+        "/p:Configuration=$BuildConfig",
+        "/p:Platform=x64",
+        "/p:WindowsTargetPlatformVersion=$wdkVersion",
+        "/nologo",
+        "/v:m"
+    )
+}
+
+$audioBuildDir = Join-Path $audioDriverRoot ("Source\Main\Main\x64\{0}" -f $BuildConfig)
+$audioSys = Join-Path $audioBuildDir "virtuacam_mic.sys"
+$audioPdb = Join-Path $audioBuildDir "virtuacam_mic.pdb"
+$audioInf = Join-Path $audioDriverRoot "virtuacam-mic.inf"
+if (-not (Test-Path -LiteralPath $audioSys)) { Fail "Fresh audio driver sys missing: $audioSys" }
+if (-not (Test-Path -LiteralPath $audioInf)) { Fail "Audio driver INF missing: $audioInf" }
+
+if (Test-Path -LiteralPath $audioDriverPackageTmp) {
+    Get-ChildItem -LiteralPath $audioDriverPackageTmp -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+$null = New-Item -ItemType Directory -Force -Path $audioDriverPackageTmp
+
+Copy-Item -LiteralPath $audioSys -Destination (Join-Path $audioDriverPackageTmp "virtuacam_mic.sys") -Force
+Copy-Item -LiteralPath $audioInf -Destination (Join-Path $audioDriverPackageTmp "virtuacam-mic.inf") -Force
+
+Invoke-NativeProcess -FilePath $inf2cat -Arguments @("/driver:$audioDriverPackageTmp", "/os:10_X64")
+
+$audioCatPath = Join-Path $audioDriverPackageTmp "virtuacam-mic.cat"
+if (-not (Test-Path -LiteralPath $audioCatPath)) {
+    Fail "Audio catalog generation failed: $audioCatPath not found."
+}
+
+Invoke-NativeProcess -FilePath $signtool -Arguments @(
+    "sign",
+    "/v",
+    "/fd", "SHA256",
+    "/sha1", $cert.Thumbprint,
+    "/s", "My",
+    $audioCatPath
+)
+
+foreach ($artifact in (Get-VirtuaCamAudioDriverArtifacts)) {
+    $dst = Join-Path $OutputRoot $artifact
+    if (Test-Path -LiteralPath $dst) {
+        Remove-Item -LiteralPath $dst -Force
+    }
+    Copy-Item -LiteralPath (Join-Path $audioDriverPackageTmp $artifact) -Destination $dst -Force
+}
+if (Test-Path -LiteralPath $audioPdb) {
+    Copy-Item -LiteralPath $audioPdb -Destination (Join-Path $OutputRoot "virtuacam_mic.pdb") -Force
+}
+
+Write-Success "Virtual microphone driver staged -> $OutputRoot"
 
 Write-Step "Validate required artifacts"
 $requiredSoftware = @((Get-VirtuaCamSoftwareArtifacts) + (Get-VirtuaCamSetupArtifacts) + (Get-VirtuaCamRuntimeArtifacts))
@@ -509,6 +603,9 @@ Get-ChildItem -LiteralPath $OutputRoot -File | Sort-Object Name | ForEach-Object
 
 if (Test-Path -LiteralPath $driverPackageTmp) {
     Remove-Item -LiteralPath $driverPackageTmp -Recurse -Force
+}
+if (Test-Path -LiteralPath $audioDriverPackageTmp) {
+    Remove-Item -LiteralPath $audioDriverPackageTmp -Recurse -Force
 }
 
 Write-Host "`n============================================================" -ForegroundColor Green
