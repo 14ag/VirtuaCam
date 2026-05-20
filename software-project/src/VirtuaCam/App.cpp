@@ -57,6 +57,7 @@ static bool g_showPipTR = false;
 static bool g_showPipBL = false;
 static AspectRatioMode g_aspectRatioMode = AspectRatioMode::R16_9;
 static ULONG g_allowedAspectRatioMask = ASPECT_RATIO_MASK_ALL;
+static AudioRoutingMode g_audioRoutingMode = AudioRoutingMode::Auto;
 static std::wstring g_audioCaptureDeviceName = L"Stereo Mix";
 static constexpr ULONGLONG kAppFrameIntervalMs = 33;
 static constexpr ULONGLONG kDefaultFeedRefreshMs = 1000;
@@ -457,6 +458,17 @@ void SelectAudioCaptureDevice(int captureIndex, bool save, const wchar_t* reason
 
 void SelectAudioMenuId(int id, bool save, const wchar_t* reason)
 {
+    if (id == ID_AUDIO_DEVICE_AUTO) {
+        g_audioRoutingMode = AudioRoutingMode::Auto;
+        ApplySavedAudioSelection();
+        if (save) {
+            SaveSettings();
+        }
+        VirtuaCamLog::LogLine(L"Audio routing mode selected: Auto");
+        return;
+    }
+
+    g_audioRoutingMode = AudioRoutingMode::Manual;
     if (id == ID_AUDIO_DEVICE_NONE) {
         SelectAudioCaptureDevice(-1, save, reason);
         return;
@@ -473,16 +485,25 @@ void ApplySavedAudioSelection()
         return;
     }
 
-    int index = FindAudioCaptureDeviceByName(g_audioCaptureDeviceName);
-    if (index < 0 && !g_audioCaptureDeviceName.empty()) {
-        VirtuaCamLog::LogLine(std::format(
-            L"Saved audio source missing: {}; falling back to Stereo Mix",
-            g_audioCaptureDeviceName));
+    int index = -1;
+    if (g_audioRoutingMode == AudioRoutingMode::Manual) {
+        index = FindAudioCaptureDeviceByName(g_audioCaptureDeviceName);
+        if (index < 0 && !g_audioCaptureDeviceName.empty()) {
+            VirtuaCamLog::LogLine(std::format(
+                L"Saved audio source missing: {}; falling back to Stereo Mix",
+                g_audioCaptureDeviceName));
+        }
     }
     if (index < 0) {
         index = FindStereoMixAudioDevice();
     }
+    if (g_audioRoutingMode == AudioRoutingMode::Auto) {
+        UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_AUTO);
+    }
     SelectAudioCaptureDevice(index, true, L"startup default");
+    if (g_audioRoutingMode == AudioRoutingMode::Auto) {
+        UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_AUTO);
+    }
 }
 
 void InitializeAudio()
@@ -506,6 +527,10 @@ void SelectAudioForCameraPassthrough(int cameraIndex)
     if (!g_audioCapture) {
         return;
     }
+    if (g_audioRoutingMode != AudioRoutingMode::Auto) {
+        VirtuaCamLog::LogLine(L"Camera passthrough audio: manual audio route active");
+        return;
+    }
 
     const wchar_t* cameraName = UI_GetCameraDeviceName(cameraIndex);
     const wchar_t* devicePath = UI_GetCameraDevicePath(cameraIndex);
@@ -522,6 +547,7 @@ void SelectAudioForCameraPassthrough(int cameraIndex)
     }
 
     SelectAudioCaptureDevice(micIndex, true, L"camera passthrough");
+    UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_AUTO);
 }
 
 void TerminateProducer(const std::wstring& key)
@@ -1101,12 +1127,14 @@ void LoadSettings() {
     g_showPipTR = settings.showPipTopRight;
     g_showPipBL = settings.showPipBottomLeft;
     g_aspectRatioMode = settings.aspectRatio;
+    g_audioRoutingMode = settings.audioRoutingMode;
     g_audioCaptureDeviceName = settings.audioCaptureDeviceName;
 
     VirtuaCamLog::LogLine(std::format(
-        L"Settings loaded: registry={} aspect={} audio={}",
+        L"Settings loaded: registry={} aspect={} audioMode={} audio={}",
         VirtuaCamConfig::GetSettingsRegistryPath(),
         VirtuaCamConfig::AspectRatioName(g_aspectRatioMode),
+        VirtuaCamConfig::AudioRoutingModeName(g_audioRoutingMode),
         g_audioCaptureDeviceName.empty() ? L"None" : g_audioCaptureDeviceName));
 }
 
@@ -1116,6 +1144,7 @@ void SaveSettings() {
     settings.showPipTopRight = g_showPipTR;
     settings.showPipBottomLeft = g_showPipBL;
     settings.aspectRatio = g_aspectRatioMode;
+    settings.audioRoutingMode = g_audioRoutingMode;
     settings.audioCaptureDeviceName = g_audioCaptureDeviceName;
     (void)VirtuaCamConfig::SaveSettings(settings);
 }

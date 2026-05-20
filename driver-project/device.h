@@ -36,6 +36,7 @@ private:
     // mechanism for resource acquisition on the device.
     //
     LONG m_PinsWithResources;
+    LONG m_RunningPinCount;
     LONG m_RemovePending;
 
     //
@@ -196,6 +197,7 @@ public:
         m_Device (Device),
         m_FilterFactory (NULL),
         m_PinsWithResources (0),
+        m_RunningPinCount (0),
         m_RemovePending (0),
         m_HardwareSimulation (NULL),
         m_ImageSynth (NULL),
@@ -470,6 +472,14 @@ public:
     Start (
         );
 
+    NTSTATUS
+    StartPinStream (
+        );
+
+    NTSTATUS
+    PausePinStream (
+        );
+
     //
     // Pause():
     //
@@ -511,6 +521,7 @@ public:
     NTSTATUS
     CopyImageToStreamHeader (
         IN PKSSTREAM_HEADER StreamHeader,
+        IN PKS_VIDEOINFOHEADER VideoInfoHeader,
         OUT PULONG BytesWritten
         );
 

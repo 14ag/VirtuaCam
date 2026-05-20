@@ -435,6 +435,7 @@ QuiesceHardware (
     )
 {
     DbgPrint("[avshws] %s begin device=%p irql=%lu\n", Reason, this, (ULONG)KeGetCurrentIrql());
+    InterlockedExchange(&m_RunningPinCount, 0);
     m_PowerRestartPending = FALSE;
     m_PowerSavedHardwareState = HardwareStopped;
 
@@ -826,11 +827,6 @@ Return Value:
             Status = STATUS_INVALID_PARAMETER;
         } else if (m_CaptureSinkCount >= CAPTURE_FILTER_PIN_COUNT) {
             Status = STATUS_INSUFFICIENT_RESOURCES;
-        } else if (m_VideoInfoHeader->bmiHeader.biCompression != VideoInfoHeader->bmiHeader.biCompression ||
-            m_VideoInfoHeader->bmiHeader.biBitCount != VideoInfoHeader->bmiHeader.biBitCount ||
-            m_VideoInfoHeader->bmiHeader.biWidth != VideoInfoHeader->bmiHeader.biWidth ||
-            ABS(m_VideoInfoHeader->bmiHeader.biHeight) != ABS(VideoInfoHeader->bmiHeader.biHeight)) {
-            Status = STATUS_SHARING_VIOLATION;
         } else {
             bool alreadyTracked = false;
             for (ULONG i = 0; i < m_CaptureSinkCount; ++i) {
@@ -911,6 +907,7 @@ Return Value:
     m_CaptureSink = NULL;
     RtlZeroMemory(m_CaptureSinks, sizeof(m_CaptureSinks));
     m_CaptureSinkCount = 0;
+    InterlockedExchange(&m_RunningPinCount, 0);
 
     //
     // Release our "lock" on hardware resources.  This will allow another
@@ -994,6 +991,59 @@ GetAcquiredResourceCount (
     )
 {
     return m_CaptureSinkCount;
+}
+
+NTSTATUS
+CCaptureDevice::
+StartPinStream (
+    )
+{
+    LONG runningPins = InterlockedIncrement(&m_RunningPinCount);
+    if (runningPins > 1 && m_HardwareSimulation &&
+        m_HardwareSimulation->GetHardwareState() == HardwareRunning) {
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS status = STATUS_DEVICE_NOT_READY;
+    if (m_HardwareSimulation) {
+        HARDWARE_STATE hardwareState = m_HardwareSimulation->GetHardwareState();
+        if (hardwareState == HardwareRunning) {
+            status = STATUS_SUCCESS;
+        } else if (hardwareState == HardwarePaused) {
+            status = Pause(FALSE);
+        } else {
+            status = Start();
+        }
+    }
+
+    if (!NT_SUCCESS(status)) {
+        InterlockedDecrement(&m_RunningPinCount);
+    }
+
+    return status;
+}
+
+NTSTATUS
+CCaptureDevice::
+PausePinStream (
+    )
+{
+    LONG runningPins = InterlockedCompareExchange(&m_RunningPinCount, 0, 0);
+    if (runningPins <= 0) {
+        return STATUS_SUCCESS;
+    }
+
+    runningPins = InterlockedDecrement(&m_RunningPinCount);
+    if (runningPins > 0) {
+        return STATUS_SUCCESS;
+    }
+
+    if (!m_HardwareSimulation ||
+        m_HardwareSimulation->GetHardwareState() != HardwareRunning) {
+        return STATUS_SUCCESS;
+    }
+
+    return Pause(TRUE);
 }
 
 #ifdef ALLOC_PRAGMA
@@ -1147,6 +1197,7 @@ NTSTATUS
 CCaptureDevice::
 CopyImageToStreamHeader (
     IN PKSSTREAM_HEADER StreamHeader,
+    IN PKS_VIDEOINFOHEADER VideoInfoHeader,
     OUT PULONG BytesWritten
     )
 {
@@ -1154,7 +1205,10 @@ CopyImageToStreamHeader (
         return STATUS_DEVICE_NOT_READY;
     }
 
-    return m_HardwareSimulation->CopyImageToStreamHeader(StreamHeader, BytesWritten);
+    return m_HardwareSimulation->CopyImageToStreamHeader(
+        StreamHeader,
+        VideoInfoHeader,
+        BytesWritten);
 }
 
 /*************************************************************************

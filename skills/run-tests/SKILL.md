@@ -26,9 +26,21 @@ Run these stages in order:
 5. Final full vHLK sanity.
 6. Post-vHLK documentation assertion.
 
-Stop at the first failed stage. Patch, then restart at local gate. After a vHLK playlist patch, rerun local and `driver-test` gates, then resume the current failed or remaining playlist. Do not restart completed playlist tests.
+Stop at the first failed stage. Patch, then restart at local gate. After a vHLK playlist patch, rerun local and `driver-test` gates, retest the failed vHLK set first, then resume the current failed or remaining playlist after the failed set passes. Do not restart completed playlist tests.
 
-Default `driver-test` gate uses DirectShow probe and Windows Camera proof only. Do not run Chrome or browser proof unless the user explicitly asks for it.
+Default `driver-test` gate uses DirectShow probe and Windows Camera proof only. Windows Camera proof checks the virtual microphone endpoint inside `driver-test`; when `VIRTUACAM_MIC_ENABLE_USERMODE_FEED` is `0`, `audio-ioctl-fuzz.txt` reports endpoint OK status instead of IOCTL packet fuzz. Do not run Chrome or browser proof unless the user explicitly asks for it.
+
+Iteration loop:
+
+1. Run local regression tests in `driver-test`.
+2. Run vHLK only after local and `driver-test` gates pass.
+3. If 2 vHLK tests fail in one iteration, stop, export status, collect artifacts, research, and patch.
+4. Rerun local and `driver-test` gates.
+5. Retest the failed vHLK set.
+6. If the failed set still fails, repeat the failure loop.
+7. If the failed set passes, continue vHLK with tests after the failed set plus any current non-passed tests.
+8. After the last queued vHLK test passes, run final full vHLK from the start and rerun all local and `driver-test` gates.
+9. Update docs only after final verification passes.
 
 ## Commands
 

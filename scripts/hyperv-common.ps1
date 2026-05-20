@@ -123,6 +123,19 @@ function Read-HvDotEnv {
     return $values
 }
 
+function New-HvSecureString {
+    param(
+        [Parameter(Mandatory = $true)][string]$PlainText
+    )
+
+    $secure = [System.Security.SecureString]::new()
+    foreach ($ch in $PlainText.ToCharArray()) {
+        $secure.AppendChar($ch)
+    }
+    $secure.MakeReadOnly()
+    return $secure
+}
+
 function Get-HvGuestCredential {
     param(
         [System.Management.Automation.PSCredential]$GuestCredential,
@@ -147,7 +160,7 @@ function Get-HvGuestCredential {
     }
 
     if (-not [string]::IsNullOrWhiteSpace($GuestPasswordPlaintext)) {
-        $secure = ConvertTo-SecureString $GuestPasswordPlaintext -AsPlainText -Force
+        $secure = New-HvSecureString -PlainText $GuestPasswordPlaintext
         return [System.Management.Automation.PSCredential]::new($GuestUser, $secure)
     }
 

@@ -58,12 +58,27 @@ Stop at the first failed stage. Patch, then restart at Stage 1. After a vHLK pla
 5. Stage 5: final full vHLK sanity.
 6. Stage 6: post-vHLK documentation assertion.
 
+## Iteration Loop
+
+Use this loop until every required test passes.
+
+1. Run local regression tests in `driver-test`.
+2. When local and `driver-test` gates pass, run vHLK.
+3. If two vHLK tests fail in one iteration, stop the vHLK run, export failed names/status, collect failure artifacts, research the failed tests, and patch the failures.
+4. After the patch, rerun local regression tests in `driver-test`.
+5. Retest the two failed vHLK tests first.
+6. If the two failed tests still fail, return to step 3.
+7. If the two failed tests pass, resume vHLK with tests after the failed pair plus any current non-passed tests. Do not rerun vHLK tests already marked `Passed`.
+8. After the last queued vHLK test passes, run the final full vHLK sanity from the start, then run all required local and `driver-test` gates again.
+9. When all tests pass in the final verification pass, update documentation and report the final artifact paths.
+
 ## Stage 1 - Local Gate
 
 Parse changed or key PowerShell files first. Then run:
 
 ```powershell
 .\scripts\test-vhlk-runner-flow.ps1
+.\scripts\test-setup-registry-debug-mic.ps1
 .\scripts\test-code-review-20260511.ps1
 .\scripts\test-frame-ex-abi.ps1
 .\scripts\test-camera-profile-contract.ps1
@@ -76,8 +91,9 @@ Pass criteria:
 
 - All scripts exit `0`.
 - Build ends with `BUILD-ALL SUCCEEDED`.
-- `output\` contains staged driver, software, catalog, and test certificate artifacts.
+- `output\` contains staged camera driver, virtual microphone driver, software, catalog, and test certificate artifacts.
 - `test-driver-pnp-contract.ps1` confirms PnP query-remove handling, close callbacks, device capabilities, INF hardware removal-policy override, and vHLK blocker filtering.
+- `test-setup-registry-debug-mic.ps1` confirms registry settings, debug gating, virtual microphone ABI, capture-only INF registration, PortCls-only DriverEntry, and the compile-time user-mode feed bridge state.
 
 ## Stage 2 - Driver-Test Gate
 
@@ -93,6 +109,7 @@ Pass criteria:
 - DirectShow modes `list`, `yuy2`, `nv12`, `rgb32`, and `video2` pass.
 - Windows Camera proof reports `Success: True`.
 - Windows Camera screenshot shows nonblack capture of the selected source window.
+- Windows Camera proof writes `audio-ioctl-fuzz.txt`. With the user-mode feed bridge disabled, the expected pass line is `PASS VirtuaCam microphone endpoint OK; user-mode feed bridge unavailable`.
 - Do not run Chrome or browser proof as part of the default local or driver-test gate.
 
 ## Stage 3 - vHLK Prep
@@ -127,6 +144,19 @@ Stop rules:
 - Stop at `10` vHLK failures immediately.
 - Stop after `5` consecutive controller reconnect failures. Report `controller-reconnect-limit.json`.
 - If vHLK fails and driver work is needed, read PDF table of contents and relevant section before patching.
+
+After a failed set passes, export live non-passed tests and resume only that list:
+
+```powershell
+.\scripts\export-vhlk-remaining-tests.ps1
+.\scripts\run-vhlk-tests.ps1 `
+  -TestNameListPath .\test-reports\vhlk-remaining-export-<timestamp>\remaining-test-names.txt `
+  -PendingStartTimeoutSeconds 300 `
+  -TimeoutMinutes 480 `
+  -ResearchGateFailureCount 2 `
+  -StopOnFailureCount 10 `
+  -MaxControllerReconnectFailures 5
+```
 
 ## Stage 5 - Final vHLK Sanity
 

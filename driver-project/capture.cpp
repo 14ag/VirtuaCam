@@ -286,6 +286,8 @@ namespace
 #define DMAX_Y 1080
 #define D_X 1920
 #define D_Y 1080
+#define D_720P_X 1280
+#define D_720P_Y 720
 #define D_480P_X 640
 #define D_480P_Y 480
 #define D_9X16_X 1080
@@ -753,6 +755,7 @@ Return Value:
     NTSTATUS status =
         m_Device->CopyImageToStreamHeader(
             leading->StreamHeader,
+            m_VideoInfoHeader,
             &bytesWritten);
 
     if (!NT_SUCCESS(status)) {
@@ -877,6 +880,7 @@ Return Value:
 
 {
     NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN releaseLastResource = FALSE;
     DbgPrint(
         "[avshws] SetState pin=%p %s->%s hw=%lu irql=%lu\n",
         m_Pin,
@@ -890,15 +894,18 @@ Return Value:
         case KSSTATE_STOP:
 
             //
-            // First, stop the hardware if we actually did anything to it.
+            // First, leave the running stream set if this pin was active.
             //
-            if (m_HardwareState != HardwareStopped &&
-                (!m_AcquiredResources || m_Device -> GetAcquiredResourceCount () <= 1)) {
-                Status = m_Device -> Stop ();
+            if (m_HardwareState == HardwareRunning) {
+                Status = m_Device -> PausePinStream ();
                 NT_ASSERT (NT_SUCCESS (Status));
+            }
 
-                m_HardwareState = HardwareStopped;
-            } else if (m_AcquiredResources) {
+            releaseLastResource =
+                m_AcquiredResources &&
+                m_Device -> GetAcquiredResourceCount () <= 1;
+
+            if (m_HardwareState != HardwareStopped) {
                 m_HardwareState = HardwareStopped;
             }
 
@@ -922,6 +929,11 @@ Return Value:
             // Release any hardware resources related to this pin.
             //
             if (m_AcquiredResources) {
+                if (releaseLastResource) {
+                    Status = m_Device -> Stop ();
+                    NT_ASSERT (NT_SUCCESS (Status));
+                }
+
                 //
                 // If we got an interface to the clock, we must release it.
                 //
@@ -1011,13 +1023,12 @@ Return Value:
                 // hang when it is stopped running on a configuration such as
                 // Win2K + DX8. 
                 //
-                if (m_HardwareState != HardwareStopped) {
-                    Status = m_Device -> Stop ();
+                if (m_HardwareState == HardwareRunning) {
+                    Status = m_Device -> PausePinStream ();
                     NT_ASSERT (NT_SUCCESS (Status));
-
-                    m_HardwareState = HardwareStopped;
                 }
 
+                m_HardwareState = HardwareStopped;
                 Status = CleanupReferences ();
             }
 
@@ -1033,7 +1044,7 @@ Return Value:
             //
             if (FromState == KSSTATE_RUN) {
 
-                Status = m_Device -> Pause (TRUE);
+                Status = m_Device -> PausePinStream ();
 
                 if (NT_SUCCESS (Status)) {
                     m_HardwareState = HardwarePaused;
@@ -1054,11 +1065,7 @@ Return Value:
                 break;
             }
 
-            if (m_HardwareState == HardwarePaused) {
-                Status = m_Device -> Pause (FALSE);
-            } else {
-                Status = m_Device -> Start ();
-            }
+            Status = m_Device -> StartPinStream ();
 
             if (NT_SUCCESS (Status)) {
                 m_HardwareState = HardwareRunning;
@@ -2538,6 +2545,9 @@ DEFINE_RGB32_CAPTURE_RANGE(FormatRGB32Bpp_3x4_Capture, D_3X4_X, D_3X4_Y);
 DEFINE_YUY2_CAPTURE_RANGE2(FormatYUY2_Capture2, DMAX_X, DMAX_Y, 16, 9);
 DEFINE_NV12_CAPTURE_RANGE2(FormatNV12_Capture2, D_X, D_Y, 16, 9);
 DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_Capture2, D_X, D_Y, 16, 9);
+DEFINE_YUY2_CAPTURE_RANGE2(FormatYUY2_720p_Capture2, D_720P_X, D_720P_Y, 16, 9);
+DEFINE_NV12_CAPTURE_RANGE2(FormatNV12_720p_Capture2, D_720P_X, D_720P_Y, 16, 9);
+DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_720p_Capture2, D_720P_X, D_720P_Y, 16, 9);
 DEFINE_YUY2_CAPTURE_RANGE2(FormatYUY2_480p_Capture2, D_480P_X, D_480P_Y, 4, 3);
 DEFINE_NV12_CAPTURE_RANGE2(FormatNV12_480p_Capture2, D_480P_X, D_480P_Y, 4, 3);
 DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_480p_Capture2, D_480P_X, D_480P_Y, 4, 3);
@@ -2571,6 +2581,9 @@ CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
     (PKSDATARANGE) &FormatYUY2_Capture2,
     (PKSDATARANGE) &FormatNV12_Capture2,
     (PKSDATARANGE) &FormatRGB32Bpp_Capture2,
+    (PKSDATARANGE) &FormatYUY2_720p_Capture2,
+    (PKSDATARANGE) &FormatNV12_720p_Capture2,
+    (PKSDATARANGE) &FormatRGB32Bpp_720p_Capture2,
     (PKSDATARANGE) &FormatYUY2_480p_Capture2,
     (PKSDATARANGE) &FormatNV12_480p_Capture2,
     (PKSDATARANGE) &FormatRGB32Bpp_480p_Capture2,

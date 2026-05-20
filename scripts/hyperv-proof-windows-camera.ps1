@@ -72,6 +72,7 @@ $guestPackageRoot = Join-Path $guestRoot "output"
 $guestScriptsRoot = Join-Path $guestRoot "scripts"
 $guestToolsRoot = Join-Path $guestScriptsRoot "tools"
 $guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
+$guestAudioIoctlFuzz = Join-Path $guestScriptsRoot "test-audio-ioctl-fuzz.ps1"
 $guestWebcamHtml = Join-Path $guestRoot "webcam.html"
 $guestScreenshotPath = Join-Path $guestRoot "windows-camera-proof.png"
 
@@ -90,6 +91,7 @@ try {
 
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "output") -GuestPath $guestRoot -Recurse -LogPath $logPath
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\install-all.ps1") -GuestPath $guestScriptsRoot -LogPath $logPath
+    Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\test-audio-ioctl-fuzz.ps1") -GuestPath $guestScriptsRoot -LogPath $logPath
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\tools\artifact-manifest.ps1") -GuestPath $guestToolsRoot -LogPath $logPath
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "software-project\webcam.html") -GuestPath $guestRoot -LogPath $logPath
 
@@ -114,6 +116,20 @@ try {
         Wait-HvVmRebootTransition -VmName $VmName -Credential $guestCred -TimeoutSeconds 90 -PollIntervalSeconds 3 -LogPath $logPath | Out-Null
         Wait-HvVmReady -VmName $VmName -Credential $guestCred -TimeoutSeconds 300 -PollIntervalSeconds 3 -RequireInteractiveSession -ReadyThresholdSeconds 30 -LogPath $logPath | Out-Null
         $session = Wait-HvPowerShellDirect -VmName $VmName -Credential $guestCred -TimeoutSeconds 300 -LogPath $logPath
+    }
+
+    Write-HvLog -Message "Running virtual microphone IOCTL fuzz in guest." -LogPath $logPath -Level STEP
+    $audioFuzz = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
+        param($FuzzScript)
+        $lines = & powershell.exe -ExecutionPolicy Bypass -File $FuzzScript -AllowMissingBridge 2>&1
+        [pscustomobject]@{
+            ExitCode = $LASTEXITCODE
+            Output = [string]::Join([Environment]::NewLine, @($lines | ForEach-Object { [string]$_ }))
+        }
+    } -ArgumentList $guestAudioIoctlFuzz
+    $audioFuzz.Output | Set-Content -LiteralPath (Join-Path $runDir "audio-ioctl-fuzz.txt") -Encoding UTF8
+    if ($audioFuzz.ExitCode -ne 0) {
+        throw "audio.IoctlFuzzFailed"
     }
 
     Write-HvLog -Message "Checking MediaFrameSourceGroup and MFCreateSensorGroup." -LogPath $logPath -Level STEP
@@ -389,6 +405,7 @@ finally {
         RunDir = $runDir
         ScreenshotPath = $hostScreenshotPath
         MediaFrameSourceGroup = $sourceGroupProof
+        AudioIoctlFuzz = $audioFuzz
         HeldSessionStatus = $status
         Camera = $camera
         CheckedAtUtc = [DateTime]::UtcNow.ToString("o")
