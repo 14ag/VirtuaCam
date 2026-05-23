@@ -84,6 +84,7 @@ Parse changed or key PowerShell files first. Then run:
 .\scripts\test-camera-profile-contract.ps1
 .\scripts\test-driver-pnp-contract.ps1
 .\scripts\test-ai-window-cli.ps1
+.\scripts\test-capture-source-menu-contract.ps1
 .\scripts\build-all.ps1 -Clean
 ```
 
@@ -94,6 +95,7 @@ Pass criteria:
 - `output\` contains staged camera driver, virtual microphone driver, software, catalog, and test certificate artifacts.
 - `test-driver-pnp-contract.ps1` confirms PnP query-remove handling, close callbacks, device capabilities, INF hardware removal-policy override, and vHLK blocker filtering.
 - `test-setup-registry-debug-mic.ps1` confirms registry settings, debug gating, virtual microphone ABI, capture-only INF registration, PortCls-only DriverEntry, and the compile-time user-mode feed bridge state.
+- `test-capture-source-menu-contract.ps1` confirms the normal tray source menu order: windows/games, displays, video capture devices, image, and video.
 
 ## Stage 2 - Driver-Test Gate
 
