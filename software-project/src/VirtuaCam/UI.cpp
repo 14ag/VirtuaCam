@@ -10,6 +10,7 @@
 #include <wrl/client.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
+#include <commdlg.h>
 #include <filesystem>
 #include <map>
 
@@ -27,6 +28,7 @@ extern void RequestDriverDisconnect();
 
 extern const SourceState& GetMainSourceState();
 extern void SetSourceMode(SourceMode newMode, DWORD_PTR context);
+extern void SetSourceFileMode(SourceMode newMode, const std::wstring& path);
 
 extern const SourceState& GetPipSourceState(PipPosition pos);
 extern void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context);
@@ -123,6 +125,41 @@ std::vector<CapturableWindow> EnumerateWindows() {
     return result;
 }
 
+BOOL CALLBACK EnumDisplayProc(HMONITOR monitor, HDC, LPRECT rect, LPARAM lParam)
+{
+    auto* displays = reinterpret_cast<std::vector<CapturableDisplay>*>(lParam);
+    if (!displays || !rect) {
+        return TRUE;
+    }
+
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+        return TRUE;
+    }
+
+    const int index = static_cast<int>(displays->size());
+    std::wstring name = L"Display " + std::to_wstring(index + 1);
+    if (info.szDevice[0] != L'\0') {
+        name += L" (";
+        name += info.szDevice;
+        name += L")";
+    }
+    if ((info.dwFlags & MONITORINFOF_PRIMARY) != 0) {
+        name += L" Primary";
+    }
+
+    displays->push_back({ index, name, *rect, (info.dwFlags & MONITORINFOF_PRIMARY) != 0 });
+    return TRUE;
+}
+
+std::vector<CapturableDisplay> EnumerateDisplays()
+{
+    std::vector<CapturableDisplay> displays;
+    EnumDisplayMonitors(nullptr, nullptr, EnumDisplayProc, reinterpret_cast<LPARAM>(&displays));
+    return displays;
+}
+
 std::vector<std::wstring> EnumerateCameras() {
     std::vector<std::wstring> cameraNames;
     // Keep a parallel list of device paths so the app can launch camera producers
@@ -132,57 +169,51 @@ std::vector<std::wstring> EnumerateCameras() {
     g_cameraDevicePaths.clear();
     g_cameraDeviceNamesCache.clear();
 
-    ComPtr<ICreateDevEnum> devEnum;
-    if (FAILED(CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&devEnum)))) {
+    ComPtr<IMFAttributes> attributes;
+    if (FAILED(MFCreateAttributes(&attributes, 1))) {
+        return cameraNames;
+    }
+    if (FAILED(attributes->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID))) {
         return cameraNames;
     }
 
-    ComPtr<IEnumMoniker> enumMoniker;
-    HRESULT hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &enumMoniker, 0);
-    if (hr != S_OK || !enumMoniker) {
+    UINT32 count = 0;
+    IMFActivate** devices = nullptr;
+    HRESULT hr = MFEnumDeviceSources(attributes.Get(), &devices, &count);
+    if (FAILED(hr) || !devices || count == 0) {
+        if (devices) CoTaskMemFree(devices);
         return cameraNames;
     }
 
-    while (true) {
-        ComPtr<IMoniker> moniker;
-        ULONG fetched = 0;
-        if (enumMoniker->Next(1, &moniker, &fetched) != S_OK) {
-            break;
-        }
-
-        if (IsDriverOutputCamera(moniker.Get())) {
+    for (UINT32 i = 0; i < count; ++i) {
+        wil::unique_cotaskmem_string friendlyName;
+        wil::unique_cotaskmem_string symbolicLink;
+        if (!devices[i]) {
             continue;
         }
 
-        ComPtr<IPropertyBag> propertyBag;
-        if (FAILED(moniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&propertyBag))) || !propertyBag) {
+        (void)devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &friendlyName, nullptr);
+        (void)devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &symbolicLink, nullptr);
+
+        std::wstring name = friendlyName.get() ? friendlyName.get() : L"Video Capture Device";
+        std::wstring link = symbolicLink.get() ? symbolicLink.get() : L"";
+        if (name.find(L"VirtuaCam") != std::wstring::npos ||
+            name.find(L"Virtual Camera Driver") != std::wstring::npos ||
+            link.find(L"VirtuaCam") != std::wstring::npos) {
             continue;
         }
 
-        std::wstring devicePathStr;
-        VARIANT devicePath;
-        VariantInit(&devicePath);
-        if (SUCCEEDED(propertyBag->Read(L"DevicePath", &devicePath, nullptr)) &&
-            devicePath.vt == VT_BSTR &&
-            devicePath.bstrVal) {
-            devicePathStr = devicePath.bstrVal;
-        }
-        VariantClear(&devicePath);
-
-        VARIANT friendlyName;
-        VariantInit(&friendlyName);
-        if (SUCCEEDED(propertyBag->Read(L"FriendlyName", &friendlyName, nullptr)) &&
-            friendlyName.vt == VT_BSTR &&
-            friendlyName.bstrVal) {
-            std::wstring name(friendlyName.bstrVal);
-            if (name.find(L"VirtuaCam") == std::wstring::npos) {
-                cameraNames.push_back(name);
-                g_cameraDeviceNamesCache.push_back(name);
-                g_cameraDevicePaths.push_back(devicePathStr);
-            }
-        }
-        VariantClear(&friendlyName);
+        cameraNames.push_back(name);
+        g_cameraDeviceNamesCache.push_back(name);
+        g_cameraDevicePaths.push_back(link);
     }
+
+    for (UINT32 i = 0; i < count; ++i) {
+        if (devices[i]) {
+            devices[i]->Release();
+        }
+    }
+    CoTaskMemFree(devices);
 
     return cameraNames;
 }
@@ -276,6 +307,7 @@ HRESULT InitD3D(HWND hwnd);
 void CleanupD3D();
 void RenderPreviewFrame(HWND hwnd);
 HRESULT LoadAssets();
+bool SelectSourceFile(HWND owner, bool video, std::wstring& outPath);
 
 const char* g_vertexShaderHLSL = R"(
 struct VOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
@@ -540,6 +572,13 @@ void HandleMenuCommand(UINT id)
     else if (id == ID_ASPECT_RATIO_9_16) SetAspectRatioMode(AspectRatioMode::R9_16);
     else if (id == ID_ASPECT_RATIO_4_3) SetAspectRatioMode(AspectRatioMode::R4_3);
     else if (id == ID_ASPECT_RATIO_3_4) SetAspectRatioMode(AspectRatioMode::R3_4);
+    else if (id == ID_SOURCE_IMAGE_FILE || id == ID_SOURCE_VIDEO_FILE) {
+        std::wstring path;
+        const bool video = id == ID_SOURCE_VIDEO_FILE;
+        if (SelectSourceFile(g_hMainWnd, video, path)) {
+            SetSourceFileMode(video ? SourceMode::Video : SourceMode::Image, path);
+        }
+    }
     else if (id >= ID_PIP_OFF) HandlePipCommand(PipPosition::BR, id);
     else if (id >= ID_PIP_BL_OFF) HandlePipCommand(PipPosition::BL, id);
     else if (id >= ID_PIP_TR_OFF) HandlePipCommand(PipPosition::TR, id);
@@ -547,8 +586,11 @@ void HandleMenuCommand(UINT id)
     else if (id >= ID_SOURCE_OFF) {
         if (id == ID_SOURCE_OFF) SetSourceMode(SourceMode::Off, 0);
         else if (id == ID_SOURCE_CONSUMER) SetSourceMode(SourceMode::Consumer, 0);
-        else if (id >= ID_SOURCE_CAMERA_FIRST && id < ID_SOURCE_WINDOW_FIRST) {
+        else if (id >= ID_SOURCE_CAMERA_FIRST && id < ID_SOURCE_DISPLAY_FIRST) {
             SetSourceMode(SourceMode::Camera, id - ID_SOURCE_CAMERA_FIRST);
+        }
+        else if (id >= ID_SOURCE_DISPLAY_FIRST && id < ID_SOURCE_WINDOW_FIRST) {
+            SetSourceMode(SourceMode::Display, id - ID_SOURCE_DISPLAY_FIRST);
         }
         else if (id >= ID_SOURCE_WINDOW_FIRST && id < ID_SOURCE_DISCOVERED_FIRST) {
             if (g_mainSourceWindowMap.count(id)) {
@@ -583,6 +625,66 @@ void AddNativeMenuItem(HMENU menu, const std::wstring& text, UINT id, bool check
 void AddNativeSeparator(HMENU menu)
 {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+}
+
+bool SelectSourceFile(HWND owner, bool video, std::wstring& outPath)
+{
+    outPath.clear();
+    wchar_t fileName[MAX_PATH] = {};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = ARRAYSIZE(fileName);
+    ofn.lpstrTitle = video ? L"Select video source" : L"Select image source";
+    ofn.lpstrFilter = video
+        ? L"Video Files\0*.mp4;*.mov;*.mkv;*.avi;*.wmv;*.webm\0All Files\0*.*\0"
+        : L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff\0All Files\0*.*\0";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) {
+        return false;
+    }
+    outPath = fileName;
+    return !outPath.empty();
+}
+
+HMENU BuildMainVideoSourceSubMenu(
+    const std::vector<std::wstring>& cameras,
+    const std::vector<CapturableWindow>& windows,
+    const std::vector<CapturableDisplay>& displays)
+{
+    HMENU subMenu = CreatePopupMenu();
+    if (!subMenu) return nullptr;
+
+    const SourceState& state = GetMainSourceState();
+    g_mainSourceWindowMap.clear();
+
+    for (size_t i = 0; i < windows.size() && i < (ID_SOURCE_DISCOVERED_FIRST - ID_SOURCE_WINDOW_FIRST); ++i) {
+        UINT menuId = ID_SOURCE_WINDOW_FIRST + (UINT)i;
+        g_mainSourceWindowMap[menuId] = windows[i].hwnd;
+        std::wstring title = windows[i].title;
+        if (title.length() > 48) title = title.substr(0, 45) + L"...";
+        AddNativeMenuItem(subMenu, title, menuId, state.mode == SourceMode::Window && state.hwnd == windows[i].hwnd);
+    }
+
+    AddNativeSeparator(subMenu);
+    for (size_t i = 0; i < displays.size() && i < 100; ++i) {
+        std::wstring name = displays[i].name;
+        if (name.length() > 48) name = name.substr(0, 45) + L"...";
+        AddNativeMenuItem(subMenu, name, ID_SOURCE_DISPLAY_FIRST + (UINT)i, state.mode == SourceMode::Display && state.displayIndex == (int)i);
+    }
+
+    AddNativeSeparator(subMenu);
+    for (size_t i = 0; i < cameras.size() && i < (ID_SOURCE_DISPLAY_FIRST - ID_SOURCE_CAMERA_FIRST); ++i) {
+        std::wstring name = cameras[i];
+        if (name.length() > 48) name = name.substr(0, 45) + L"...";
+        AddNativeMenuItem(subMenu, name, ID_SOURCE_CAMERA_FIRST + (UINT)i, state.mode == SourceMode::Camera && state.cameraIndex == (int)i);
+    }
+
+    AddNativeSeparator(subMenu);
+    AddNativeMenuItem(subMenu, L"Image...", ID_SOURCE_IMAGE_FILE, state.mode == SourceMode::Image);
+    AddNativeMenuItem(subMenu, L"Video...", ID_SOURCE_VIDEO_FILE, state.mode == SourceMode::Video);
+    return subMenu;
 }
 
 HMENU BuildSourceSubMenu(
@@ -681,15 +783,15 @@ void ShowContextMenu(HWND hwnd) {
 
     const auto cameras = UI_RefreshCameraDeviceList();
     const auto windows = EnumerateWindows();
+    const auto displays = EnumerateDisplays();
 
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
 
     AddNativeMenuItem(menu, L"Show Preview", ID_TRAY_PREVIEW_WINDOW);
-    AddNativeSeparator(menu);
 
-    HMENU sourceMenu = BuildSourceSubMenu(cameras, windows, false);
-    if (sourceMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sourceMenu), L"Source");
+    HMENU sourceMenu = BuildMainVideoSourceSubMenu(cameras, windows, displays);
+    if (sourceMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sourceMenu), L"Video Source");
 
     HMENU audioSubMenu = CreatePopupMenu();
     if (audioSubMenu) {
@@ -705,7 +807,16 @@ void ShowContextMenu(HWND hwnd) {
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(audioSubMenu), L"Audio Source");
     }
 
-    AddNativeSeparator(menu);
+    HMENU aspectMenuTop = CreatePopupMenu();
+    if (aspectMenuTop) {
+        const AspectRatioMode currentAspect = GetAspectRatioMode();
+        const ULONG allowedAspectMask = GetAllowedAspectRatioMask();
+        AddNativeMenuItem(aspectMenuTop, L"16:9", ID_ASPECT_RATIO_16_9, currentAspect == AspectRatioMode::R16_9, (allowedAspectMask & ASPECT_RATIO_MASK_16_9) != 0);
+        AddNativeMenuItem(aspectMenuTop, L"9:16", ID_ASPECT_RATIO_9_16, currentAspect == AspectRatioMode::R9_16, (allowedAspectMask & ASPECT_RATIO_MASK_9_16) != 0);
+        AddNativeMenuItem(aspectMenuTop, L"4:3", ID_ASPECT_RATIO_4_3, currentAspect == AspectRatioMode::R4_3, (allowedAspectMask & ASPECT_RATIO_MASK_4_3) != 0);
+        AddNativeMenuItem(aspectMenuTop, L"3:4", ID_ASPECT_RATIO_3_4, currentAspect == AspectRatioMode::R3_4, (allowedAspectMask & ASPECT_RATIO_MASK_3_4) != 0);
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(aspectMenuTop), L"Aspect Ratio");
+    }
 
     if (g_debugUiEnabled) {
         HMENU advancedMenu = CreatePopupMenu();

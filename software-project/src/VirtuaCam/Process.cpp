@@ -423,6 +423,7 @@ namespace BuiltInCaptureProducer
     static std::atomic<bool> g_isCapturing = false;
     static bool g_loggedFirstFrame = false;
     static HWND g_captureTargetHwnd = nullptr;
+    static HMONITOR g_captureTargetMonitor = nullptr;
     static CaptureBackend g_captureBackend = CaptureBackend::None;
     static UINT g_captureWidth = 0;
     static UINT g_captureHeight = 0;
@@ -574,6 +575,38 @@ namespace BuiltInCaptureProducer
         return selectedHwnd;
     }
 
+    struct MonitorLookup
+    {
+        int targetIndex = -1;
+        int currentIndex = 0;
+        HMONITOR monitor = nullptr;
+    };
+
+    static BOOL CALLBACK FindMonitorByIndexProc(HMONITOR monitor, HDC, LPRECT, LPARAM lParam)
+    {
+        auto* lookup = reinterpret_cast<MonitorLookup*>(lParam);
+        if (!lookup) {
+            return FALSE;
+        }
+        if (lookup->currentIndex == lookup->targetIndex) {
+            lookup->monitor = monitor;
+            return FALSE;
+        }
+        ++lookup->currentIndex;
+        return TRUE;
+    }
+
+    static HMONITOR FindMonitorByIndex(int index)
+    {
+        if (index < 0) {
+            return nullptr;
+        }
+        MonitorLookup lookup{};
+        lookup.targetIndex = index;
+        EnumDisplayMonitors(nullptr, nullptr, FindMonitorByIndexProc, reinterpret_cast<LPARAM>(&lookup));
+        return lookup.monitor;
+    }
+
     static bool IsProbablyAllBlackBgrx(const BYTE* bits, UINT width, UINT height)
     {
         if (!bits || width == 0 || height == 0) {
@@ -710,7 +743,7 @@ namespace BuiltInCaptureProducer
             RETURN_IF_FAILED(g_d3d11Device->CreateShaderResourceView(sourceTexture, nullptr, &sourceSRV));
         }
 
-        const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        const float clearColor[] = { 33.0f / 255.0f, 33.0f / 255.0f, 33.0f / 255.0f, 1.0f };
         const CanvasBlitConstants constants = GetFullSourceUvConstants();
         D3D11_VIEWPORT viewport = GetContainCanvasViewport(sourceWidth, sourceHeight);
         ID3D11RenderTargetView* rtvs[] = { g_canvasRTV.Get() };
@@ -777,6 +810,77 @@ namespace BuiltInCaptureProducer
         RETURN_IF_FAILED(g_captureItem->get_Size(&size));
 
         // Prefer the free-threaded frame pool when available (avoids DispatcherQueue requirements).
+#if defined(WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION) && WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION >= 0x70000
+        ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2> framePoolStatics2;
+        if (SUCCEEDED(framePoolStatics.As(&framePoolStatics2)) && framePoolStatics2) {
+            RETURN_IF_FAILED(framePoolStatics2->CreateFreeThreaded(
+                g_winrtD3dDevice.Get(),
+                ABI::Windows::Graphics::DirectX::DirectXPixelFormat::DirectXPixelFormat_B8G8R8A8UIntNormalized,
+                2,
+                size,
+                g_framePool.ReleaseAndGetAddressOf()));
+        } else
+#endif
+        {
+            RETURN_IF_FAILED(framePoolStatics->Create(
+                g_winrtD3dDevice.Get(),
+                ABI::Windows::Graphics::DirectX::DirectXPixelFormat::DirectXPixelFormat_B8G8R8A8UIntNormalized,
+                2,
+                size,
+                g_framePool.ReleaseAndGetAddressOf()));
+        }
+        RETURN_HR_IF_NULL(E_FAIL, g_framePool.Get());
+
+        RETURN_IF_FAILED(g_framePool->CreateCaptureSession(g_captureItem.Get(), g_session.ReleaseAndGetAddressOf()));
+        RETURN_HR_IF_NULL(E_FAIL, g_session.Get());
+
+        RETURN_IF_FAILED(g_session->StartCapture());
+        return S_OK;
+    }
+
+    static HRESULT InitWgcMonitor(HMONITOR monitorToCapture)
+    {
+        RETURN_HR_IF_NULL(E_INVALIDARG, monitorToCapture);
+
+        HRESULT hrInit = RoInitialize(RO_INIT_MULTITHREADED);
+        if (FAILED(hrInit) && hrInit != RPC_E_CHANGED_MODE) {
+            return hrInit;
+        }
+        if (SUCCEEDED(hrInit)) {
+            g_roInitialized = true;
+        }
+
+        HString itemClass;
+        RETURN_IF_FAILED(MakeHString(L"Windows.Graphics.Capture.GraphicsCaptureItem", itemClass));
+
+        ComPtr<IActivationFactory> itemFactory;
+        RETURN_IF_FAILED(RoGetActivationFactory(itemClass.value, IID_PPV_ARGS(&itemFactory)));
+
+        ComPtr<IGraphicsCaptureItemInterop> interop;
+        RETURN_IF_FAILED(itemFactory.As(&interop));
+
+        RETURN_IF_FAILED(interop->CreateForMonitor(
+            monitorToCapture,
+            __uuidof(ABI::Windows::Graphics::Capture::IGraphicsCaptureItem),
+            (void**)g_captureItem.ReleaseAndGetAddressOf()));
+        RETURN_HR_IF_NULL(E_FAIL, g_captureItem.Get());
+
+        ComPtr<IDXGIDevice> dxgiDevice;
+        RETURN_IF_FAILED(g_d3d11Device.As(&dxgiDevice));
+
+        ComPtr<IInspectable> inspectableDevice;
+        RETURN_IF_FAILED(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.Get(), inspectableDevice.ReleaseAndGetAddressOf()));
+        RETURN_IF_FAILED(inspectableDevice.As(&g_winrtD3dDevice));
+
+        HString framePoolClass;
+        RETURN_IF_FAILED(MakeHString(L"Windows.Graphics.Capture.Direct3D11CaptureFramePool", framePoolClass));
+
+        ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics> framePoolStatics;
+        RETURN_IF_FAILED(RoGetActivationFactory(framePoolClass.value, IID_PPV_ARGS(&framePoolStatics)));
+
+        ABI::Windows::Graphics::SizeInt32 size{};
+        RETURN_IF_FAILED(g_captureItem->get_Size(&size));
+
 #if defined(WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION) && WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION >= 0x70000
         ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2> framePoolStatics2;
         if (SUCCEEDED(framePoolStatics.As(&framePoolStatics2)) && framePoolStatics2) {
@@ -1005,16 +1109,22 @@ namespace BuiltInCaptureProducer
     HRESULT InitializeProducer(const wchar_t* args)
     {
         UINT64 hwndVal = 0;
+        int monitorIndex = -1;
         std::wstring argsStr = args ? args : L"";
         UINT64 brokerNonceValue = 0;
         g_brokerNonce = 0;
         if (TryGetArgU64(argsStr, L"--broker-nonce", brokerNonceValue)) {
             g_brokerNonce = brokerNonceValue;
         }
-        RETURN_HR_IF(E_INVALIDARG, !TryGetArgU64(argsStr, L"--hwnd", hwndVal));
+        const bool hasMonitor = TryGetArgI32(argsStr, L"--monitor", monitorIndex);
+        const bool hasWindow = TryGetArgU64(argsStr, L"--hwnd", hwndVal);
+        RETURN_HR_IF(E_INVALIDARG, !hasMonitor && !hasWindow);
         HWND hwndToCapture = reinterpret_cast<HWND>(hwndVal);
-        RETURN_HR_IF_NULL(E_INVALIDARG, hwndToCapture);
+        if (!hasMonitor) {
+            RETURN_HR_IF_NULL(E_INVALIDARG, hwndToCapture);
+        }
         g_captureTargetHwnd = hwndToCapture;
+        g_captureTargetMonitor = nullptr;
         g_captureBackend = CaptureBackend::None;
         g_captureWidth = 0;
         g_captureHeight = 0;
@@ -1024,6 +1134,27 @@ namespace BuiltInCaptureProducer
 
         const CaptureBackend backendOverride = GetCaptureBackendOverride();
         HRESULT hr = S_OK;
+
+        if (hasMonitor) {
+            HMONITOR monitor = FindMonitorByIndex(monitorIndex);
+            RETURN_HR_IF_NULL(HRESULT_FROM_WIN32(ERROR_NOT_FOUND), monitor);
+            g_captureTargetMonitor = monitor;
+            RETURN_IF_FAILED(InitWgcMonitor(monitor));
+            ABI::Windows::Graphics::SizeInt32 size{};
+            RETURN_IF_FAILED(g_captureItem->get_Size(&size));
+            RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
+            g_captureWidth = static_cast<UINT>(size.Width);
+            g_captureHeight = static_cast<UINT>(size.Height);
+            g_captureBackend = CaptureBackend::Wgc;
+            g_isCapturing = true;
+            g_loggedFirstFrame = false;
+            VirtuaCamLog::LogLine(std::format(
+                L"Capture init: using WGC display monitor={} size={}x{}",
+                monitorIndex,
+                g_captureWidth,
+                g_captureHeight));
+            return S_OK;
+        }
 
         if (backendOverride == CaptureBackend::PrintWindow) {
             RETURN_IF_FAILED(InitPrintWindowCapture(hwndToCapture));
@@ -1052,25 +1183,6 @@ namespace BuiltInCaptureProducer
         }
 
         if (g_captureBackend == CaptureBackend::None) {
-            // Method 2: PrintWindow(PW_RENDERFULLCONTENT|PW_CLIENTONLY) -> if non-black use it.
-            hr = InitPrintWindowCapture(hwndToCapture);
-            if (SUCCEEDED(hr)) {
-                const HRESULT testHr = CapturePrintWindowFrame();
-                if (SUCCEEDED(testHr)) {
-                    VirtuaCamLog::LogLine(L"Capture init: using PrintWindow(PW_RENDERFULLCONTENT|PW_CLIENTONLY)");
-                    g_captureBackend = CaptureBackend::PrintWindow;
-                } else {
-                    VirtuaCamLog::LogHr(L"PrintWindow test frame black/failed; falling through to WGC", testHr);
-                    ResetSharedOutputs();
-                }
-            } else {
-                VirtuaCamLog::LogHr(L"InitPrintWindowCapture failed; falling through to WGC", hr);
-                ResetSharedOutputs();
-            }
-        }
-
-        if (g_captureBackend == CaptureBackend::None) {
-            // Method 3: Windows Graphics Capture (WGC) -> best for GPU/UWP.
             const HWND wgcHwnd = GetWgcTargetHwnd(hwndToCapture);
             hr = InitWgc(wgcHwnd);
             if (SUCCEEDED(hr)) {
@@ -1087,7 +1199,24 @@ namespace BuiltInCaptureProducer
                     g_captureHeight));
                 g_captureBackend = CaptureBackend::Wgc;
             } else {
-                VirtuaCamLog::LogHr(L"InitWgc failed; falling back to BitBlt", hr);
+                VirtuaCamLog::LogHr(L"InitWgc failed; falling through to PrintWindow", hr);
+                ResetSharedOutputs();
+            }
+        }
+
+        if (g_captureBackend == CaptureBackend::None) {
+            hr = InitPrintWindowCapture(hwndToCapture);
+            if (SUCCEEDED(hr)) {
+                const HRESULT testHr = CapturePrintWindowFrame();
+                if (SUCCEEDED(testHr)) {
+                    VirtuaCamLog::LogLine(L"Capture init: using PrintWindow(PW_RENDERFULLCONTENT|PW_CLIENTONLY)");
+                    g_captureBackend = CaptureBackend::PrintWindow;
+                } else {
+                    VirtuaCamLog::LogHr(L"PrintWindow test frame black/failed; falling through to BitBlt", testHr);
+                    ResetSharedOutputs();
+                }
+            } else {
+                VirtuaCamLog::LogHr(L"InitPrintWindowCapture failed; falling through to BitBlt", hr);
                 ResetSharedOutputs();
             }
         }
@@ -1181,6 +1310,7 @@ namespace BuiltInCaptureProducer
         g_winrtD3dDevice.Reset();
         ResetSharedOutputs();
         g_captureTargetHwnd = nullptr;
+        g_captureTargetMonitor = nullptr;
         g_captureBackend = CaptureBackend::None;
 
         if (g_d3d11Context) g_d3d11Context->ClearState();
@@ -1957,6 +2087,7 @@ namespace BuiltInCameraProducer
     static std::atomic<bool> g_isCapturing = false;
     static bool g_mfStarted = false;
     static bool g_loggedFirstFrame = false;
+    static bool g_staticImageMode = false;
 
     static HRESULT InitD3D11()
     {
@@ -2012,7 +2143,7 @@ namespace BuiltInCameraProducer
             RETURN_IF_FAILED(g_d3d11Device->CreateShaderResourceView(sourceTexture, nullptr, &sourceSRV));
         }
 
-        const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        const float clearColor[] = { 33.0f / 255.0f, 33.0f / 255.0f, 33.0f / 255.0f, 1.0f };
         const CanvasBlitConstants constants = GetFullSourceUvConstants();
         D3D11_VIEWPORT viewport = GetContainCanvasViewport(sourceWidth, sourceHeight);
         ID3D11RenderTargetView* rtvs[] = { g_canvasRTV.Get() };
@@ -2215,15 +2346,162 @@ namespace BuiltInCameraProducer
         return S_OK;
     }
 
+    HRESULT InitializeFileProducer(const wchar_t* args)
+    {
+        std::wstring argsStr = args ? args : L"";
+        UINT64 brokerNonceValue = 0;
+        g_brokerNonce = 0;
+        if (TryGetArgU64(argsStr, L"--broker-nonce", brokerNonceValue)) {
+            g_brokerNonce = brokerNonceValue;
+        }
+
+        std::wstring filePath;
+        RETURN_HR_IF(E_INVALIDARG, !TryGetArgValue(argsStr, L"--file", filePath) || filePath.empty());
+        std::wstring mediaKind;
+        (void)TryGetArgValue(argsStr, L"--media-kind", mediaKind);
+
+        if (_wcsicmp(mediaKind.c_str(), L"image") == 0) {
+            RETURN_IF_FAILED(InitD3D11());
+
+            ComPtr<IWICImagingFactory> wicFactory;
+            RETURN_IF_FAILED(CoCreateInstance(
+                CLSID_WICImagingFactory,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(&wicFactory)));
+
+            ComPtr<IWICBitmapDecoder> decoder;
+            RETURN_IF_FAILED(wicFactory->CreateDecoderFromFilename(
+                filePath.c_str(),
+                nullptr,
+                GENERIC_READ,
+                WICDecodeMetadataCacheOnLoad,
+                &decoder));
+
+            ComPtr<IWICBitmapFrameDecode> frame;
+            RETURN_IF_FAILED(decoder->GetFrame(0, &frame));
+
+            UINT width = 0;
+            UINT height = 0;
+            RETURN_IF_FAILED(frame->GetSize(&width, &height));
+            RETURN_HR_IF(E_FAIL, width == 0 || height == 0);
+
+            ComPtr<IWICFormatConverter> converter;
+            RETURN_IF_FAILED(wicFactory->CreateFormatConverter(&converter));
+            RETURN_IF_FAILED(converter->Initialize(
+                frame.Get(),
+                GUID_WICPixelFormat32bppBGRA,
+                WICBitmapDitherTypeNone,
+                nullptr,
+                0.0,
+                WICBitmapPaletteTypeCustom));
+
+            std::vector<BYTE> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+            RETURN_IF_FAILED(converter->CopyPixels(
+                nullptr,
+                width * 4,
+                static_cast<UINT>(pixels.size()),
+                pixels.data()));
+
+            g_videoWidth = static_cast<long>(width);
+            g_videoHeight = static_cast<long>(height);
+            RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
+            RETURN_IF_FAILED(EnsureCameraSourceTexture(width, height));
+            g_d3d11Context->UpdateSubresource(g_sourceD3D11Texture.Get(), 0, NULL, pixels.data(), width * 4, 0);
+            RETURN_IF_FAILED(RenderCameraTextureToCanvas(g_sourceD3D11Texture.Get(), width, height));
+
+            g_staticImageMode = true;
+            g_isCapturing = true;
+            g_loggedFirstFrame = false;
+            VirtuaCamLog::LogLine(std::format(L"BuiltInMediaProducer: image={} size={}x{}", filePath, g_videoWidth, g_videoHeight));
+            return S_OK;
+        }
+
+        if (!g_mfStarted) {
+            RETURN_IF_FAILED(MFStartup(MF_VERSION));
+            g_mfStarted = true;
+        }
+        g_staticImageMode = false;
+
+        RETURN_IF_FAILED(InitD3D11());
+
+        ComPtr<IMFAttributes> readerAttributes;
+        RETURN_IF_FAILED(MFCreateAttributes(&readerAttributes, 2));
+        RETURN_IF_FAILED(readerAttributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, FALSE));
+        RETURN_IF_FAILED(readerAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE));
+
+        RETURN_IF_FAILED(MFCreateSourceReaderFromURL(filePath.c_str(), readerAttributes.Get(), &g_sourceReader));
+
+        ComPtr<IMFMediaType> outputType;
+        RETURN_IF_FAILED(MFCreateMediaType(&outputType));
+        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
+        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32));
+
+        for (DWORD i = 0;; ++i) {
+            ComPtr<IMFMediaType> nativeType;
+            HRESULT hr = g_sourceReader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, i, &nativeType);
+            if (hr == MF_E_NO_MORE_TYPES) break;
+            RETURN_IF_FAILED(hr);
+
+            if (SUCCEEDED(g_sourceReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, nativeType.Get())) &&
+                SUCCEEDED(g_sourceReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, outputType.Get()))) {
+                break;
+            }
+        }
+
+        ComPtr<IMFMediaType> currentType;
+        RETURN_IF_FAILED(g_sourceReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &currentType));
+        MFGetAttributeSize(currentType.Get(), MF_MT_FRAME_SIZE, (UINT32*)&g_videoWidth, (UINT32*)&g_videoHeight);
+        RETURN_HR_IF(E_FAIL, g_videoWidth <= 0 || g_videoHeight <= 0);
+
+        RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
+        RETURN_IF_FAILED(EnsureCameraSourceTexture(static_cast<UINT>(g_videoWidth), static_cast<UINT>(g_videoHeight)));
+
+        g_isCapturing = true;
+        g_loggedFirstFrame = false;
+        VirtuaCamLog::LogLine(std::format(L"BuiltInMediaProducer: file={} size={}x{}", filePath, g_videoWidth, g_videoHeight));
+        return S_OK;
+    }
+
     bool ProcessFrame()
     {
-        if (!g_isCapturing || !g_sourceReader) return false;
+        if (!g_isCapturing) return false;
+
+        if (g_staticImageMode) {
+            UINT64 newFenceValue = g_fenceValue.fetch_add(1) + 1;
+            g_d3d11Context4->Signal(g_sharedD3D11Fence.Get(), newFenceValue);
+            g_d3d11Context->Flush();
+            if (g_pManifestView) {
+                InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
+            }
+            if (!g_loggedFirstFrame) {
+                VirtuaCamLog::LogLine(std::format(
+                    L"First producer frame: type=image size={}x{} frameValue={}",
+                    g_videoWidth,
+                    g_videoHeight,
+                    newFenceValue));
+                g_loggedFirstFrame = true;
+            }
+            return true;
+        }
+
+        if (!g_sourceReader) return false;
 
         ComPtr<IMFSample> sample;
         DWORD streamFlags = 0;
         LONGLONG timestamp = 0;
         HRESULT hr = g_sourceReader->ReadSample((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, NULL, &streamFlags, &timestamp, &sample);
-        if (FAILED(hr) || !sample) return false;
+        if (FAILED(hr)) return false;
+        if ((streamFlags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
+            PROPVARIANT pos{};
+            PropVariantInit(&pos);
+            pos.vt = VT_I8;
+            pos.hVal.QuadPart = 0;
+            (void)g_sourceReader->SetCurrentPosition(GUID_NULL, pos);
+            PropVariantClear(&pos);
+            return false;
+        }
+        if (!sample) return false;
 
         ComPtr<IMFMediaBuffer> buffer;
         if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer) return false;
@@ -2265,6 +2543,7 @@ namespace BuiltInCameraProducer
     void ShutdownProducer()
     {
         if (!g_isCapturing.exchange(false)) return;
+        g_staticImageMode = false;
 
         if (g_sourceReader) {
             (void)g_sourceReader->Flush(MF_SOURCE_READER_ALL_STREAMS);
@@ -2311,6 +2590,13 @@ void LoadProducerModule(const std::wstring& type, ProducerModule& module)
     if (type == L"camera") {
         module.hModule = nullptr;
         module.Initialize = &BuiltInCameraProducer::InitializeProducer;
+        module.Process = &BuiltInCameraProducer::ProcessFrame;
+        module.Shutdown = &BuiltInCameraProducer::ShutdownProducer;
+        return;
+    }
+    if (type == L"media") {
+        module.hModule = nullptr;
+        module.Initialize = &BuiltInCameraProducer::InitializeFileProducer;
         module.Process = &BuiltInCameraProducer::ProcessFrame;
         module.Shutdown = &BuiltInCameraProducer::ShutdownProducer;
         return;

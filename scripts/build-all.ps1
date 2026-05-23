@@ -229,12 +229,21 @@ function Get-OrCreateTestCodeSigningCertificate {
     param([string]$SubjectCommonName)
 
     $subject = "CN=$SubjectCommonName"
-    $cert = Get-ChildItem -Path Cert:\CurrentUser\My |
-        Where-Object { $_.Subject -eq $subject -and $_.HasPrivateKey } |
-        Sort-Object NotAfter -Descending |
-        Select-Object -First 1
+    $store = [System.Security.Cryptography.X509Certificates.X509Store]::new("My", "CurrentUser")
+    $cert = $null
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+        $cert = $store.Certificates |
+            Where-Object { $_.Subject -eq $subject -and $_.HasPrivateKey } |
+            Sort-Object NotAfter -Descending |
+            Select-Object -First 1
+    }
+    finally {
+        $store.Close()
+    }
 
     if (-not $cert) {
+        Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
         $cert = New-SelfSignedCertificate `
             -Type CodeSigningCert `
             -Subject $subject `

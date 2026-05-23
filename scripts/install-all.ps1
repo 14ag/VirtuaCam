@@ -9,6 +9,25 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Get-FileSha256Hash {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = $sha256.ComputeHash($stream)
+            return [BitConverter]::ToString($hash).Replace("-", "")
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Write-InstallLog {
     param([string]$Message)
 
@@ -93,22 +112,81 @@ function Import-TestCertificateIfPresent {
 }
 
 function Get-AvshwsDevices {
-    Get-CimInstance Win32_PnPEntity |
-        Where-Object { $_.PNPDeviceID -like "ROOT\AVSHWS\*" }
+    try {
+        return @(Get-CimInstance Win32_PnPEntity -ErrorAction Stop |
+            Where-Object { $_.PNPDeviceID -like "ROOT\AVSHWS\*" })
+    }
+    catch {
+        Write-Info "CIM device query failed for ROOT\AVSHWS; falling back to pnputil."
+    }
+
+    $output = & "$env:WINDIR\System32\pnputil.exe" /enum-devices /instanceid "ROOT\AVSHWS\0000" 2>$null
+    if ($LASTEXITCODE -eq 0 -and ($output -match 'Instance ID:\s+ROOT\\AVSHWS\\0000')) {
+        return @([pscustomobject]@{ PNPDeviceID = "ROOT\AVSHWS\0000"; Status = "OK" })
+    }
+    return @()
 }
 
 function Get-VirtuaCamMicDevices {
-    Get-CimInstance Win32_PnPEntity |
-        Where-Object { $_.PNPDeviceID -like "ROOT\VIRTUACAMMIC\*" }
+    try {
+        return @(Get-CimInstance Win32_PnPEntity -ErrorAction Stop |
+            Where-Object { $_.PNPDeviceID -like "ROOT\VIRTUACAMMIC\*" })
+    }
+    catch {
+        Write-Info "CIM device query failed for ROOT\VIRTUACAMMIC; falling back to pnputil."
+    }
+
+    $output = & "$env:WINDIR\System32\pnputil.exe" /enum-devices /instanceid "ROOT\VIRTUACAMMIC\0000" 2>$null
+    if ($LASTEXITCODE -eq 0 -and ($output -match 'Instance ID:\s+ROOT\\VIRTUACAMMIC\\0000')) {
+        return @([pscustomobject]@{ PNPDeviceID = "ROOT\VIRTUACAMMIC\0000"; Status = "OK" })
+    }
+    return @()
+}
+
+function Get-DeviceInstanceIdForPattern {
+    param([Parameter(Mandatory = $true)][string]$DeviceIdPattern)
+
+    if ($DeviceIdPattern -like "ROOT\AVSHWS\*") {
+        return "ROOT\AVSHWS\0000"
+    }
+    if ($DeviceIdPattern -like "ROOT\VIRTUACAMMIC\*") {
+        return "ROOT\VIRTUACAMMIC\0000"
+    }
+    return $null
+}
+
+function Get-BoundDriverInfNames {
+    param([Parameter(Mandatory = $true)][string]$DeviceIdPattern)
+
+    try {
+        $signedDrivers = Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
+            Where-Object { $_.DeviceID -like $DeviceIdPattern -and $_.InfName }
+        return @($signedDrivers | Select-Object -ExpandProperty InfName -Unique)
+    }
+    catch {
+        Write-Info "CIM driver query failed for $DeviceIdPattern; falling back to pnputil."
+    }
+
+    $instanceId = Get-DeviceInstanceIdForPattern -DeviceIdPattern $DeviceIdPattern
+    if (-not $instanceId) {
+        return @()
+    }
+
+    $output = & "$env:WINDIR\System32\pnputil.exe" /enum-devices /instanceid $instanceId /drivers 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return @()
+    }
+
+    return @($output |
+        Where-Object { $_ -match '^\s*Driver Name:\s*(oem\d+\.inf)\s*$' } |
+        ForEach-Object { $Matches[1] } |
+        Select-Object -Unique)
 }
 
 function Remove-DriverPackagesForDevicePattern {
     param([Parameter(Mandatory = $true)][string]$DeviceIdPattern)
 
-    $signedDrivers = Get-CimInstance Win32_PnPSignedDriver |
-        Where-Object { $_.DeviceID -like $DeviceIdPattern -and $_.InfName }
-
-    $infNames = @($signedDrivers | Select-Object -ExpandProperty InfName -Unique)
+    $infNames = @(Get-BoundDriverInfNames -DeviceIdPattern $DeviceIdPattern)
     foreach ($inf in $infNames) {
         if ($inf -match '^oem\d+\.inf$') {
             Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/delete-driver", $inf, "/uninstall", "/force") -AllowedExitCodes @(0, 2, 259, 3010, -536870340)
@@ -119,14 +197,17 @@ function Remove-DriverPackagesForDevicePattern {
 function Remove-ExistingDriverPackage {
     param([Parameter(Mandatory = $true)][string]$DeviceIdPattern)
 
-    $matched = @(Get-CimInstance Win32_PnPSignedDriver |
-        Where-Object { $_.DeviceID -like $DeviceIdPattern -and $_.InfName })
-    if ($matched.Count -eq 0) {
+    $infNames = @(Get-BoundDriverInfNames -DeviceIdPattern $DeviceIdPattern)
+    if ($infNames.Count -eq 0) {
         Write-Info "No bound OEM INF found for $DeviceIdPattern"
         return
     }
 
-    Remove-DriverPackagesForDevicePattern -DeviceIdPattern $DeviceIdPattern
+    foreach ($inf in $infNames) {
+        if ($inf -match '^oem\d+\.inf$') {
+            Invoke-NativeProcess -FilePath "$env:WINDIR\System32\pnputil.exe" -Arguments @("/delete-driver", $inf, "/uninstall", "/force") -AllowedExitCodes @(0, 2, 259, 3010, -536870340)
+        }
+    }
 }
 
 if (-not ([System.Management.Automation.PSTypeName]'AvshwsInstallerNative').Type) {
@@ -319,6 +400,15 @@ function Install-WatcherService {
 
 function Protect-VirtuaCamRegistryKey {
     param([Parameter(Mandatory = $true)][string]$Path)
+
+    try {
+        $null = Get-Command Get-Acl -ErrorAction Stop
+        $null = Get-Command Set-Acl -ErrorAction Stop
+    }
+    catch {
+        Write-Info "Registry ACL hardening skipped; ACL cmdlets unavailable in this PowerShell host."
+        return
+    }
 
     $acl = Get-Acl -Path $Path
     $acl.SetAccessRuleProtection($true, $false)
@@ -554,8 +644,8 @@ New-Item -Path $virtuaCamRegPath -Force | Out-Null
 $installDirCanonical = [System.IO.Path]::GetFullPath($installDir)
 $virtuaCamExeCanonical = [System.IO.Path]::GetFullPath($virtuaCamExe)
 $processExeCanonical = [System.IO.Path]::GetFullPath($processExe)
-$virtuaCamExeHash = (Get-FileHash -LiteralPath $virtuaCamExeCanonical -Algorithm SHA256).Hash
-$processExeHash = (Get-FileHash -LiteralPath $processExeCanonical -Algorithm SHA256).Hash
+$virtuaCamExeHash = Get-FileSha256Hash -LiteralPath $virtuaCamExeCanonical
+$processExeHash = Get-FileSha256Hash -LiteralPath $processExeCanonical
 Set-ItemProperty -Path $virtuaCamRegPath -Name "InstallDir" -Value $installDirCanonical
 Set-ItemProperty -Path $virtuaCamRegPath -Name "VirtuaCamExe" -Value $virtuaCamExeCanonical
 Set-ItemProperty -Path $virtuaCamRegPath -Name "ProcessExe" -Value $processExeCanonical

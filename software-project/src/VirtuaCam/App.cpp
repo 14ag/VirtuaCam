@@ -69,6 +69,9 @@ const wchar_t* SourceModeToString(SourceMode mode)
     case SourceMode::Off: return L"Off";
     case SourceMode::Camera: return L"Camera";
     case SourceMode::Window: return L"Window";
+    case SourceMode::Display: return L"Display";
+    case SourceMode::Image: return L"Image";
+    case SourceMode::Video: return L"Video";
     case SourceMode::Consumer: return L"Consumer";
     case SourceMode::Discovered: return L"Discovered";
     default: return L"Unknown";
@@ -94,10 +97,12 @@ void RequestDriverDisconnect();
 void OnIdle();
 void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerState, UINT64 brokerFrameValue);
 void InformBroker();
+void ForceDefaultBrokerFrameToDriver(const wchar_t* reason);
 void LoadSettings();
 void SaveSettings();
 void InitializeAudio();
 void SelectAudioForCameraPassthrough(int cameraIndex);
+void SetSourceFileMode(SourceMode newMode, const std::wstring& path);
 void ApplySavedAudioSelection();
 bool HasArg(const std::wstring& cmdLine, const wchar_t* arg);
 bool TryGetArgU64(const std::wstring& cmdLine, const wchar_t* arg, UINT64& outValue);
@@ -277,7 +282,12 @@ void ApplyDriverAspectPolicy()
         return;
     }
 
-    HRESULT hr = g_driverBridge->SetAspectPolicy(g_aspectRatioMode, g_allowedAspectRatioMask);
+    ULONG driverAspectMask = AspectRatioMask(g_aspectRatioMode);
+    if ((driverAspectMask & g_allowedAspectRatioMask) == 0) {
+        driverAspectMask = g_allowedAspectRatioMask;
+    }
+
+    HRESULT hr = g_driverBridge->SetAspectPolicy(g_aspectRatioMode, driverAspectMask);
     if (FAILED(hr)) {
         VirtuaCamLog::LogHr(L"DriverBridge::SetAspectPolicy failed", hr);
         return;
@@ -613,6 +623,19 @@ DWORD LaunchProducer(const std::wstring& key, const std::wstring& args)
     return 0;
 }
 
+std::wstring QuoteProcessArg(const std::wstring& value)
+{
+    std::wstring quoted = L"\"";
+    for (wchar_t ch : value) {
+        if (ch == L'\"' || ch == L'\\') {
+            quoted.push_back(L'\\');
+        }
+        quoted.push_back(ch);
+    }
+    quoted.push_back(L'\"');
+    return quoted;
+}
+
 bool TryLaunchWindowProducer(
     const std::wstring& key,
     DWORD_PTR context,
@@ -654,9 +677,16 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
 
     g_mainSourceState.pid = 0;
     g_mainSourceState.cameraIndex = -1;
+    g_mainSourceState.displayIndex = -1;
+    g_mainSourceState.filePath.clear();
     TerminateProducer(L"main_camera");
     TerminateProducer(L"main_window");
+    TerminateProducer(L"main_display");
+    TerminateProducer(L"main_media");
     g_mainSourceState.hwnd = nullptr;
+    g_mainSourceState.mode = SourceMode::Off;
+    InformBroker();
+    ForceDefaultBrokerFrameToDriver(L"source switch clear");
 
     switch (newMode) {
         case SourceMode::Camera:
@@ -697,6 +727,17 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
                 newMode = SourceMode::Off;
             }
             break;
+        case SourceMode::Display:
+            SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main display source");
+            g_mainSourceState.displayIndex = static_cast<int>(context);
+            g_mainSourceState.pid = LaunchProducer(
+                L"main_display",
+                L"--type capture --monitor " + std::to_wstring(g_mainSourceState.displayIndex));
+            if (g_mainSourceState.pid == 0) {
+                newMode = SourceMode::Off;
+                g_mainSourceState.displayIndex = -1;
+            }
+            break;
         case SourceMode::Discovered:
         case SourceMode::Consumer:
             SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main non-camera source");
@@ -714,6 +755,42 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
         g_mainSourceState.pid,
         g_mainSourceState.cameraIndex,
         static_cast<UINT64>(reinterpret_cast<UINT_PTR>(g_mainSourceState.hwnd))));
+    InformBroker();
+    ApplyDriverAspectPolicy();
+}
+
+void SetSourceFileMode(SourceMode newMode, const std::wstring& path)
+{
+    if ((newMode != SourceMode::Image && newMode != SourceMode::Video) || path.empty()) {
+        return;
+    }
+
+    SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, newMode == SourceMode::Image ? L"main image source" : L"main video source");
+    g_mainSourceState.pid = 0;
+    g_mainSourceState.cameraIndex = -1;
+    g_mainSourceState.displayIndex = -1;
+    g_mainSourceState.hwnd = nullptr;
+    g_mainSourceState.filePath = path;
+    TerminateProducer(L"main_camera");
+    TerminateProducer(L"main_window");
+    TerminateProducer(L"main_display");
+    TerminateProducer(L"main_media");
+    g_mainSourceState.mode = SourceMode::Off;
+    InformBroker();
+    ForceDefaultBrokerFrameToDriver(L"file source switch clear");
+
+    g_mainSourceState.pid = LaunchProducer(
+        L"main_media",
+        std::format(
+            L"--type media --media-kind {} --file {}",
+            newMode == SourceMode::Image ? L"image" : L"video",
+            QuoteProcessArg(path)));
+    g_mainSourceState.mode = (g_mainSourceState.pid != 0) ? newMode : SourceMode::Off;
+    VirtuaCamLog::LogLine(std::format(
+        L"Main source active: mode={} pid={} file={}",
+        SourceModeToString(g_mainSourceState.mode),
+        g_mainSourceState.pid,
+        path));
     InformBroker();
     ApplyDriverAspectPolicy();
 }
@@ -740,6 +817,8 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
 
     state.pid = 0;
     state.cameraIndex = -1;
+    state.displayIndex = -1;
+    state.filePath.clear();
     std::wstring key_prefix = L"pip_" + std::to_wstring((int)pos);
     TerminateProducer(key_prefix + L"_camera");
     TerminateProducer(key_prefix + L"_window");
@@ -827,9 +906,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     SetTimer(g_hMainWnd, 1, 1000, nullptr);
     UINT64 startupWindowHwnd = 0;
     UINT64 startupCameraIndex = 0;
+    UINT64 startupDisplayIndex = 0;
     if (TryGetArgU64(cmdLine, L"--source-window-hwnd", startupWindowHwnd)) {
         VirtuaCamLog::LogLine(std::format(L"Startup source: window hwnd={}", startupWindowHwnd));
         SetSourceMode(SourceMode::Window, static_cast<DWORD_PTR>(startupWindowHwnd));
+    } else if (TryGetArgU64(cmdLine, L"--source-display-index", startupDisplayIndex)) {
+        VirtuaCamLog::LogLine(std::format(L"Startup source: display index={}", startupDisplayIndex));
+        SetSourceMode(SourceMode::Display, static_cast<DWORD_PTR>(startupDisplayIndex));
     } else if (TryGetArgU64(cmdLine, L"--source-camera-index", startupCameraIndex)) {
         const auto cameras = UI_RefreshCameraDeviceList();
         if (startupCameraIndex < cameras.size()) {
@@ -986,6 +1069,26 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
             s_lastDefaultFeedSendTick = GetTickCount64();
         }
     }
+}
+
+void ForceDefaultBrokerFrameToDriver(const wchar_t* reason)
+{
+    if (!g_pfnSetCompositingMode || !g_pfnUpdateProducerPriorityList || !g_pfnRenderBrokerFrame || !g_pfnGetBrokerState || !g_pfnGetBrokerFrameValue) {
+        return;
+    }
+
+    DWORD pids[5] = {0};
+    g_pfnSetCompositingMode(false);
+    g_pfnUpdateProducerPriorityList(pids, 5);
+    g_pfnRenderBrokerFrame();
+    const BrokerState brokerState = g_pfnGetBrokerState();
+    const UINT64 brokerFrameValue = g_pfnGetBrokerFrameValue();
+    VirtuaCamLog::LogLine(std::format(
+        L"Forced default broker frame: reason={} brokerState={} frameValue={}",
+        reason ? reason : L"",
+        static_cast<int>(brokerState),
+        brokerFrameValue));
+    TrySendBrokerFrameToDriver(true, brokerState, brokerFrameValue);
 }
 
 void InformBroker() {

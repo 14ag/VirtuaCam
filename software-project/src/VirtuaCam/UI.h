@@ -13,6 +13,13 @@ struct CapturableWindow {
     std::wstring title;
 };
 
+struct CapturableDisplay {
+    int index;
+    std::wstring name;
+    RECT bounds;
+    bool primary;
+};
+
 typedef ID3D11Texture2D* (*PFN_GetSharedTexture)();
 
 void UI_Initialize(HINSTANCE instance, HWND& outMainWnd, PFN_GetSharedTexture pfnGetSharedTexture);
@@ -25,6 +32,7 @@ void UI_SetCurrentAudioDeviceId(int id);
 int UI_GetCurrentAudioDeviceId();
 std::vector<std::wstring> UI_RefreshCameraDeviceList();
 std::vector<CapturableWindow> EnumerateWindows();
+std::vector<CapturableDisplay> EnumerateDisplays();
 
 // Returns a cached camera DevicePath for a given camera index (menu index),
 // or nullptr if out of range / unknown. This is used to launch camera producers

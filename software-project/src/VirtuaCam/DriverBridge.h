@@ -36,6 +36,10 @@ private:
     HRESULT EnsureGpuResources(ID3D11Texture2D* sourceTexture);
     HRESULT EnsureSourceTextureView(ID3D11Texture2D* sourceTexture);
     HRESULT RefreshDriverGeometry();
+    bool IsDriverClientActive();
+    HRESULT ApplyDriverAspectProperties(AspectRatioMode preferredMode, ULONG allowedMask);
+    HRESULT ApplyAspectPolicyNow(AspectRatioMode preferredMode, ULONG allowedMask);
+    HRESULT ApplyPendingAspectPolicyIfIdle();
     HRESULT EnsureNv12Resources();
     HRESULT CreateShaders();
     HRESULT UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped);
@@ -85,6 +89,9 @@ private:
     UINT m_outputHeight = 1080;
     ULONG m_outputFormat = 0;
     ULONG m_uploadFormatMask = 0;
+    AspectRatioMode m_pendingPreferredMode = AspectRatioMode::R16_9;
+    ULONG m_pendingAllowedMask = ASPECT_RATIO_MASK_ALL;
+    bool m_hasPendingAspectPolicy = false;
     bool m_frameExSupportKnown = false;
     bool m_frameExSupported = false;
     bool m_frameExFallbackLogged = false;

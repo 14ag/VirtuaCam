@@ -38,68 +38,110 @@ namespace
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoRecordingPreviewMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1440, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoRecordingCaptureMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1440, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 30, 1 }, 0, 0, 0, 0, 0 },
         { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoRecordingStillMediaInfos[] = {
         { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 1440, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
         { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 },
         { { 1080, 1920 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 0, 0 }, 0, 0, 0, 0, 0 },
         { { 480, 640 }, { 0, 0 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoConferencingPreviewMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+        { { 1440, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoConferencingCaptureMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+        { { 1440, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileVideoConferencingStillMediaInfos[] = {
         { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 }
+        { { 1440, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 0, 0 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileHighQualityPhotoPreviewMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+        { { 1440, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileHighQualityPhotoCaptureMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+        { { 1440, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileHighQualityPhotoStillMediaInfos[] = {
         { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 }
+        { { 1440, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 0, 0 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileBalancedVideoAndPhotoPreviewMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+        { { 1440, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileBalancedVideoAndPhotoCaptureMediaInfos[] = {
         { { 1920, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 }
+        { { 1440, 1080 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 30, 1 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 30, 1 }, 0, 0, 0, 0, 0 }
     };
 
     const KSCAMERA_PROFILE_MEDIAINFO CameraProfileBalancedVideoAndPhotoStillMediaInfos[] = {
         { { 1920, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
-        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 }
+        { { 1440, 1080 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 640, 480 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1920 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 1080, 1440 }, { 0, 0 }, 0, 0, 0, 0, 0 },
+        { { 480, 640 }, { 0, 0 }, 0, 0, 0, 0, 0 }
     };
 
     KSCAMERA_PROFILE_PININFO CameraProfileVideoRecordingPins[] = {
@@ -116,7 +158,7 @@ namespace
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoRecordingCaptureMediaInfos)
         },
         {
-            STATICGUIDOF(PINNAME_VIDEO_STILL),
+            STATICGUIDOF(PINNAME_IMAGE),
             { 0, 0 },
             SIZEOF_ARRAY(CameraProfileVideoRecordingStillMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoRecordingStillMediaInfos)
@@ -137,7 +179,7 @@ namespace
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoConferencingCaptureMediaInfos)
         },
         {
-            STATICGUIDOF(PINNAME_VIDEO_STILL),
+            STATICGUIDOF(PINNAME_IMAGE),
             { 0, 0 },
             SIZEOF_ARRAY(CameraProfileVideoConferencingStillMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileVideoConferencingStillMediaInfos)
@@ -158,7 +200,7 @@ namespace
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileHighQualityPhotoCaptureMediaInfos)
         },
         {
-            STATICGUIDOF(PINNAME_VIDEO_STILL),
+            STATICGUIDOF(PINNAME_IMAGE),
             { 0, 0 },
             SIZEOF_ARRAY(CameraProfileHighQualityPhotoStillMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileHighQualityPhotoStillMediaInfos)
@@ -179,7 +221,7 @@ namespace
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileBalancedVideoAndPhotoCaptureMediaInfos)
         },
         {
-            STATICGUIDOF(PINNAME_VIDEO_STILL),
+            STATICGUIDOF(PINNAME_IMAGE),
             { 0, 0 },
             SIZEOF_ARRAY(CameraProfileBalancedVideoAndPhotoStillMediaInfos),
             const_cast<PKSCAMERA_PROFILE_MEDIAINFO>(CameraProfileBalancedVideoAndPhotoStillMediaInfos)
@@ -1378,12 +1420,29 @@ DEFINE_KSEVENT_TABLE(ExtendedCameraControlEventTable)
     )
 };
 
+DEFINE_KSEVENT_TABLE(PinCapsChangeEventTable)
+{
+    DEFINE_KSEVENT_ITEM(
+        KSEVENT_PINCAPS_FORMATCHANGE,
+        sizeof(KSEVENTDATA),
+        0,
+        NULL,
+        NULL,
+        NULL
+    )
+};
+
 DEFINE_KSEVENT_SET_TABLE(EventSetTable)
 {
     DEFINE_KSEVENT_SET(
         &KSEVENTSETID_ExtendedCameraControl,
         SIZEOF_ARRAY(ExtendedCameraControlEventTable),
         ExtendedCameraControlEventTable
+    ),
+    DEFINE_KSEVENT_SET(
+        &KSEVENTSETID_PinCapsChange,
+        SIZEOF_ARRAY(PinCapsChangeEventTable),
+        PinCapsChangeEventTable
     )
 };
 
@@ -1410,42 +1469,8 @@ VirtuaCamPublishCameraProfiles (
     )
 {
     PAGED_CODE();
-
-    if (!FilterFactory) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    NTSTATUS Status = KsInitializeDeviceProfile(FilterFactory);
-    if (!NT_SUCCESS(Status)) {
-        DbgPrint("[avshws] KsInitializeDeviceProfile failed status=0x%08X\n", Status);
-        return Status;
-    }
-
-    for (ULONG i = 0; i < SIZEOF_ARRAY(CameraProfileDescriptors); ++i) {
-        KSDEVICE_PROFILE_INFO ProfileInfo = {};
-        ProfileInfo.Type = KSDEVICE_PROFILE_TYPE_CAMERA;
-        ProfileInfo.Size = sizeof(ProfileInfo);
-        ProfileInfo.Camera.Info.ProfileId = CameraProfileDescriptors[i].ProfileId;
-        ProfileInfo.Camera.Info.Index = 0;
-        ProfileInfo.Camera.Info.PinCount = CameraProfileDescriptors[i].PinCount;
-        ProfileInfo.Camera.Info.Pins = CameraProfileDescriptors[i].Pins;
-        ProfileInfo.Camera.Reserved = 0;
-        ProfileInfo.Camera.ConcurrencyCount = 0;
-        ProfileInfo.Camera.Concurrency = NULL;
-
-        Status = KsPublishDeviceProfile(FilterFactory, &ProfileInfo);
-        if (!NT_SUCCESS(Status)) {
-            DbgPrint("[avshws] KsPublishDeviceProfile index=%lu status=0x%08X\n", i, Status);
-            return Status;
-        }
-    }
-
-    Status = KsPersistDeviceProfile(FilterFactory);
-    if (!NT_SUCCESS(Status)) {
-        DbgPrint("[avshws] KsPersistDeviceProfile failed status=0x%08X\n", Status);
-    }
-
-    return Status;
+    UNREFERENCED_PARAMETER(FilterFactory);
+    return STATUS_SUCCESS;
 }
 
 //

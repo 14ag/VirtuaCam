@@ -71,6 +71,29 @@ namespace
         }
     }
 
+    void GetAspectOutputSize(AspectRatioMode mode, UINT& width, UINT& height)
+    {
+        switch (mode) {
+        case AspectRatioMode::R9_16:
+            width = 1080;
+            height = 1920;
+            return;
+        case AspectRatioMode::R4_3:
+            width = 1440;
+            height = 1080;
+            return;
+        case AspectRatioMode::R3_4:
+            width = 1080;
+            height = 1440;
+            return;
+        case AspectRatioMode::R16_9:
+        default:
+            width = kDriverWidth;
+            height = kDriverHeight;
+            return;
+        }
+    }
+
     extern "C" HRESULT WINAPI KsOpenDefaultDevice(
         _In_ REFGUID Category,
         _In_ ACCESS_MASK Access,
@@ -554,6 +577,11 @@ HRESULT DriverBridge::RefreshDriverGeometry()
         return S_OK;
     }
 
+    if (status.HardwareState != kDriverHardwareStateRunning ||
+        status.ClientConnected == 0) {
+        return S_OK;
+    }
+
     const UINT newWidth = status.Width;
     const UINT newHeight = status.Height;
     const bool hasV2Status =
@@ -579,6 +607,36 @@ HRESULT DriverBridge::RefreshDriverGeometry()
     ResetFrameExResources();
     m_rgbBuffer.resize(static_cast<size_t>(m_outputWidth) * m_outputHeight * kDriverBytesPerPixel);
     return S_OK;
+}
+
+bool DriverBridge::IsDriverClientActive()
+{
+    DriverStatusSnapshot status = {};
+    DWORD returned = 0;
+    const HRESULT hr = GetDriverProperty(
+        kDriverPropertyIdStatus,
+        &status,
+        static_cast<DWORD>(sizeof(status)),
+        &returned);
+
+    if (FAILED(hr) || returned < sizeof(ULONG) * 6) {
+        return false;
+    }
+
+    return status.HardwareState == kDriverHardwareStateRunning &&
+        status.ClientConnected != 0;
+}
+
+HRESULT DriverBridge::ApplyPendingAspectPolicyIfIdle()
+{
+    if (!m_hasPendingAspectPolicy || IsDriverClientActive()) {
+        return S_OK;
+    }
+
+    const AspectRatioMode preferredMode = m_pendingPreferredMode;
+    const ULONG allowedMask = m_pendingAllowedMask;
+    m_hasPendingAspectPolicy = false;
+    return ApplyAspectPolicyNow(preferredMode, allowedMask);
 }
 
 void DriverBridge::ResetFrameExResources()
@@ -1210,10 +1268,8 @@ HRESULT DriverBridge::SetPreferredAspectRatio(AspectRatioMode mode)
     return SetAspectPolicy(mode, ASPECT_RATIO_MASK_ALL);
 }
 
-HRESULT DriverBridge::SetAspectPolicy(AspectRatioMode preferredMode, ULONG allowedMask)
+HRESULT DriverBridge::ApplyDriverAspectProperties(AspectRatioMode preferredMode, ULONG allowedMask)
 {
-    RETURN_HR_IF(E_UNEXPECTED, !m_active);
-
     allowedMask &= ASPECT_RATIO_MASK_ALL;
     if (allowedMask == 0) {
         allowedMask = ASPECT_RATIO_MASK_ALL;
@@ -1247,10 +1303,67 @@ HRESULT DriverBridge::SetAspectPolicy(AspectRatioMode preferredMode, ULONG allow
     }
 
     VirtuaCamLog::LogLine(std::format(
-        L"DriverBridge aspect policy set: preferred={} allowedMask=0x{:X}",
+        L"DriverBridge aspect driver properties set: preferred={} allowedMask=0x{:X}",
         VirtuaCamConfig::AspectRatioName(preferredMode),
         allowedMask));
     return S_OK;
+}
+
+HRESULT DriverBridge::ApplyAspectPolicyNow(AspectRatioMode preferredMode, ULONG allowedMask)
+{
+    allowedMask &= ASPECT_RATIO_MASK_ALL;
+    if (allowedMask == 0) {
+        allowedMask = ASPECT_RATIO_MASK_ALL;
+    }
+
+    RETURN_IF_FAILED(ApplyDriverAspectProperties(preferredMode, allowedMask));
+
+    UINT desiredWidth = kDriverWidth;
+    UINT desiredHeight = kDriverHeight;
+    GetAspectOutputSize(preferredMode, desiredWidth, desiredHeight);
+    if (m_outputWidth != desiredWidth || m_outputHeight != desiredHeight) {
+        m_outputWidth = desiredWidth;
+        m_outputHeight = desiredHeight;
+        m_scaledRtv.reset();
+        m_scaledTexture.reset();
+        m_stagingTexture.reset();
+        ResetFrameExResources();
+        m_rgbBuffer.resize(static_cast<size_t>(m_outputWidth) * m_outputHeight * kDriverBytesPerPixel);
+    }
+
+    VirtuaCamLog::LogLine(std::format(
+        L"DriverBridge aspect policy applied: preferred={} allowedMask=0x{:X} output={}x{}",
+        VirtuaCamConfig::AspectRatioName(preferredMode),
+        allowedMask,
+        m_outputWidth,
+        m_outputHeight));
+    return S_OK;
+}
+
+HRESULT DriverBridge::SetAspectPolicy(AspectRatioMode preferredMode, ULONG allowedMask)
+{
+    RETURN_HR_IF(E_UNEXPECTED, !m_active);
+
+    allowedMask &= ASPECT_RATIO_MASK_ALL;
+    if (allowedMask == 0) {
+        allowedMask = ASPECT_RATIO_MASK_ALL;
+    }
+
+    if (IsDriverClientActive()) {
+        RETURN_IF_FAILED(ApplyDriverAspectProperties(preferredMode, allowedMask));
+        m_pendingPreferredMode = preferredMode;
+        m_pendingAllowedMask = allowedMask;
+        m_hasPendingAspectPolicy = true;
+        VirtuaCamLog::LogLine(std::format(
+            L"DriverBridge aspect output resize deferred until camera reconnect: preferred={} allowedMask=0x{:X} currentOutput={}x{}",
+            VirtuaCamConfig::AspectRatioName(preferredMode),
+            allowedMask,
+            m_outputWidth,
+            m_outputHeight));
+        return S_OK;
+    }
+
+    return ApplyAspectPolicyNow(preferredMode, allowedMask);
 }
 
 HRESULT DriverBridge::Disconnect()
@@ -1302,6 +1415,7 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
 {
     RETURN_HR_IF(E_UNEXPECTED, !m_active);
     RETURN_IF_FAILED(Connect());
+    RETURN_IF_FAILED(ApplyPendingAspectPolicyIfIdle());
     RETURN_IF_FAILED(RefreshDriverGeometry());
     RETURN_IF_FAILED(EnsureGpuResources(sourceTexture));
     RETURN_IF_FAILED(EnsureSourceTextureView(sourceTexture));

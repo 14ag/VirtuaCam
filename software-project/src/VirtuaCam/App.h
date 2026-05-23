@@ -2,6 +2,7 @@
 
 #include "Formats.h"
 #include "Config.h"
+#include <string>
 
 #define WM_APP_TRAY_MSG (WM_APP + 1)
 #define WM_APP_MENU_COMMAND (WM_APP + 2)
@@ -16,8 +17,11 @@
 #define ID_SOURCE_OFF                   8000
 #define ID_SOURCE_CONSUMER              8001
 #define ID_SOURCE_CAMERA_FIRST          8100
+#define ID_SOURCE_DISPLAY_FIRST         8500
 #define ID_SOURCE_WINDOW_FIRST          9000
 #define ID_SOURCE_DISCOVERED_FIRST      9500
+#define ID_SOURCE_IMAGE_FILE            9600
+#define ID_SOURCE_VIDEO_FILE            9601
 
 #define ID_PIP_TL_OFF                   10000
 #define ID_PIP_TL_CONSUMER              10001
@@ -57,7 +61,7 @@
 
 enum class BrokerState { Searching, Connected, Failed };
 enum class VCamCommand { None = 0 };
-enum class SourceMode { Off, Consumer, Camera, Discovered, Window };
+enum class SourceMode { Off, Consumer, Camera, Discovered, Window, Display, Image, Video };
 enum class PipPosition { TL, TR, BL, BR };
 
 struct SourceState {
@@ -65,4 +69,6 @@ struct SourceState {
     DWORD pid = 0;
     HWND hwnd = nullptr;
     int cameraIndex = -1;
+    int displayIndex = -1;
+    std::wstring filePath;
 };
