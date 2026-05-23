@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
+#include <filesystem>
 #include <limits>
 #include <winioctl.h>
 #include "VirtuaCamDriverAbi.h"
@@ -183,7 +184,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
     return inputTexture.Sample(inputSampler, uv * uvScale + uvOffset);
 })";
 
-    DriverBlitConstants GetOutputCropUvConstants(UINT sourceWidth, UINT sourceHeight, UINT outputWidth, UINT outputHeight)
+    DriverBlitConstants GetAspectCanvasUvConstants(UINT sourceWidth, UINT sourceHeight, UINT outputWidth, UINT outputHeight)
     {
         DriverBlitConstants constants = {};
         constants.uvScaleX = 1.0f;
@@ -894,8 +895,9 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
                 ++nonBlackPixels;
             }
         }
-        CreateDirectoryW(L"logs", nullptr);
-        const std::wstring framePath = std::format(L"logs\\driverbridge-frame-{:06}.ppm", n);
+        const std::wstring logDir = (std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"logs").wstring();
+        CreateDirectoryW(logDir.c_str(), nullptr);
+        const std::wstring framePath = (std::filesystem::path(logDir) / std::format(L"driverbridge-frame-{:06}.ppm", n)).wstring();
         DumpBgr24FrameAsPpm(
             framePath.c_str(),
             m_rgbBuffer.data(),
@@ -903,8 +905,9 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
             m_outputWidth,
             m_outputHeight);
         if (n == 1) {
+            const std::wstring firstFramePath = (std::filesystem::path(logDir) / L"driverbridge-first-frame.ppm").wstring();
             DumpBgr24FrameAsPpm(
-                L"logs\\driverbridge-first-frame.ppm",
+                firstFramePath.c_str(),
                 m_rgbBuffer.data(),
                 m_rgbBuffer.size(),
                 m_outputWidth,
@@ -1422,15 +1425,17 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
 
     D3D11_TEXTURE2D_DESC sourceDesc = {};
     sourceTexture->GetDesc(&sourceDesc);
-    const DriverBlitConstants blitConstants = GetOutputCropUvConstants(
+    const DriverBlitConstants blitConstants = GetAspectCanvasUvConstants(
         sourceDesc.Width,
         sourceDesc.Height,
         m_outputWidth,
         m_outputHeight);
     D3D11_VIEWPORT viewport = { 0.f, 0.f, static_cast<float>(m_outputWidth), static_cast<float>(m_outputHeight), 0.f, 1.f };
+    const float clearColor[] = { 33.0f / 255.0f, 33.0f / 255.0f, 33.0f / 255.0f, 1.0f };
     ID3D11RenderTargetView* rtvs[] = { m_scaledRtv.get() };
 
     m_context->OMSetRenderTargets(1, rtvs, nullptr);
+    m_context->ClearRenderTargetView(m_scaledRtv.get(), clearColor);
     m_context->UpdateSubresource(m_blitConstants.get(), 0, nullptr, &blitConstants, 0, 0);
     m_context->RSSetViewports(1, &viewport);
     m_context->VSSetShader(m_vertexShader.get(), nullptr, 0);
