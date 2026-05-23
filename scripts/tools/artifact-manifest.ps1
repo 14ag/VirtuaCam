@@ -5,8 +5,7 @@ function Get-VirtuaCamSoftwareArtifacts {
         "VirtuaCam.exe",
         "VirtuaCamProcess.exe",
         "DirectPortBroker.dll",
-        "DirectPortClient.dll",
-        "DirectPortConsumer.dll"
+        "DirectPortClient.dll"
     )
 }
 

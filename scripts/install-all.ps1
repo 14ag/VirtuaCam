@@ -324,14 +324,74 @@ public static class AvshwsInstallerNative {
 }
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
-. (Join-Path $repoRoot "scripts\tools\artifact-manifest.ps1")
-$OutputRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "output"))
+$packageRoot = [System.IO.Path]::GetFullPath($scriptDir)
+$manifestPath = Join-Path $packageRoot "scripts\tools\artifact-manifest.ps1"
+if (Test-Path -LiteralPath $manifestPath) {
+    . $manifestPath
+}
+else {
+    function Get-VirtuaCamSoftwareArtifacts {
+        @(
+            "VirtuaCam.exe",
+            "VirtuaCamProcess.exe",
+            "DirectPortBroker.dll",
+            "DirectPortClient.dll"
+        )
+    }
+
+    function Get-VirtuaCamRuntimeArtifacts {
+        @(
+            "msvcp140.dll",
+            "vcruntime140.dll",
+            "vcruntime140_1.dll"
+        )
+    }
+
+    function Get-VirtuaCamSetupArtifacts {
+        @(
+            "VirtuaCamSetup.exe"
+        )
+    }
+
+    function Get-VirtuaCamCameraDriverArtifacts {
+        @(
+            "avshws.sys",
+            "avshws.inf",
+            "avshws.cat",
+            "VirtualCameraDriver-TestSign.cer"
+        )
+    }
+
+    function Get-VirtuaCamAudioDriverArtifacts {
+        @(
+            "virtuacam_mic.sys",
+            "virtuacam-mic.inf",
+            "virtuacam-mic.cat"
+        )
+    }
+
+    function Get-VirtuaCamDriverArtifacts {
+        @(
+            (Get-VirtuaCamCameraDriverArtifacts) +
+            (Get-VirtuaCamAudioDriverArtifacts)
+        )
+    }
+
+    function Get-VirtuaCamInstallArtifacts {
+        @(
+            (Get-VirtuaCamSoftwareArtifacts) +
+            (Get-VirtuaCamSetupArtifacts) +
+            (Get-VirtuaCamRuntimeArtifacts) +
+            (Get-VirtuaCamDriverArtifacts)
+        )
+    }
+}
+$OutputRoot = $packageRoot
 
 $runKeyPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
 $virtuaCamRegPath = "HKLM:\SOFTWARE\VirtuaCam"
 $watcherServiceName = "VirtuaCamWatcher"
-$logsDir = Join-Path $repoRoot "test-reports\install"
+$logsDir = Join-Path $packageRoot "logs"
 $logPath = Join-Path $logsDir "driver-install.log"
 
 $installDir = $OutputRoot
@@ -490,7 +550,6 @@ if ($Uninstall) {
     Remove-ItemProperty -Path $runKeyPath -Name "VirtuaCam" -ErrorAction SilentlyContinue
     Remove-Item -Path $virtuaCamRegPath -Recurse -ErrorAction SilentlyContinue
     Remove-Item -Path "HKCU:\Software\VirtuaCam\Settings" -Recurse -ErrorAction SilentlyContinue
-    Remove-LegacyUserSettingsFile
     Write-Success "Uninstall cleanup complete"
     exit 0
 }

@@ -176,6 +176,9 @@ namespace VirtuaCamConfig
         if (ReadDword(key.get(), L"ShowPipBottomLeft", value)) {
             settings.showPipBottomLeft = value != 0;
         }
+        if (ReadDword(key.get(), L"StartDebugMode", value)) {
+            settings.startDebugMode = value != 0;
+        }
 
         std::wstring text;
         if (ReadString(key.get(), L"AspectRatio", text)) {
@@ -203,6 +206,7 @@ namespace VirtuaCamConfig
             WriteDword(key.get(), L"ShowPipTopLeft", settings.showPipTopLeft ? 1u : 0u) &&
             WriteDword(key.get(), L"ShowPipTopRight", settings.showPipTopRight ? 1u : 0u) &&
             WriteDword(key.get(), L"ShowPipBottomLeft", settings.showPipBottomLeft ? 1u : 0u) &&
+            WriteDword(key.get(), L"StartDebugMode", settings.startDebugMode ? 1u : 0u) &&
             WriteString(key.get(), L"AspectRatio", AspectRatioConfigValue(settings.aspectRatio)) &&
             WriteString(key.get(), L"AudioRoutingMode", AudioRoutingModeConfigValue(settings.audioRoutingMode)) &&
             WriteString(key.get(), L"AudioCaptureDeviceName", settings.audioCaptureDeviceName);

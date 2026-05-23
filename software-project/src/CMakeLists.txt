@@ -61,18 +61,6 @@ set(DEF_PRODUCER "${CMAKE_CURRENT_BINARY_DIR}/Producer.def")
 file(WRITE ${DEF_PRODUCER} "EXPORTS\n    InitializeProducer\n    ProcessFrame\n    ShutdownProducer\n")
 
 
-add_library(DirectPortConsumer SHARED
-    VirtuaCam/Consumer.cpp
-    VirtuaCam/pch.cpp
-    "${CMAKE_CURRENT_BINARY_DIR}/Producer.def"
-)
-set_target_properties(DirectPortConsumer PROPERTIES OUTPUT_NAME "DirectPortConsumer")
-target_link_libraries(DirectPortConsumer PRIVATE VirtuaCamCommon)
-target_link_libraries(DirectPortConsumer PRIVATE ${VCAM_MF_LIBS})
-target_compile_definitions(DirectPortConsumer PRIVATE _WINDOWS _USRDLL UNICODE _UNICODE PRODUCER_EXPORTS)
-target_precompile_headers(DirectPortConsumer PRIVATE VirtuaCam/pch.h)
-
-
 add_executable(VirtuaCam WIN32
     VirtuaCam/App.cpp
     VirtuaCam/DriverBridge.cpp

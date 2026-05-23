@@ -32,6 +32,7 @@ namespace VirtuaCamConfig
         bool showPipTopLeft = false;
         bool showPipTopRight = false;
         bool showPipBottomLeft = false;
+        bool startDebugMode = false;
         AspectRatioMode aspectRatio = AspectRatioMode::R16_9;
         AudioRoutingMode audioRoutingMode = AudioRoutingMode::Auto;
         std::wstring audioCaptureDeviceName = L"Stereo Mix";

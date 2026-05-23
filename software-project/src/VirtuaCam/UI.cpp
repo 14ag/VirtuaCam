@@ -6,7 +6,6 @@
 #include "Discovery.h"
 #include "RuntimeLog.h"
 #include <dshow.h>
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
@@ -14,9 +13,6 @@
 #include <filesystem>
 #include <map>
 
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "dwmapi.lib")
 
 using namespace Microsoft::WRL;
@@ -220,8 +216,6 @@ std::vector<std::wstring> EnumerateCameras() {
 
 static HINSTANCE g_instance;
 static HWND g_hMainWnd = NULL;
-static HWND g_hPreviewWnd = NULL;
-static HWND g_hTelemetryLabel = NULL;
 static WCHAR g_windowClass[MAX_LOADSTRING];
 static std::function<void(int)> g_audioSelectionCallback;
 static std::vector<std::wstring> g_captureDeviceNames;
@@ -229,18 +223,7 @@ std::vector<std::wstring> g_cameraDevicePaths;
 std::vector<std::wstring> g_cameraDeviceNamesCache;
 static int g_currentAudioDevice = ID_AUDIO_DEVICE_NONE;
 static bool g_debugUiEnabled = false;
-static PFN_GetSharedTexture g_pfnGetSharedTexture = nullptr;
 static std::function<void()> g_onIdle;
-
-static ComPtr<ID3D11Device> g_device;
-static ComPtr<ID3D11DeviceContext> g_context;
-static ComPtr<IDXGISwapChain> g_swapChain;
-static ComPtr<ID3D11RenderTargetView> g_rtv;
-static ComPtr<ID3D11VertexShader> g_vs;
-static ComPtr<ID3D11PixelShader> g_ps;
-static ComPtr<ID3D11SamplerState> g_sampler;
-static ComPtr<ID3D11ShaderResourceView> g_previewSRV;
-static ComPtr<ID3D11Texture2D> g_uiSideTexture;
 
 static std::map<UINT, HWND> g_mainSourceWindowMap;
 static std::map<UINT, HWND> g_pipTlWindowMap;
@@ -296,36 +279,16 @@ void EnableNativeDarkMenus(HWND hwnd)
 }
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-LRESULT CALLBACK PreviewWndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 void AddTrayIcon(HWND hwnd, bool add);
 void UpdateTrayTooltip(BrokerState brokerState, bool driverConnected);
 void ShowContextMenu(HWND hwnd);
 void HandleMenuCommand(UINT id);
 ATOM MyRegisterClass(HINSTANCE instance);
-HRESULT InitD3D(HWND hwnd);
-void CleanupD3D();
-void RenderPreviewFrame(HWND hwnd);
-HRESULT LoadAssets();
 bool SelectSourceFile(HWND owner, bool video, std::wstring& outPath);
 
-const char* g_vertexShaderHLSL = R"(
-struct VOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
-VOut main(uint vid : SV_VertexID) {
-    float2 uv = float2((vid << 1) & 2, vid & 2);
-    VOut o; o.pos = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0, 1);
-    o.uv = uv; return o;
-})";
-
-const char* g_pixelShaderHLSL = R"(
-Texture2D    tex : register(t0); SamplerState smp : register(s0);
-float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
-    return tex.Sample(smp, uv);
-})";
-
-void UI_Initialize(HINSTANCE instance, HWND& outMainWnd, PFN_GetSharedTexture pfnGetSharedTexture) {
+void UI_Initialize(HINSTANCE instance, HWND& outMainWnd) {
     g_instance = instance;
-    g_pfnGetSharedTexture = pfnGetSharedTexture;
     LoadStringW(instance, IDC_VIRTUACAM, g_windowClass, MAX_LOADSTRING);
     MyRegisterClass(instance);
 
@@ -360,18 +323,13 @@ void UI_RunMessageLoop(std::function<void()> onIdle) {
             DispatchMessage(&msg);
         } else {
             if (g_onIdle) g_onIdle();
-            if (g_hPreviewWnd && IsWindow(g_hPreviewWnd)) {
-                RenderPreviewFrame(g_hPreviewWnd);
-            } else {
-                Sleep(10);
-            }
+            Sleep(10);
         }
     }
 }
 
 void UI_Shutdown() {
     AddTrayIcon(g_hMainWnd, false);
-    CleanupD3D();
 }
 
 void UI_UpdateAudioDeviceLists(const std::vector<std::wstring>& captureDevices) {
@@ -422,17 +380,7 @@ ATOM MyRegisterClass(HINSTANCE instance) {
     wcex.hInstance = instance; wcex.lpszClassName = g_windowClass;
     wcex.hIcon = LoadIcon(instance, MAKEINTRESOURCE(IDI_VIRTUACAM));
     wcex.hIconSm = LoadIcon(instance, MAKEINTRESOURCE(IDI_SMALL));
-    RegisterClassExW(&wcex);
-
-    WNDCLASSEXW wcexPreview = {};
-    wcexPreview.cbSize = sizeof(WNDCLASSEX); wcexPreview.style = CS_HREDRAW | CS_VREDRAW;
-    wcexPreview.lpfnWndProc = PreviewWndProc; wcexPreview.hInstance = instance;
-    wcexPreview.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wcexPreview.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wcexPreview.lpszClassName = PREVIEW_WINDOW_CLASS;
-    wcexPreview.hIcon = LoadIcon(instance, MAKEINTRESOURCE(IDI_VIRTUACAM));
-    wcexPreview.hIconSm = LoadIcon(instance, MAKEINTRESOURCE(IDI_SMALL));
-    return RegisterClassExW(&wcexPreview);
+    return RegisterClassExW(&wcex);
 }
 
 void HandlePipCommand(PipPosition pos, UINT id) {
@@ -449,8 +397,6 @@ void HandlePipCommand(PipPosition pos, UINT id) {
             if (g_pipTlWindowMap.count(id)) SetPipSource(pos, SourceMode::Window, reinterpret_cast<DWORD_PTR>(g_pipTlWindowMap[id]));
         } else if (id >= ID_PIP_TL_CAMERA_FIRST) {
             SetPipSource(pos, SourceMode::Camera, id - ID_PIP_TL_CAMERA_FIRST);
-        } else if (id == ID_PIP_TL_CONSUMER) {
-            SetPipSource(pos, SourceMode::Consumer, 0);
         } else if (id == ID_PIP_TL_OFF) {
             SetPipSource(pos, SourceMode::Off, 0);
         }
@@ -464,8 +410,6 @@ void HandlePipCommand(PipPosition pos, UINT id) {
             if (g_pipTrWindowMap.count(id)) SetPipSource(pos, SourceMode::Window, reinterpret_cast<DWORD_PTR>(g_pipTrWindowMap[id]));
         } else if (id >= ID_PIP_TR_CAMERA_FIRST) {
             SetPipSource(pos, SourceMode::Camera, id - ID_PIP_TR_CAMERA_FIRST);
-        } else if (id == ID_PIP_TR_CONSUMER) {
-            SetPipSource(pos, SourceMode::Consumer, 0);
         } else if (id == ID_PIP_TR_OFF) {
             SetPipSource(pos, SourceMode::Off, 0);
         }
@@ -479,8 +423,6 @@ void HandlePipCommand(PipPosition pos, UINT id) {
             if (g_pipBlWindowMap.count(id)) SetPipSource(pos, SourceMode::Window, reinterpret_cast<DWORD_PTR>(g_pipBlWindowMap[id]));
         } else if (id >= ID_PIP_BL_CAMERA_FIRST) {
             SetPipSource(pos, SourceMode::Camera, id - ID_PIP_BL_CAMERA_FIRST);
-        } else if (id == ID_PIP_BL_CONSUMER) {
-            SetPipSource(pos, SourceMode::Consumer, 0);
         } else if (id == ID_PIP_BL_OFF) {
             SetPipSource(pos, SourceMode::Off, 0);
         }
@@ -494,8 +436,6 @@ void HandlePipCommand(PipPosition pos, UINT id) {
             if (g_pipWindowMap.count(id)) SetPipSource(pos, SourceMode::Window, reinterpret_cast<DWORD_PTR>(g_pipWindowMap[id]));
         } else if (id >= ID_PIP_CAMERA_FIRST) {
             SetPipSource(pos, SourceMode::Camera, id - ID_PIP_CAMERA_FIRST);
-        } else if (id == ID_PIP_CONSUMER) {
-            SetPipSource(pos, SourceMode::Consumer, 0);
         } else if (id == ID_PIP_OFF) {
             SetPipSource(pos, SourceMode::Off, 0);
         }
@@ -585,7 +525,6 @@ void HandleMenuCommand(UINT id)
     else if (id >= ID_PIP_TL_OFF) HandlePipCommand(PipPosition::TL, id);
     else if (id >= ID_SOURCE_OFF) {
         if (id == ID_SOURCE_OFF) SetSourceMode(SourceMode::Off, 0);
-        else if (id == ID_SOURCE_CONSUMER) SetSourceMode(SourceMode::Consumer, 0);
         else if (id >= ID_SOURCE_CAMERA_FIRST && id < ID_SOURCE_DISPLAY_FIRST) {
             SetSourceMode(SourceMode::Camera, id - ID_SOURCE_CAMERA_FIRST);
         }
@@ -659,6 +598,9 @@ HMENU BuildMainVideoSourceSubMenu(
     const SourceState& state = GetMainSourceState();
     g_mainSourceWindowMap.clear();
 
+    AddNativeMenuItem(subMenu, L"Off", ID_SOURCE_OFF, state.mode == SourceMode::Off);
+    AddNativeSeparator(subMenu);
+
     for (size_t i = 0; i < windows.size() && i < (ID_SOURCE_DISCOVERED_FIRST - ID_SOURCE_WINDOW_FIRST); ++i) {
         UINT menuId = ID_SOURCE_WINDOW_FIRST + (UINT)i;
         g_mainSourceWindowMap[menuId] = windows[i].hwnd;
@@ -684,6 +626,22 @@ HMENU BuildMainVideoSourceSubMenu(
     AddNativeSeparator(subMenu);
     AddNativeMenuItem(subMenu, L"Image...", ID_SOURCE_IMAGE_FILE, state.mode == SourceMode::Image);
     AddNativeMenuItem(subMenu, L"Video...", ID_SOURCE_VIDEO_FILE, state.mode == SourceMode::Video);
+
+    const auto* discovery = GetGlobalDiscovery();
+    if (discovery && !discovery->GetDiscoveredStreams().empty()) {
+        AddNativeSeparator(subMenu);
+        size_t count = 0;
+        for (size_t i = 0; i < discovery->GetDiscoveredStreams().size() && i < (ID_SOURCE_IMAGE_FILE - ID_SOURCE_DISCOVERED_FIRST); ++i) {
+            const auto& stream = discovery->GetDiscoveredStreams()[i];
+            if (stream.processName == L"VirtuaCamProcess.exe") {
+                continue;
+            }
+            std::wstring label = stream.processName + L" (PID: " + std::to_wstring(stream.processId) + L")";
+            if (label.length() > 48) label = label.substr(0, 45) + L"...";
+            AddNativeMenuItem(subMenu, label, ID_SOURCE_DISCOVERED_FIRST + (UINT)i, state.mode == SourceMode::Discovered && state.pid == stream.processId);
+            ++count;
+        }
+    }
     return subMenu;
 }
 
@@ -695,34 +653,34 @@ HMENU BuildSourceSubMenu(
     HMENU subMenu = CreatePopupMenu();
     if (!subMenu) return nullptr;
 
-    UINT id_off, id_consumer, id_camera_first, id_window_first, id_discovered_first;
+    UINT id_off, id_camera_first, id_window_first, id_discovered_first;
     std::map<UINT, HWND>* windowMap = nullptr;
     const SourceState* state = nullptr;
 
     if (!isPip) {
-        id_off = ID_SOURCE_OFF; id_consumer = ID_SOURCE_CONSUMER; id_camera_first = ID_SOURCE_CAMERA_FIRST;
+        id_off = ID_SOURCE_OFF; id_camera_first = ID_SOURCE_CAMERA_FIRST;
         id_window_first = ID_SOURCE_WINDOW_FIRST; id_discovered_first = ID_SOURCE_DISCOVERED_FIRST;
         windowMap = &g_mainSourceWindowMap; state = &GetMainSourceState();
     }
     else {
         switch (pos) {
         case PipPosition::TL:
-            id_off = ID_PIP_TL_OFF; id_consumer = ID_PIP_TL_CONSUMER; id_camera_first = ID_PIP_TL_CAMERA_FIRST;
+            id_off = ID_PIP_TL_OFF; id_camera_first = ID_PIP_TL_CAMERA_FIRST;
             id_window_first = ID_PIP_TL_WINDOW_FIRST; id_discovered_first = ID_PIP_TL_DISCOVERED_FIRST;
             windowMap = &g_pipTlWindowMap; state = &GetPipSourceState(PipPosition::TL);
             break;
         case PipPosition::TR:
-            id_off = ID_PIP_TR_OFF; id_consumer = ID_PIP_TR_CONSUMER; id_camera_first = ID_PIP_TR_CAMERA_FIRST;
+            id_off = ID_PIP_TR_OFF; id_camera_first = ID_PIP_TR_CAMERA_FIRST;
             id_window_first = ID_PIP_TR_WINDOW_FIRST; id_discovered_first = ID_PIP_TR_DISCOVERED_FIRST;
             windowMap = &g_pipTrWindowMap; state = &GetPipSourceState(PipPosition::TR);
             break;
         case PipPosition::BL:
-            id_off = ID_PIP_BL_OFF; id_consumer = ID_PIP_BL_CONSUMER; id_camera_first = ID_PIP_BL_CAMERA_FIRST;
+            id_off = ID_PIP_BL_OFF; id_camera_first = ID_PIP_BL_CAMERA_FIRST;
             id_window_first = ID_PIP_BL_WINDOW_FIRST; id_discovered_first = ID_PIP_BL_DISCOVERED_FIRST;
             windowMap = &g_pipBlWindowMap; state = &GetPipSourceState(PipPosition::BL);
             break;
         case PipPosition::BR:
-            id_off = ID_PIP_OFF; id_consumer = ID_PIP_CONSUMER; id_camera_first = ID_PIP_CAMERA_FIRST;
+            id_off = ID_PIP_OFF; id_camera_first = ID_PIP_CAMERA_FIRST;
             id_window_first = ID_PIP_WINDOW_FIRST; id_discovered_first = ID_PIP_DISCOVERED_FIRST;
             windowMap = &g_pipWindowMap; state = &GetPipSourceState(PipPosition::BR);
             break;
@@ -732,7 +690,6 @@ HMENU BuildSourceSubMenu(
     windowMap->clear();
 
     AddNativeMenuItem(subMenu, L"Off", id_off, state->mode == SourceMode::Off);
-    AddNativeMenuItem(subMenu, isPip ? L"Discovery" : L"Auto-Discovery Grid", id_consumer, state->mode == SourceMode::Consumer);
     AddNativeSeparator(subMenu);
 
     if (!cameras.empty()) {
@@ -758,7 +715,8 @@ HMENU BuildSourceSubMenu(
     if (discovery && !discovery->GetDiscoveredStreams().empty()) {
         bool separatorAdded = false;
         int discoveredCount = 0;
-        for (size_t i = 0; i < discovery->GetDiscoveredStreams().size(); ++i) {
+        constexpr size_t discoveredLimit = 500;
+        for (size_t i = 0; i < discovery->GetDiscoveredStreams().size() && i < discoveredLimit; ++i) {
             const auto& stream = discovery->GetDiscoveredStreams()[i];
             if (stream.processName != L"VirtuaCamProcess.exe") {
                 if (!separatorAdded && (!windows.empty() || discoveredCount > 0)) {
@@ -881,50 +839,6 @@ void ShowContextMenu(HWND hwnd) {
     DestroyMenu(menu);
 }
 
-LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    switch (message) {
-    case WM_CREATE:
-    {
-        BOOL useDarkMode = TRUE;
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDarkMode, sizeof(useDarkMode));
-        if (FAILED(InitD3D(hwnd)) || FAILED(LoadAssets())) {
-            MessageBox(hwnd, L"Failed to initialize D3D for preview.", L"Error", MB_OK | MB_ICONERROR);
-            return -1;
-        }
-        g_hTelemetryLabel = CreateWindowW(L"STATIC", L"Status: Initializing...", WS_CHILD | WS_VISIBLE | SS_CENTER, 0, 0, 640, 20, hwnd, (HMENU)IDC_TELEMETRY_LABEL, g_instance, NULL);
-        if (!g_pfnGetSharedTexture) {
-            MessageBox(hwnd, L"Broker's GetSharedTexture function not available.", L"Error", MB_OK | MB_ICONERROR);
-            return -1;
-        }
-        break;
-    }
-    case WM_SIZE:
-        if (g_swapChain) {
-            UINT width = LOWORD(lParam); UINT height = HIWORD(lParam);
-            if (width == 0 || height == 0) break;
-            if (g_context) g_context->OMSetRenderTargets(0, 0, 0);
-            g_rtv.Reset();
-            HRESULT hr = g_swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
-            if (FAILED(hr)) return 0;
-            ComPtr<ID3D11Texture2D> pBuffer;
-            if (FAILED(g_swapChain->GetBuffer(0, IID_PPV_ARGS(&pBuffer)))) return 0;
-            if (FAILED(g_device->CreateRenderTargetView(pBuffer.Get(), NULL, &g_rtv))) return 0;
-            if (g_hTelemetryLabel) SetWindowPos(g_hTelemetryLabel, NULL, 0, 0, width, 20, SWP_NOZORDER);
-        }
-        break;
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) {
-            DestroyWindow(hwnd);
-            return 0;
-        }
-        break;
-    case WM_CLOSE: DestroyWindow(hwnd); break;
-    case WM_DESTROY: CleanupD3D(); g_hPreviewWnd = NULL; g_hTelemetryLabel = NULL; break;
-    default: return DefWindowProc(hwnd, message, wParam, lParam);
-    }
-    return 0;
-}
-
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
     UNREFERENCED_PARAMETER(lParam);
     switch (message) {
@@ -956,38 +870,24 @@ void AddTrayIcon(HWND hwnd, bool add) {
 }
 
 void CreatePreviewWindow() {
-    if (g_hPreviewWnd && IsWindow(g_hPreviewWnd)) {
-        ShowWindow(g_hPreviewWnd, IsIconic(g_hPreviewWnd) ? SW_RESTORE : SW_SHOWNORMAL);
-        SetForegroundWindow(g_hPreviewWnd);
+    const std::filesystem::path setup = std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"VirtuaCamSetup.exe";
+    if (!std::filesystem::exists(setup)) {
+        VirtuaCamLog::LogLine(std::format(L"Setup preview missing: {}", setup.wstring()));
+        MessageBoxW(g_hMainWnd, setup.c_str(), L"VirtuaCam setup not staged", MB_OK | MB_ICONWARNING);
         return;
     }
-    RECT rc = { 0, 0, 640, 360 };
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-    AdjustWindowRectEx(&rc, style, FALSE, WS_EX_APPWINDOW);
-    g_hPreviewWnd = CreateWindowExW(
-        WS_EX_APPWINDOW,
-        PREVIEW_WINDOW_CLASS,
-        L"VirtuaCam Preview",
-        style,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        rc.right - rc.left,
-        rc.bottom - rc.top,
+
+    HINSTANCE launched = ShellExecuteW(
         nullptr,
+        L"open",
+        setup.c_str(),
         nullptr,
-        g_instance,
-        nullptr);
-    if (!g_hPreviewWnd) {
-        DWORD error = GetLastError();
-        VirtuaCamLog::LogWin32(L"CreatePreviewWindow failed", error);
-        MessageBoxW(g_hMainWnd, L"Failed to open VirtuaCam preview window.", L"VirtuaCam", MB_OK | MB_ICONERROR);
-        return;
+        VirtuaCamLog::GetExeDir().c_str(),
+        SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(launched) <= 32) {
+        VirtuaCamLog::LogLine(std::format(L"Setup preview launch failed: {}", reinterpret_cast<INT_PTR>(launched)));
+        MessageBoxW(g_hMainWnd, L"Failed to open VirtuaCam setup window.", L"VirtuaCam", MB_OK | MB_ICONERROR);
     }
-    CenterWindow(g_hPreviewWnd, true);
-    ShowWindow(g_hPreviewWnd, SW_SHOWNORMAL);
-    ShowWindow(g_hPreviewWnd, SW_SHOW);
-    SetForegroundWindow(g_hPreviewWnd);
-    UpdateWindow(g_hPreviewWnd);
 }
 
 void UpdateTelemetry(BrokerState currentState, bool driverConnected) {
@@ -999,22 +899,6 @@ void UpdateTelemetry(BrokerState currentState, bool driverConnected) {
         hasState = true;
         lastBrokerState = currentState;
         lastDriverConnected = driverConnected;
-
-        if (g_hTelemetryLabel) {
-            std::wstring brokerText;
-            switch (currentState) {
-            case BrokerState::Searching: brokerText = L"Searching"; break;
-            case BrokerState::Connected: brokerText = L"Connected"; break;
-            case BrokerState::Failed: brokerText = L"Disconnected"; break;
-            }
-
-            std::wstring label = std::format(
-                L"Broker: {} | Driver: {}",
-                brokerText,
-                driverConnected ? L"Connected" : L"Disconnected");
-            SetWindowText(g_hTelemetryLabel, label.c_str());
-            NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, g_hTelemetryLabel, OBJID_CLIENT, CHILDID_SELF);
-        }
 
         UpdateTrayTooltip(currentState, driverConnected);
     }
@@ -1043,87 +927,3 @@ void UpdateTrayTooltip(BrokerState brokerState, bool driverConnected) {
     Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
 
-HRESULT InitD3D(HWND hwnd) {
-    DXGI_SWAP_CHAIN_DESC scd = {};
-    scd.BufferCount = 2; scd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; scd.OutputWindow = hwnd;
-    scd.SampleDesc.Count = 1; scd.Windowed = TRUE; scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &scd, &g_swapChain, &g_device, nullptr, &g_context);
-    if (FAILED(hr)) {
-        VirtuaCamLog::LogHr(L"Preview D3D hardware init failed; retrying WARP", hr);
-        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &scd, &g_swapChain, &g_device, nullptr, &g_context);
-    }
-    if (SUCCEEDED(hr)) {
-        ComPtr<ID3D11Texture2D> pBuffer; g_swapChain->GetBuffer(0, IID_PPV_ARGS(&pBuffer));
-        g_device->CreateRenderTargetView(pBuffer.Get(), NULL, &g_rtv);
-    }
-    return hr;
-}
-
-void CleanupD3D() {
-    if (g_context) g_context->ClearState();
-    g_rtv.Reset(); g_swapChain.Reset(); g_context.Reset(); g_device.Reset();
-    g_vs.Reset(); g_ps.Reset(); g_sampler.Reset(); g_previewSRV.Reset();
-    g_uiSideTexture.Reset();
-}
-
-HRESULT LoadAssets() {
-    ComPtr<ID3DBlob> vsBlob, psBlob;
-    RETURN_IF_FAILED(D3DCompile(g_vertexShaderHLSL, strlen(g_vertexShaderHLSL), nullptr, nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsBlob, nullptr));
-    RETURN_IF_FAILED(D3DCompile(g_pixelShaderHLSL, strlen(g_pixelShaderHLSL), nullptr, nullptr, nullptr, "main", "ps_5_0", 0, 0, &psBlob, nullptr));
-    RETURN_IF_FAILED(g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vs));
-    RETURN_IF_FAILED(g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_ps));
-    D3D11_SAMPLER_DESC sd = {}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP; sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP; sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    RETURN_IF_FAILED(g_device->CreateSamplerState(&sd, &g_sampler));
-    return S_OK;
-}
-
-void RenderPreviewFrame(HWND hwnd) {
-    if (!g_rtv || !g_device || !g_context) return;
-
-    if (!g_previewSRV && g_device)
-    {
-        ComPtr<ID3D11Device1> device1;
-        if (SUCCEEDED(g_device.As(&device1)))
-        {
-            const HRESULT openHr = device1->OpenSharedResourceByName(
-                GetBrokerTextureName().c_str(),
-                DXGI_SHARED_RESOURCE_READ,
-                __uuidof(ID3D11Texture2D),
-                reinterpret_cast<void**>(g_uiSideTexture.GetAddressOf()));
-            if (SUCCEEDED(openHr) && g_uiSideTexture)
-            {
-                const HRESULT srvHr = g_device->CreateShaderResourceView(g_uiSideTexture.Get(), nullptr, &g_previewSRV);
-                if (FAILED(srvHr))
-                {
-                    VirtuaCamLog::LogHr(L"Preview CreateShaderResourceView failed", srvHr);
-                }
-            }
-        }
-    }
-
-    const float clearColor[] = { 0.1f, 0.1f, 0.1f, 1.0f };
-    g_context->ClearRenderTargetView(g_rtv.Get(), clearColor);
-
-    if (g_previewSRV) {
-        RECT rc; GetClientRect(hwnd, &rc);
-        D3D11_VIEWPORT vp = { 0, 0, (float)rc.right, (float)rc.bottom, 0, 1 };
-        if (vp.Width <= 0 || vp.Height <= 0)
-        {
-            if (g_swapChain) g_swapChain->Present(1, 0);
-            return;
-        }
-        g_context->RSSetViewports(1, &vp);
-        g_context->OMSetRenderTargets(1, g_rtv.GetAddressOf(), nullptr);
-        g_context->VSSetShader(g_vs.Get(), nullptr, 0); g_context->PSSetShader(g_ps.Get(), nullptr, 0);
-        g_context->PSSetShaderResources(0, 1, g_previewSRV.GetAddressOf());
-        g_context->PSSetSamplers(0, 1, g_sampler.GetAddressOf());
-        g_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        g_context->Draw(3, 0);
-    }
-
-    if(g_swapChain) g_swapChain->Present(1, 0);
-}

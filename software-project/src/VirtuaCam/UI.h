@@ -2,9 +2,6 @@
 #include <vector>
 #include <string>
 #include <functional>
-#include <d3d11.h>
-
-#define PREVIEW_WINDOW_CLASS L"VirtuaCamPreviewClass"
 
 enum class BrokerState;
 
@@ -20,9 +17,7 @@ struct CapturableDisplay {
     bool primary;
 };
 
-typedef ID3D11Texture2D* (*PFN_GetSharedTexture)();
-
-void UI_Initialize(HINSTANCE instance, HWND& outMainWnd, PFN_GetSharedTexture pfnGetSharedTexture);
+void UI_Initialize(HINSTANCE instance, HWND& outMainWnd);
 void UI_SetDebugMode(bool enabled);
 void UI_RunMessageLoop(std::function<void()> onIdle);
 void UI_Shutdown();

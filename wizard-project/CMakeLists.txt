@@ -15,12 +15,19 @@ target_compile_definitions(VirtuaCamSetup PRIVATE UNICODE _UNICODE NOMINMAX)
 target_link_libraries(VirtuaCamSetup PRIVATE
     advapi32
     comctl32
+    d3d11
+    d3dcompiler
+    dwmapi
+    dxgi
     mf
     mfplat
     mfreadwrite
     mfuuid
     ole32
     propsys
+    newdev
+    setupapi
     shell32
     user32
+    uxtheme
 )

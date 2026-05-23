@@ -59,6 +59,7 @@ static AspectRatioMode g_aspectRatioMode = AspectRatioMode::R16_9;
 static ULONG g_allowedAspectRatioMask = ASPECT_RATIO_MASK_ALL;
 static AudioRoutingMode g_audioRoutingMode = AudioRoutingMode::Auto;
 static std::wstring g_audioCaptureDeviceName = L"Stereo Mix";
+static bool g_startDebugMode = false;
 static constexpr ULONGLONG kAppFrameIntervalMs = 33;
 static constexpr ULONGLONG kDefaultFeedRefreshMs = 1000;
 static constexpr ULONGLONG kSilentDriverInactiveExitMs = 5ull * 60ull * 1000ull;
@@ -72,7 +73,6 @@ const wchar_t* SourceModeToString(SourceMode mode)
     case SourceMode::Display: return L"Display";
     case SourceMode::Image: return L"Image";
     case SourceMode::Video: return L"Video";
-    case SourceMode::Consumer: return L"Consumer";
     case SourceMode::Discovered: return L"Discovered";
     default: return L"Unknown";
     }
@@ -739,7 +739,6 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
             }
             break;
         case SourceMode::Discovered:
-        case SourceMode::Consumer:
             SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main non-camera source");
             g_mainSourceState.pid = static_cast<DWORD>(context);
             break;
@@ -843,7 +842,6 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
             }
             break;
         case SourceMode::Discovered:
-        case SourceMode::Consumer:
             state.pid = static_cast<DWORD>(context);
             break;
         case SourceMode::Off:
@@ -882,6 +880,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     }
 
     LoadSettings();
+    if (g_startDebugMode && !g_debugLoggingEnabled) {
+        g_debugLoggingEnabled = true;
+        VirtuaCamLog::Shutdown();
+        logOpts.enabled = true;
+        VirtuaCamLog::Init(logOpts);
+        VirtuaCamLog::LogLine(L"Debug mode enabled from settings");
+    }
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 
     HRESULT hrBroker = LoadBroker();
@@ -896,7 +901,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         g_discovery->Initialize(tempDevice.Get());
     }
 
-    UI_Initialize(hInstance, g_hMainWnd, g_pfnGetSharedTexture);
+    UI_Initialize(hInstance, g_hMainWnd);
     UI_SetDebugMode(g_debugLoggingEnabled);
     if (!g_hMainWnd) {
         ShutdownSystem(); CoUninitialize(); return FALSE;
@@ -926,14 +931,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 L"Startup source camera index out of range: {} cameraCount={}",
                 startupCameraIndex,
                 cameras.size()));
-            SetSourceMode(SourceMode::Consumer, 0);
+            SetSourceMode(SourceMode::Off, 0);
         }
-    } else if (HasArg(cmdLine, L"--source-consumer")) {
-        VirtuaCamLog::LogLine(L"Startup source: consumer");
-        SetSourceMode(SourceMode::Consumer, 0);
     } else {
-        VirtuaCamLog::LogLine(L"Startup source: default auto-discovery grid");
-        SetSourceMode(SourceMode::Consumer, 0);
+        VirtuaCamLog::LogLine(L"Startup source: off");
+        SetSourceMode(SourceMode::Off, 0);
     }
     InformBroker();
 
@@ -1095,28 +1097,15 @@ void InformBroker() {
     if (!g_discovery || !g_pfnUpdateProducerPriorityList || !g_pfnSetCompositingMode) return;
 
     g_discovery->DiscoverStreams();
-    
-    bool isGridMode = (g_mainSourceState.mode == SourceMode::Consumer);
-    g_pfnSetCompositingMode(isGridMode);
+    g_pfnSetCompositingMode(false);
 
-    if (isGridMode) {
-        const auto& streams = g_discovery->GetDiscoveredStreams();
-        std::vector<DWORD> pids;
-        for (const auto& s : streams) {
-            if (s.processName != L"VirtuaCam.exe") {
-                 pids.push_back(s.processId);
-            }
-        }
-        g_pfnUpdateProducerPriorityList(pids.data(), static_cast<int>(pids.size()));
-    } else {
-        DWORD pids[5] = {0};
-        pids[0] = g_mainSourceState.pid;
-        pids[1] = g_pip_tl_state.pid;
-        pids[2] = g_pip_tr_state.pid;
-        pids[3] = g_pip_bl_state.pid;
-        pids[4] = g_pip_br_state.pid;
-        g_pfnUpdateProducerPriorityList(pids, 5);
-    }
+    DWORD pids[5] = {0};
+    pids[0] = g_mainSourceState.pid;
+    pids[1] = g_pip_tl_state.pid;
+    pids[2] = g_pip_tr_state.pid;
+    pids[3] = g_pip_bl_state.pid;
+    pids[4] = g_pip_br_state.pid;
+    g_pfnUpdateProducerPriorityList(pids, 5);
 }
 
 HRESULT LoadBroker() {
@@ -1229,23 +1218,27 @@ void LoadSettings() {
     g_showPipTL = settings.showPipTopLeft;
     g_showPipTR = settings.showPipTopRight;
     g_showPipBL = settings.showPipBottomLeft;
+    g_startDebugMode = settings.startDebugMode;
     g_aspectRatioMode = settings.aspectRatio;
     g_audioRoutingMode = settings.audioRoutingMode;
     g_audioCaptureDeviceName = settings.audioCaptureDeviceName;
 
     VirtuaCamLog::LogLine(std::format(
-        L"Settings loaded: registry={} aspect={} audioMode={} audio={}",
+        L"Settings loaded: registry={} debug={} aspect={} audioMode={} audio={}",
         VirtuaCamConfig::GetSettingsRegistryPath(),
+        g_startDebugMode ? L"on" : L"off",
         VirtuaCamConfig::AspectRatioName(g_aspectRatioMode),
         VirtuaCamConfig::AudioRoutingModeName(g_audioRoutingMode),
         g_audioCaptureDeviceName.empty() ? L"None" : g_audioCaptureDeviceName));
 }
 
 void SaveSettings() {
+    const VirtuaCamConfig::AppSettings existing = VirtuaCamConfig::LoadSettings();
     VirtuaCamConfig::AppSettings settings = {};
     settings.showPipTopLeft = g_showPipTL;
     settings.showPipTopRight = g_showPipTR;
     settings.showPipBottomLeft = g_showPipBL;
+    settings.startDebugMode = existing.startDebugMode;
     settings.aspectRatio = g_aspectRatioMode;
     settings.audioRoutingMode = g_audioRoutingMode;
     settings.audioCaptureDeviceName = g_audioCaptureDeviceName;

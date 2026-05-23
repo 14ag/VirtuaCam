@@ -2586,7 +2586,6 @@ namespace BuiltInCameraProducer
 
 void LoadProducerModule(const std::wstring& type, ProducerModule& module)
 {
-    std::wstring dllName;
     if (type == L"camera") {
         module.hModule = nullptr;
         module.Initialize = &BuiltInCameraProducer::InitializeProducer;
@@ -2607,24 +2606,6 @@ void LoadProducerModule(const std::wstring& type, ProducerModule& module)
         module.Process = &BuiltInCaptureProducer::ProcessFrame;
         module.Shutdown = &BuiltInCaptureProducer::ShutdownProducer;
         return;
-    }
-
-    if (type == L"consumer") {
-        dllName = L"DirectPortConsumer.dll";
-    } else {
-        return;
-    }
-
-    module.hModule = LoadLibraryExW(dllName.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    if (module.hModule)
-    {
-        module.Initialize = (PFN_InitializeProducer)GetProcAddress(module.hModule, "InitializeProducer");
-        module.Process = (PFN_ProcessFrame)GetProcAddress(module.hModule, "ProcessFrame");
-        module.Shutdown = (PFN_ShutdownProducer)GetProcAddress(module.hModule, "ShutdownProducer");
-    }
-    else
-    {
-        VirtuaCamLog::LogWin32(std::format(L"LoadLibraryExW failed: {}", dllName), GetLastError());
     }
 }
 
