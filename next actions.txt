@@ -1,6 +1,0 @@
-1. delete test reports
-2. update wiki from ./implementation, ./docs
-3. format docs
-4. setup wizard and relative paths
-5. purge files from git history
-6. 
