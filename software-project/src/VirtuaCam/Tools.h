@@ -68,7 +68,9 @@ struct DirectPortStatusV1 {
     UINT64 staleCount;
     HRESULT lastHRESULT;
     ULONG reserved0;
-    UINT64 reserved[8];
+    UINT64 sampleAgeQpcDelta;
+    UINT64 droppedCallbackSampleCount;
+    UINT64 reserved[6];
 };
 
 bool InitializeBroadcastManifest(
@@ -99,7 +101,9 @@ void PublishDirectPortStatus(
     UINT64 frameCount,
     UINT64 duplicateCount,
     UINT64 staleCount,
-    HRESULT lastHRESULT);
+    HRESULT lastHRESULT,
+    UINT64 sampleAgeQpcDelta = 0,
+    UINT64 droppedCallbackSampleCount = 0);
 bool ReadDirectPortStatusStable(
     const DirectPortStatusV1* status,
     DWORD expectedOwnerPid,

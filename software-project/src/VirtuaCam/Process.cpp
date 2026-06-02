@@ -454,7 +454,9 @@ void PublishDirectPortProducerStatus(
     DirectPortStatusMapping& mapping,
     UINT64 fenceValue,
     HRESULT lastHRESULT,
-    UINT64 staleCount = 0)
+    UINT64 staleCount = 0,
+    UINT64 sourceCallbackQpc = 0,
+    UINT64 droppedCallbackSampleCount = 0)
 {
     if (!mapping.view) {
         return;
@@ -464,6 +466,10 @@ void PublishDirectPortProducerStatus(
     if (!QueryPerformanceCounter(&now)) {
         return;
     }
+
+    const UINT64 nowQpc = static_cast<UINT64>(now.QuadPart);
+    const UINT64 sampleAgeQpcDelta =
+        (sourceCallbackQpc != 0 && nowQpc >= sourceCallbackQpc) ? (nowQpc - sourceCallbackQpc) : 0;
 
     if (fenceValue == mapping.lastPublishedFenceValue && mapping.frameCount > 0) {
         ++mapping.duplicateCount;
@@ -476,12 +482,14 @@ void PublishDirectPortProducerStatus(
 
     PublishDirectPortStatus(
         mapping.view,
-        static_cast<UINT64>(now.QuadPart),
+        nowQpc,
         fenceValue,
         mapping.frameCount,
         mapping.duplicateCount,
         mapping.staleCount,
-        lastHRESULT);
+        lastHRESULT,
+        sampleAgeQpcDelta,
+        droppedCallbackSampleCount);
 }
 
 namespace BuiltInCaptureProducer
@@ -2203,6 +2211,8 @@ namespace BuiltInCameraProducer
             IMFSample* sample) override
         {
             bool shouldRequestNext = false;
+            LARGE_INTEGER callbackQpc = {};
+            (void)QueryPerformanceCounter(&callbackQpc);
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_requestPending = false;
@@ -2213,6 +2223,7 @@ namespace BuiltInCameraProducer
                 m_latestStatus = status;
                 m_latestStreamFlags = streamFlags;
                 m_latestTimestamp = timestamp;
+                m_latestCallbackQpc = static_cast<UINT64>(callbackQpc.QuadPart);
                 m_latestSample.Reset();
                 if (SUCCEEDED(status) && sample) {
                     m_latestSample = sample;
@@ -2237,6 +2248,7 @@ namespace BuiltInCameraProducer
             std::lock_guard<std::mutex> lock(m_mutex);
             m_requestPending = false;
             m_hasLatest = false;
+            m_latestCallbackQpc = 0;
             m_latestSample.Reset();
             return S_OK;
         }
@@ -2253,6 +2265,7 @@ namespace BuiltInCameraProducer
             m_requestPending = false;
             m_shuttingDown = false;
             m_hasLatest = false;
+            m_latestCallbackQpc = 0;
             m_latestSample.Reset();
         }
 
@@ -2281,6 +2294,7 @@ namespace BuiltInCameraProducer
                 m_latestStatus = hr;
                 m_latestStreamFlags = 0;
                 m_latestTimestamp = 0;
+                m_latestCallbackQpc = 0;
                 m_latestSample.Reset();
                 m_hasLatest = true;
             }
@@ -2291,6 +2305,7 @@ namespace BuiltInCameraProducer
             ComPtr<IMFSample>& sample,
             DWORD& streamFlags,
             LONGLONG& timestamp,
+            UINT64& callbackQpc,
             HRESULT& status)
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -2301,6 +2316,7 @@ namespace BuiltInCameraProducer
             sample = m_latestSample;
             streamFlags = m_latestStreamFlags;
             timestamp = m_latestTimestamp;
+            callbackQpc = m_latestCallbackQpc;
             status = m_latestStatus;
             m_latestSample.Reset();
             m_hasLatest = false;
@@ -2319,6 +2335,7 @@ namespace BuiltInCameraProducer
             m_shuttingDown = true;
             m_requestPending = false;
             m_hasLatest = false;
+            m_latestCallbackQpc = 0;
             m_latestSample.Reset();
             m_reader.Reset();
         }
@@ -2330,6 +2347,7 @@ namespace BuiltInCameraProducer
         ComPtr<IMFSample> m_latestSample;
         DWORD m_latestStreamFlags = 0;
         LONGLONG m_latestTimestamp = 0;
+        UINT64 m_latestCallbackQpc = 0;
         HRESULT m_latestStatus = S_OK;
         bool m_requestPending = false;
         bool m_hasLatest = false;
@@ -2789,8 +2807,9 @@ namespace BuiltInCameraProducer
         ComPtr<IMFSample> sample;
         DWORD streamFlags = 0;
         LONGLONG timestamp = 0;
+        UINT64 callbackQpc = 0;
         HRESULT hr = S_OK;
-        if (!g_sourceReaderCallback->TryTakeLatest(sample, streamFlags, timestamp, hr)) {
+        if (!g_sourceReaderCallback->TryTakeLatest(sample, streamFlags, timestamp, callbackQpc, hr)) {
             return false;
         }
         (void)timestamp;
@@ -2844,6 +2863,8 @@ namespace BuiltInCameraProducer
             g_statusMapping,
             newFenceValue,
             S_OK,
+            0,
+            callbackQpc,
             g_sourceReaderCallback ? g_sourceReaderCallback->DroppedSamples() : 0);
 
         if (!g_loggedFirstFrame) {

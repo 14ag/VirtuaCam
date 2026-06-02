@@ -469,7 +469,9 @@ void PublishDirectPortStatus(
     UINT64 frameCount,
     UINT64 duplicateCount,
     UINT64 staleCount,
-    HRESULT lastHRESULT)
+    HRESULT lastHRESULT,
+    UINT64 sampleAgeQpcDelta,
+    UINT64 droppedCallbackSampleCount)
 {
     if (!status ||
         status->magic != VIRTUACAM_DIRECTPORT_STATUS_MAGIC ||
@@ -494,6 +496,8 @@ void PublishDirectPortStatus(
     status->duplicateCount = duplicateCount;
     status->staleCount = staleCount;
     status->lastHRESULT = lastHRESULT;
+    status->sampleAgeQpcDelta = sampleAgeQpcDelta;
+    status->droppedCallbackSampleCount = droppedCallbackSampleCount;
     MemoryBarrier();
     InterlockedExchange64(&status->publishSequence, beginWriteSequence + 1);
 }

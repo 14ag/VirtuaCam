@@ -251,6 +251,91 @@ function Measure-PpmPsnr {
     }
 }
 
+function Measure-PpmSsimY {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReferencePath,
+        [Parameter(Mandatory = $true)][string]$CapturedPath
+    )
+
+    $reference = Read-PpmP6 -Path $ReferencePath
+    $captured = Read-PpmP6 -Path $CapturedPath
+    if ($reference.width -ne $captured.width -or $reference.height -ne $captured.height) {
+        throw "[FAIL] PPM dimensions differ: $ReferencePath vs $CapturedPath"
+    }
+
+    $count = [int]($reference.data.Count / 3)
+    if ($count -le 0) { throw "[FAIL] Empty PPM payload in $ReferencePath." }
+
+    $sumX = 0.0
+    $sumY = 0.0
+    $sumX2 = 0.0
+    $sumY2 = 0.0
+    $sumXY = 0.0
+    for ($i = 0; $i -lt $reference.data.Count; $i += 3) {
+        $x = (0.2126 * [double]$reference.data[$i]) + (0.7152 * [double]$reference.data[$i + 1]) + (0.0722 * [double]$reference.data[$i + 2])
+        $y = (0.2126 * [double]$captured.data[$i]) + (0.7152 * [double]$captured.data[$i + 1]) + (0.0722 * [double]$captured.data[$i + 2])
+        $sumX += $x
+        $sumY += $y
+        $sumX2 += $x * $x
+        $sumY2 += $y * $y
+        $sumXY += $x * $y
+    }
+
+    $meanX = $sumX / $count
+    $meanY = $sumY / $count
+    $varianceX = [Math]::Max(0.0, ($sumX2 / $count) - ($meanX * $meanX))
+    $varianceY = [Math]::Max(0.0, ($sumY2 / $count) - ($meanY * $meanY))
+    $covariance = ($sumXY / $count) - ($meanX * $meanY)
+    $c1 = [Math]::Pow(0.01 * 255.0, 2.0)
+    $c2 = [Math]::Pow(0.03 * 255.0, 2.0)
+    $denominator = (($meanX * $meanX) + ($meanY * $meanY) + $c1) * ($varianceX + $varianceY + $c2)
+    $ssim = if ($denominator -le 0.0) { 1.0 } else { (((2.0 * $meanX * $meanY) + $c1) * ((2.0 * $covariance) + $c2)) / $denominator }
+
+    return [ordered]@{
+        width = $reference.width
+        height = $reference.height
+        comparedPixelCount = $count
+        ssimY = $ssim
+    }
+}
+
+function Measure-PpmColorRange {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $ppm = Read-PpmP6 -Path $Path
+    $minR = 255; $minG = 255; $minB = 255
+    $maxR = 0; $maxG = 0; $maxB = 0
+    for ($i = 0; $i -lt $ppm.data.Count; $i += 3) {
+        $r = [int]$ppm.data[$i]
+        $g = [int]$ppm.data[$i + 1]
+        $b = [int]$ppm.data[$i + 2]
+        if ($r -lt $minR) { $minR = $r }
+        if ($g -lt $minG) { $minG = $g }
+        if ($b -lt $minB) { $minB = $b }
+        if ($r -gt $maxR) { $maxR = $r }
+        if ($g -gt $maxG) { $maxG = $g }
+        if ($b -gt $maxB) { $maxB = $b }
+    }
+
+    $rangeR = $maxR - $minR
+    $rangeG = $maxG - $minG
+    $rangeB = $maxB - $minB
+    return [ordered]@{
+        width = $ppm.width
+        height = $ppm.height
+        minR = $minR
+        maxR = $maxR
+        rangeR = $rangeR
+        minG = $minG
+        maxG = $maxG
+        rangeG = $rangeG
+        minB = $minB
+        maxB = $maxB
+        rangeB = $rangeB
+        limitedRangeLikely = ($minR -ge 16 -and $minG -ge 16 -and $minB -ge 16 -and $maxR -le 235 -and $maxG -le 235 -and $maxB -le 235)
+    }
+}
+
 $freezeSelfTest = Measure-FrameFreezeMetrics -FrameValues ([UInt64[]]@(1, 2, 2, 2, 3, 4, 4)) -FrameIntervalMs 33
 if ($freezeSelfTest.duplicateFrameCount -ne 3 -or $freezeSelfTest.freezeEventCount -ne 2) {
     throw "[FAIL] freeze metric self-test failed."
@@ -259,6 +344,24 @@ $summarySelfTest = Measure-NumericSummary -Values ([double[]]@(10, 20, 30, 40))
 if ($summarySelfTest.average -ne 25 -or $summarySelfTest.max -ne 40) {
     throw "[FAIL] numeric summary self-test failed."
 }
+$ppmSelfTestDir = Join-Path $ArtifactRoot "_metric-selftest"
+New-Item -ItemType Directory -Path $ppmSelfTestDir -Force | Out-Null
+$ppmSelfTestPath = Join-Path $ppmSelfTestDir "bars.ppm"
+$ppmHeader = [Text.Encoding]::ASCII.GetBytes("P6`n2 1`n255`n")
+$ppmPixels = [byte[]]@(255, 0, 0, 0, 255, 0)
+$ppmBytes = New-Object byte[] ($ppmHeader.Count + $ppmPixels.Count)
+[Buffer]::BlockCopy($ppmHeader, 0, $ppmBytes, 0, $ppmHeader.Count)
+[Buffer]::BlockCopy($ppmPixels, 0, $ppmBytes, $ppmHeader.Count, $ppmPixels.Count)
+[IO.File]::WriteAllBytes($ppmSelfTestPath, $ppmBytes)
+$ssimSelfTest = Measure-PpmSsimY -ReferencePath $ppmSelfTestPath -CapturedPath $ppmSelfTestPath
+if ([Math]::Abs($ssimSelfTest.ssimY - 1.0) -gt 0.0000001) {
+    throw "[FAIL] SSIM-Y metric self-test failed."
+}
+$colorRangeSelfTest = Measure-PpmColorRange -Path $ppmSelfTestPath
+if ($colorRangeSelfTest.maxR -ne 255 -or $colorRangeSelfTest.maxG -ne 255 -or $colorRangeSelfTest.maxB -ne 0) {
+    throw "[FAIL] color-range metric self-test failed."
+}
+Remove-Item -LiteralPath $ppmSelfTestDir -Recurse -Force
 
 $appCpp = Join-Path $SourceRoot "VirtuaCam\App.cpp"
 $brokerCpp = Join-Path $SourceRoot "VirtuaCam\Broker.cpp"
@@ -326,10 +429,19 @@ $auditMetrics = [ordered]@{
     }
     quality = [ordered]@{
         ssimYMeasured = $false
+        ssimY = $null
         psnrMeasured = $false
         psnrDb = $null
         meanSquaredError = $null
         comparedChannelCount = 0
+        colorRangeMeasured = $false
+        capturedMinR = $null
+        capturedMaxR = $null
+        capturedMinG = $null
+        capturedMaxG = $null
+        capturedMinB = $null
+        capturedMaxB = $null
+        capturedLimitedRangeLikely = $null
         note = "Matched-frame SSIM/PSNR hooks require reference and captured frame pairs; cadence/freeze metrics are available from frame traces."
     }
 }
@@ -350,12 +462,16 @@ Assert-Contains -Path $multiplexerCpp -Pattern "if \(!forceComposite && !inputFr
 Assert-Contains -Path $toolsH -Pattern "struct DirectPortStatusV1" -Message "DirectPort sidecar status ABI missing."
 Assert-Contains -Path $toolsH -Pattern "VIRTUACAM_DIRECTPORT_STATUS_VERSION\s*=\s*1u" -Message "DirectPort status version must be v1."
 Assert-Contains -Path $toolsH -Pattern "volatile LONGLONG publishSequence" -Message "DirectPort status must use odd/even publish sequence."
+Assert-Contains -Path $toolsH -Pattern "sampleAgeQpcDelta" -Message "DirectPort status must expose callback-to-publish sample age telemetry."
+Assert-Contains -Path $toolsH -Pattern "droppedCallbackSampleCount" -Message "DirectPort status must expose dropped callback sample telemetry separately from stale frames."
 Assert-Contains -Path $toolsH -Pattern "GetProducerStatusName" -Message "DirectPort status mapping name helper missing."
 Assert-Contains -Path $toolsCpp -Pattern "InitializeDirectPortStatus" -Message "DirectPort status initializer missing."
 Assert-Contains -Path $toolsCpp -Pattern "PublishDirectPortStatus" -Message "DirectPort status publisher missing."
 Assert-Contains -Path $toolsCpp -Pattern "ReadDirectPortStatusStable" -Message "DirectPort stable status reader missing."
 Assert-Contains -Path $toolsCpp -Pattern "beginSequence == endSequence" -Message "DirectPort reader must reject partial status updates."
 Assert-Contains -Path $toolsCpp -Pattern "beginWriteSequence" -Message "DirectPort publisher must mark odd write sequence before field updates."
+Assert-Contains -Path $toolsCpp -Pattern "status->sampleAgeQpcDelta = sampleAgeQpcDelta" -Message "DirectPort publisher must write sample age telemetry inside stable publish sequence."
+Assert-Contains -Path $toolsCpp -Pattern "status->droppedCallbackSampleCount = droppedCallbackSampleCount" -Message "DirectPort publisher must write dropped callback count inside stable publish sequence."
 Assert-Contains -Path $processCpp -Pattern "DirectPortStatusMapping" -Message "Producer status mapping wrapper missing."
 Assert-Contains -Path $processCpp -Pattern "InitializeDirectPortStatusMapping" -Message "Producer must initialize DirectPort status sidecar."
 Assert-Contains -Path $processCpp -Pattern "PublishDirectPortProducerStatus" -Message "Producer must publish DirectPort status."
@@ -368,6 +484,8 @@ Assert-Contains -Path $processCpp -Pattern "m_droppedSamples" -Message "Async So
 $auditMetrics.producer.hasDroppedSampleCounter = $true
 Assert-Contains -Path $processCpp -Pattern "DroppedSamples\(\)" -Message "Async Source Reader dropped-sample count must be observable."
 Assert-Contains -Path $processCpp -Pattern "g_sourceReaderCallback->DroppedSamples\(\)" -Message "Producer status must publish async dropped-sample count."
+Assert-Contains -Path $processCpp -Pattern "m_latestCallbackQpc" -Message "Async Source Reader callback must capture producer-side QPC for sample age telemetry."
+Assert-Contains -Path $processCpp -Pattern "sampleAgeQpcDelta" -Message "Producer status must compute callback-to-publish sample age."
 Assert-Contains -Path $processCpp -Pattern "SelectRgb32MediaType" -Message "Camera/file producers must validate RGB32 media type before BGRA upload."
 $auditMetrics.producer.validatesRgb32 = $true
 Assert-Contains -Path $processCpp -Pattern "subtype != MFVideoFormat_RGB32" -Message "Camera/file producers must reject non-RGB32 current media types."
@@ -472,11 +590,23 @@ if (-not [string]::IsNullOrWhiteSpace($ReferencePpmPath) -or -not [string]::IsNu
     if (-not (Test-Path -LiteralPath $CapturedPpmPath)) { throw "[FAIL] Captured PPM not found: $CapturedPpmPath" }
 
     $psnr = Measure-PpmPsnr -ReferencePath $ReferencePpmPath -CapturedPath $CapturedPpmPath
+    $ssim = Measure-PpmSsimY -ReferencePath $ReferencePpmPath -CapturedPath $CapturedPpmPath
+    $colorRange = Measure-PpmColorRange -Path $CapturedPpmPath
     $auditMetrics.quality.psnrMeasured = $true
     $auditMetrics.quality.psnrDb = $psnr.psnrDb
     $auditMetrics.quality.meanSquaredError = $psnr.meanSquaredError
     $auditMetrics.quality.comparedChannelCount = $psnr.comparedChannelCount
-    $auditMetrics.quality.note = "PSNR measured from P6 PPM pair."
+    $auditMetrics.quality.ssimYMeasured = $true
+    $auditMetrics.quality.ssimY = $ssim.ssimY
+    $auditMetrics.quality.colorRangeMeasured = $true
+    $auditMetrics.quality.capturedMinR = $colorRange.minR
+    $auditMetrics.quality.capturedMaxR = $colorRange.maxR
+    $auditMetrics.quality.capturedMinG = $colorRange.minG
+    $auditMetrics.quality.capturedMaxG = $colorRange.maxG
+    $auditMetrics.quality.capturedMinB = $colorRange.minB
+    $auditMetrics.quality.capturedMaxB = $colorRange.maxB
+    $auditMetrics.quality.capturedLimitedRangeLikely = $colorRange.limitedRangeLikely
+    $auditMetrics.quality.note = "PSNR, SSIM-Y, and captured color range measured from P6 PPM pair."
 }
 
 if (-not $SkipBuild) {
@@ -548,9 +678,15 @@ $md = @(
     "- P95 latency ms: $($auditMetrics.latency.p95Ms)",
     "- Max latency ms: $($auditMetrics.latency.maxMs)",
     "- SSIM-Y measured: $($auditMetrics.quality.ssimYMeasured)",
+    "- SSIM-Y: $($auditMetrics.quality.ssimY)",
     "- PSNR measured: $($auditMetrics.quality.psnrMeasured)",
     "- PSNR dB: $($auditMetrics.quality.psnrDb)",
     "- MSE: $($auditMetrics.quality.meanSquaredError)",
+    "- Color range measured: $($auditMetrics.quality.colorRangeMeasured)",
+    "- Captured R range: $($auditMetrics.quality.capturedMinR)..$($auditMetrics.quality.capturedMaxR)",
+    "- Captured G range: $($auditMetrics.quality.capturedMinG)..$($auditMetrics.quality.capturedMaxG)",
+    "- Captured B range: $($auditMetrics.quality.capturedMinB)..$($auditMetrics.quality.capturedMaxB)",
+    "- Captured limited range likely: $($auditMetrics.quality.capturedLimitedRangeLikely)",
     "",
     "Note: $($auditMetrics.freeze.note)"
 )
