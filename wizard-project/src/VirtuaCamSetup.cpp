@@ -46,6 +46,7 @@ namespace
     constexpr wchar_t kPreviewClass[] = L"VirtuaCamSetupPreview";
     constexpr wchar_t kBrokerTextureName[] = L"Local\\VirtuaCast_Broker_Texture";
     constexpr wchar_t kSettingsSubkey[] = L"Software\\VirtuaCam\\Settings";
+    constexpr wchar_t kWatcherServiceName[] = L"VirtuaCamWatcher";
 
     constexpr int IDC_PREVIEW = 1000;
     constexpr int IDC_STATUS = 1001;
@@ -143,6 +144,17 @@ namespace
             return S_OK;
         }
 
+        void ResetForRead()
+        {
+            m_status = E_PENDING;
+            m_flags = 0;
+            m_timestamp = 0;
+            m_sample.Reset();
+            if (m_event) {
+                ResetEvent(m_event);
+            }
+        }
+
         HANDLE EventHandle() const { return m_event; }
         HRESULT Status() const { return m_status; }
         DWORD Flags() const { return m_flags; }
@@ -167,6 +179,8 @@ namespace
     HFONT g_uiFont = nullptr;
     HBRUSH g_windowBrush = nullptr;
     HBRUSH g_panelBrush = nullptr;
+    std::vector<std::wstring> g_operationLog;
+    bool g_debugChecked = false;
 
     ComPtr<ID3D11Device> g_previewDevice;
     ComPtr<ID3D11DeviceContext> g_previewContext;
@@ -435,14 +449,12 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         return exitCode == 0;
     }
 
-    void WriteInstallLog(const std::wstring& message)
+    std::wstring TimestampedLogLine(const std::wstring& message)
     {
-        std::wofstream stream(InstallLogPath(), std::ios::app);
-        if (!stream) return;
         SYSTEMTIME st = {};
         GetLocalTime(&st);
-        stream << std::format(
-            L"[{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}] {}\n",
+        return std::format(
+            L"[{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}] {}",
             st.wYear,
             st.wMonth,
             st.wDay,
@@ -451,6 +463,40 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             st.wSecond,
             st.wMilliseconds,
             message);
+    }
+
+    void WriteInstallLog(const std::wstring& message)
+    {
+        g_operationLog.push_back(TimestampedLogLine(message));
+    }
+
+    void BeginOperationLog(const std::wstring& title)
+    {
+        g_operationLog.clear();
+        std::error_code ec;
+        std::filesystem::remove(InstallLogPath(), ec);
+        WriteInstallLog(L"============================================================");
+        WriteInstallLog(L" " + title);
+        WriteInstallLog(L"============================================================");
+    }
+
+    void FlushOperationLog()
+    {
+        if (g_operationLog.empty()) return;
+        std::error_code ec;
+        std::filesystem::create_directories(LogDir(), ec);
+        std::wofstream stream(InstallLogPath(), std::ios::trunc);
+        if (!stream) return;
+        for (const auto& line : g_operationLog) {
+            stream << line << L"\n";
+        }
+    }
+
+    void DiscardOperationLog()
+    {
+        g_operationLog.clear();
+        std::error_code ec;
+        std::filesystem::remove(InstallLogPath(), ec);
     }
 
     void LogStep(const std::wstring& message)
@@ -564,34 +610,11 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         stream << "}\n";
     }
 
-    CheckResult DeleteLegacySettings()
+    void RemoveRunJson(const std::filesystem::path& jsonPath)
     {
-        CheckResult result{ L"Legacy settings cleanup", true, L"No legacy file found" };
-        PWSTR localAppData = nullptr;
-        PWSTR roamingAppData = nullptr;
-        std::vector<std::filesystem::path> paths;
-        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData)) && localAppData) {
-            paths.emplace_back(std::filesystem::path(localAppData) / L"VirtuaCam" / L"settings.ini");
-        }
-        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &roamingAppData)) && roamingAppData) {
-            paths.emplace_back(std::filesystem::path(roamingAppData) / L"VirtuaCam" / L"settings.ini");
-        }
-        CoTaskMemFree(localAppData);
-        CoTaskMemFree(roamingAppData);
-
-        for (const auto& path : paths) {
-            std::error_code ec;
-            const bool removed = std::filesystem::remove(path, ec);
-            if (ec) {
-                result.success = false;
-                result.detail = std::format(L"Delete failed: {} error={}", path.wstring(), ec.value());
-                return result;
-            }
-            if (removed) {
-                result.detail = std::format(L"Deleted {}", path.wstring());
-            }
-        }
-        return result;
+        if (jsonPath.empty()) return;
+        std::error_code ec;
+        std::filesystem::remove(jsonPath, ec);
     }
 
     bool EnsureStringValue(HKEY key, const wchar_t* name, const wchar_t* value)
@@ -695,10 +718,38 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             result.detail = std::format(L"pnputil exit={} {}", exitCode, output.substr(0, std::min<size_t>(160, output.size())));
             return result;
         }
-        result.success = ContainsNoCase(output, L"Status:") &&
+        const bool hasBoundDriver = ContainsNoCase(output, L"Driver Name:");
+        const bool unknownClass = ContainsNoCase(output, L"Class Name:                Unknown") ||
+            ContainsNoCase(output, L"Class GUID:                Unknown");
+        result.success = hasBoundDriver &&
+            !unknownClass &&
+            ContainsNoCase(output, L"Status:") &&
             (ContainsNoCase(output, L"Status:                     Started") ||
              ContainsNoCase(output, L"Status:                     OK"));
-        result.detail = result.success ? instanceId + L" status started" : L"Device not started or not present";
+        result.detail = result.success ? instanceId + L" status started with bound driver" : L"Device not started, not present, or unbound";
+        return result;
+    }
+
+    CheckResult CheckPnpDeviceRemoved(const std::wstring& name, const std::wstring& instanceId)
+    {
+        DWORD exitCode = 0;
+        std::wstring output;
+        const std::wstring command = std::format(
+            L"\"{}\" /enum-devices /instanceid {} /drivers",
+            SystemToolPath(L"pnputil.exe"),
+            instanceId);
+        const bool ok = RunProcessCapture(command, 60000, exitCode, output);
+        CheckResult result{ name, false, L"" };
+        if (!ok) {
+            result.success = true;
+            result.detail = std::format(L"{} not enumerated", instanceId);
+            return result;
+        }
+        const bool unbound = !ContainsNoCase(output, L"Driver Name:") ||
+            ContainsNoCase(output, L"Class Name:                Unknown") ||
+            ContainsNoCase(output, L"Class GUID:                Unknown");
+        result.success = unbound;
+        result.detail = unbound ? (instanceId + L" has no bound VirtuaCam driver") : (instanceId + L" still has a bound driver");
         return result;
     }
 
@@ -948,46 +999,58 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
             hr = reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
         }
-        if (SUCCEEDED(hr)) {
+        if (FAILED(hr)) {
+            source->Shutdown();
+            return { L"Final test frame", false, std::format(L"Source reader setup failed: 0x{:08X}", static_cast<unsigned>(hr)) };
+        }
+
+        constexpr int kReadAttempts = 8;
+        DWORD lastFlags = 0;
+        for (int attempt = 1; attempt <= kReadAttempts; ++attempt) {
+            callbackRaw->ResetForRead();
             hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, nullptr, nullptr, nullptr);
-        }
-        if (FAILED(hr)) {
+            if (FAILED(hr)) {
+                source->Shutdown();
+                return { L"Final test frame", false, std::format(L"ReadSample start failed: 0x{:08X}", static_cast<unsigned>(hr)) };
+            }
+
+            const DWORD wait = WaitForSingleObject(callbackRaw->EventHandle(), 2500);
+            if (wait != WAIT_OBJECT_0) {
+                source->Shutdown();
+                return { L"Final test frame", false, wait == WAIT_TIMEOUT ? L"Timed out waiting for frame sample" : L"Frame wait failed" };
+            }
+
+            hr = callbackRaw->Status();
+            lastFlags = callbackRaw->Flags();
+            if (FAILED(hr)) {
+                source->Shutdown();
+                return { L"Final test frame", false, std::format(L"ReadSample failed: 0x{:08X}", static_cast<unsigned>(hr)) };
+            }
+            if ((lastFlags & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM)) != 0) {
+                source->Shutdown();
+                return { L"Final test frame", false, std::format(L"Reader flags=0x{:08X}", lastFlags) };
+            }
+
+            IMFSample* sample = callbackRaw->Sample();
+            if (!sample) {
+                continue;
+            }
+
+            DWORD bytes = 0;
+            (void)sample->GetTotalLength(&bytes);
             source->Shutdown();
-            return { L"Final test frame", false, std::format(L"ReadSample start failed: 0x{:08X}", static_cast<unsigned>(hr)) };
+            return {
+                L"Final test frame",
+                true,
+                std::format(L"Frame sample from {}: {} bytes timestamp={} attempt={}", name, bytes, callbackRaw->Timestamp(), attempt)
+            };
         }
 
-        const DWORD wait = WaitForSingleObject(callbackRaw->EventHandle(), 5000);
-        if (wait != WAIT_OBJECT_0) {
-            source->Shutdown();
-            return { L"Final test frame", false, wait == WAIT_TIMEOUT ? L"Timed out waiting for frame sample" : L"Frame wait failed" };
-        }
-
-        hr = callbackRaw->Status();
-        if (FAILED(hr)) {
-            source->Shutdown();
-            return { L"Final test frame", false, std::format(L"ReadSample failed: 0x{:08X}", static_cast<unsigned>(hr)) };
-        }
-        if ((callbackRaw->Flags() & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM)) != 0) {
-            source->Shutdown();
-            return { L"Final test frame", false, std::format(L"Reader flags=0x{:08X}", callbackRaw->Flags()) };
-        }
-        IMFSample* sample = callbackRaw->Sample();
-        if (!sample) {
-            source->Shutdown();
-            return { L"Final test frame", false, L"No sample returned" };
-        }
-
-        DWORD bytes = 0;
-        (void)sample->GetTotalLength(&bytes);
         source->Shutdown();
-        return {
-            L"Final test frame",
-            true,
-            std::format(L"Frame sample from {}: {} bytes timestamp={}", name, bytes, callbackRaw->Timestamp())
-        };
+        return { L"Final test frame", false, std::format(L"No sample returned after {} reads; last flags=0x{:08X}", kReadAttempts, lastFlags) };
     }
 
-    RunResult RunFirstRunChecks(const std::wstring& mode, const std::filesystem::path& jsonPath)
+    RunResult RunFirstRunChecks(const std::wstring& mode, const std::filesystem::path& jsonPath, bool writeJson = true)
     {
         RunResult result;
         result.mode = mode;
@@ -1001,7 +1064,6 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
 
         result.success = true;
         SetStatusText(L"Running first-run checks...");
-        add(DeleteLegacySettings());
         add(EnsureRegistrySettings());
         add(CheckPnpDevice(L"Camera devnode", L"ROOT\\AVSHWS\\0000"));
         add(CheckWatcherService());
@@ -1011,7 +1073,9 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         add(CheckMicOpen());
         add(CheckTestFrameOpen());
 
-        WriteRunJson(result);
+        if (writeJson) {
+            WriteRunJson(result);
+        }
         SetStatusText(result.success ? L"Checks passed." : L"One or more checks failed. See JSON report.");
         return result;
     }
@@ -1246,6 +1310,37 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         return ok;
     }
 
+    std::optional<std::wstring> ReadRegistryString(HKEY root, const wchar_t* subkey, const wchar_t* name)
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(root, subkey, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+            return std::nullopt;
+        }
+
+        DWORD type = 0;
+        DWORD bytes = 0;
+        if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
+            (type != REG_SZ && type != REG_EXPAND_SZ) ||
+            bytes < sizeof(wchar_t)) {
+            RegCloseKey(key);
+            return std::nullopt;
+        }
+
+        std::wstring value(bytes / sizeof(wchar_t), L'\0');
+        const LSTATUS status = RegQueryValueExW(key, name, nullptr, nullptr, reinterpret_cast<BYTE*>(value.data()), &bytes);
+        RegCloseKey(key);
+        if (status != ERROR_SUCCESS) {
+            return std::nullopt;
+        }
+        while (!value.empty() && value.back() == L'\0') {
+            value.pop_back();
+        }
+        if (value.empty()) {
+            return std::nullopt;
+        }
+        return value;
+    }
+
     void DeleteRegistryValue(HKEY root, const wchar_t* subkey, const wchar_t* name)
     {
         HKEY key = nullptr;
@@ -1263,6 +1358,82 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         RunLoggedCommand(SystemToolPath(L"taskkill.exe"), { L"/IM", L"VirtuaCamProcess.exe", L"/F" }, { 0, 128 }, 30000);
     }
 
+    bool ConfigureWatcherService(const std::filesystem::path& processExe, std::wstring& detail)
+    {
+        if (processExe.empty()) {
+            detail = L"Missing HKLM\\SOFTWARE\\VirtuaCam\\ProcessExe";
+            return false;
+        }
+        if (!std::filesystem::exists(processExe)) {
+            detail = L"Process exe not found: " + processExe.wstring();
+            return false;
+        }
+
+        const std::wstring binPath = L"\"" + processExe.wstring() + L"\" --service";
+        RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"stop", kWatcherServiceName }, { 0, 1060, 1062 }, 30000);
+        if (!RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"create", kWatcherServiceName, L"binPath=", binPath, L"start=", L"auto", L"DisplayName=", L"VirtuaCam Watcher" }, { 0, 1073 }, 30000)) {
+            detail = L"Failed to create watcher service";
+            return false;
+        }
+        if (!RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"config", kWatcherServiceName, L"binPath=", binPath, L"start=", L"auto" }, { 0 }, 30000)) {
+            detail = L"Failed to configure watcher service";
+            return false;
+        }
+        if (!RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"description", kWatcherServiceName, L"Starts VirtuaCam UI on first virtual camera access." }, { 0 }, 30000)) {
+            detail = L"Failed to set watcher service description";
+            return false;
+        }
+        if (!RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"start", kWatcherServiceName }, { 0, 1056 }, 30000)) {
+            detail = L"Failed to start watcher service";
+            return false;
+        }
+
+        detail = L"VirtuaCamWatcher configured for " + processExe.wstring();
+        return true;
+    }
+
+    bool RemoveWatcherService(std::wstring& detail)
+    {
+        RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"stop", kWatcherServiceName }, { 0, 1060, 1062 }, 30000);
+        if (!RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"delete", kWatcherServiceName }, { 0, 1060 }, 30000)) {
+            detail = L"Failed to delete watcher service";
+            return false;
+        }
+        detail = L"VirtuaCamWatcher removed or already absent";
+        return true;
+    }
+
+    CheckResult RunWatcherServiceInstall()
+    {
+        CheckResult result{ L"Watcher service install", false, L"" };
+        if (!IsAdministrator()) {
+            result.detail = L"Administrator rights required";
+            return result;
+        }
+        BeginOperationLog(L"Install Watcher Service");
+
+        const auto processExe = ReadRegistryString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\VirtuaCam", L"ProcessExe");
+        if (!processExe) {
+            result.detail = L"Missing HKLM\\SOFTWARE\\VirtuaCam\\ProcessExe. Run VirtuaCamSetup.exe --install first.";
+            return result;
+        }
+
+        result.success = ConfigureWatcherService(std::filesystem::path(*processExe), result.detail);
+        return result;
+    }
+
+    CheckResult RunWatcherServiceUninstall()
+    {
+        CheckResult result{ L"Watcher service uninstall", false, L"" };
+        if (!IsAdministrator()) {
+            result.detail = L"Administrator rights required";
+            return result;
+        }
+        BeginOperationLog(L"Uninstall Watcher Service");
+        result.success = RemoveWatcherService(result.detail);
+        return result;
+    }
+
     CheckResult RunNativeInstall(const SetupOptions& options)
     {
         CheckResult result{ L"Native install", false, L"" };
@@ -1271,12 +1442,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             return result;
         }
 
-        std::error_code ec;
-        std::filesystem::create_directories(LogDir(), ec);
-        std::filesystem::remove(InstallLogPath(), ec);
-        WriteInstallLog(L"============================================================");
-        WriteInstallLog(L" Install All");
-        WriteInstallLog(L"============================================================");
+        BeginOperationLog(L"Install All");
         LogInfo(L"OutputRoot: " + PackageRoot().wstring());
 
         LogStep(L"Verify artifacts in output");
@@ -1380,7 +1546,6 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         }
 
         LogStep(L"Configure registry and startup from output");
-        DeleteLegacySettings();
         const auto virtuaCamExe = std::filesystem::weakly_canonical(PackageRoot() / L"VirtuaCam.exe");
         const auto processExe = std::filesystem::weakly_canonical(PackageRoot() / L"VirtuaCamProcess.exe");
         const auto installDir = std::filesystem::weakly_canonical(PackageRoot());
@@ -1393,24 +1558,16 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         DeleteRegistryValue(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", L"VirtuaCam");
 
         if (options.skipWatcherService) {
-            RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"stop", L"VirtuaCamWatcher" }, { 0, 1060, 1062 }, 30000);
-            RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"delete", L"VirtuaCamWatcher" }, { 0, 1060 }, 30000);
+            std::wstring watcherDetail;
+            RemoveWatcherService(watcherDetail);
             LogSuccess(L"Configured HKLM\\SOFTWARE\\VirtuaCam without watcher service startup");
         } else {
-            const std::wstring binPath = L"\"" + processExe.wstring() + L"\" --service";
-            RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"stop", L"VirtuaCamWatcher" }, { 0, 1060, 1062 }, 30000);
-            RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"create", L"VirtuaCamWatcher", L"binPath=", binPath, L"start=", L"auto", L"DisplayName=", L"VirtuaCam Watcher" }, { 0, 1073 }, 30000);
-            RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"config", L"VirtuaCamWatcher", L"binPath=", binPath, L"start=", L"auto" }, { 0 }, 30000);
-            RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"description", L"VirtuaCamWatcher", L"Starts VirtuaCam when the virtual camera is accessed." }, { 0 }, 30000);
-            RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"start", L"VirtuaCamWatcher" }, { 0, 1056 }, 30000);
+            if (!ConfigureWatcherService(processExe, result.detail)) return result;
             LogSuccess(L"Configured HKLM\\SOFTWARE\\VirtuaCam and watcher service startup");
         }
 
-        WriteInstallLog(L"============================================================");
-        WriteInstallLog(L" INSTALL-ALL SUCCEEDED");
-        WriteInstallLog(L"============================================================");
         result.success = true;
-        result.detail = L"Drivers and software installed; log: " + InstallLogPath().wstring();
+        result.detail = L"Drivers and software installed";
         return result;
     }
 
@@ -1421,14 +1578,14 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             result.detail = L"Administrator rights required";
             return result;
         }
-        std::filesystem::create_directories(LogDir());
-        WriteInstallLog(L"============================================================");
-        WriteInstallLog(L" Uninstall All");
-        WriteInstallLog(L"============================================================");
-        RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"stop", L"VirtuaCamWatcher" }, { 0, 1060, 1062 }, 30000);
-        RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"delete", L"VirtuaCamWatcher" }, { 0, 1060 }, 30000);
+        BeginOperationLog(L"Uninstall All");
+        std::wstring watcherDetail;
+        RemoveWatcherService(watcherDetail);
         RemoveDriverPackagesForInstance(L"ROOT\\VIRTUACAMMIC\\0000");
         RemoveDriverPackagesForInstance(L"ROOT\\AVSHWS\\0000");
+        RunLoggedCommand(SystemToolPath(L"pnputil.exe"), { L"/remove-device", L"ROOT\\VIRTUACAMMIC\\0000" }, { 0, 2, 259, 3010, 3758096956u }, 60000);
+        RunLoggedCommand(SystemToolPath(L"pnputil.exe"), { L"/remove-device", L"ROOT\\AVSHWS\\0000" }, { 0, 2, 259, 3010, 3758096956u }, 60000);
+        RunLoggedCommand(SystemToolPath(L"pnputil.exe"), { L"/scan-devices" }, { 0 }, 60000);
         DeleteRegistryValue(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", L"VirtuaCamProcess");
         DeleteRegistryValue(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", L"VirtuaCam");
         RegDeleteTreeW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\VirtuaCam");
@@ -1466,7 +1623,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         return true;
     }
 
-    RunResult RunUninstallChecks(const std::filesystem::path& jsonPath)
+    RunResult RunUninstallChecks(const std::filesystem::path& jsonPath, bool writeJson = true)
     {
         RunResult result;
         result.mode = L"uninstall";
@@ -1485,17 +1642,12 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         service.detail = service.success ? L"VirtuaCamWatcher not running or missing" : service.detail;
         add(service);
 
-        CheckResult camera = CheckPnpDevice(L"Camera devnode removed", L"ROOT\\AVSHWS\\0000");
-        camera.success = !camera.success;
-        camera.detail = camera.success ? L"ROOT\\AVSHWS\\0000 not started or not present" : L"Camera devnode still present";
-        add(camera);
+        add(CheckPnpDeviceRemoved(L"Camera devnode removed", L"ROOT\\AVSHWS\\0000"));
+        add(CheckPnpDeviceRemoved(L"Mic devnode removed", L"ROOT\\VIRTUACAMMIC\\0000"));
 
-        CheckResult mic = CheckPnpDevice(L"Mic devnode removed", L"ROOT\\VIRTUACAMMIC\\0000");
-        mic.success = !mic.success;
-        mic.detail = mic.success ? L"ROOT\\VIRTUACAMMIC\\0000 not started or not present" : L"Mic devnode still present";
-        add(mic);
-
-        WriteRunJson(result);
+        if (writeJson) {
+            WriteRunJson(result);
+        }
         SetStatusText(result.success ? L"Uninstall checks passed." : L"Uninstall checks failed.");
         return result;
     }
@@ -1505,33 +1657,65 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         if (mode == L"verify-only") {
             return RunFirstRunChecks(mode, jsonPath);
         }
-        if (mode == L"install" || mode == L"uninstall") {
+        if (mode == L"install" || mode == L"uninstall" || mode == L"install-watcher-service" || mode == L"uninstall-watcher-service") {
             RunResult result;
             result.mode = mode;
             result.jsonPath = jsonPath.empty() ? DefaultJsonPath(mode) : jsonPath;
             result.success = true;
 
-            SetStatusText(mode == L"install" ? L"Installing VirtuaCam..." : L"Uninstalling VirtuaCam...");
-            CheckResult install = (mode == L"uninstall") ? RunNativeUninstall() : RunNativeInstall(options);
+            if (mode == L"install") {
+                SetStatusText(L"Installing VirtuaCam...");
+            } else if (mode == L"uninstall") {
+                SetStatusText(L"Uninstalling VirtuaCam...");
+            } else if (mode == L"install-watcher-service") {
+                SetStatusText(L"Installing VirtuaCam watcher service...");
+            } else {
+                SetStatusText(L"Uninstalling VirtuaCam watcher service...");
+            }
+
+            CheckResult install = { L"Mode", false, L"Unknown mode" };
+            if (mode == L"install") {
+                install = RunNativeInstall(options);
+            } else if (mode == L"uninstall") {
+                install = RunNativeUninstall();
+            } else if (mode == L"install-watcher-service") {
+                install = RunWatcherServiceInstall();
+            } else if (mode == L"uninstall-watcher-service") {
+                install = RunWatcherServiceUninstall();
+            }
             result.success = install.success;
             result.checks.push_back(install);
             AddCheckLine(result.checks.back());
 
             if (install.success && mode == L"install") {
-                RunResult verify = RunFirstRunChecks(L"install-verify", {});
+                RunResult verify = RunFirstRunChecks(L"install-verify", {}, false);
                 result.checks.insert(result.checks.end(), verify.checks.begin(), verify.checks.end());
             } else if (install.success && mode == L"uninstall") {
-                RunResult verify = RunUninstallChecks({});
+                RunResult verify = RunUninstallChecks({}, false);
                 result.success = result.success && verify.success;
                 result.checks.insert(result.checks.end(), verify.checks.begin(), verify.checks.end());
             }
 
-            WriteRunJson(result);
-            SetStatusText(std::format(
-                L"{} {}. Report: {}",
-                mode,
-                result.success ? L"succeeded" : L"failed",
-                result.jsonPath.wstring()));
+            if (result.success) {
+                DiscardOperationLog();
+                RemoveRunJson(result.jsonPath);
+                if (mode == L"install") {
+                    SetStatusText(L"Successfully installed drivers.");
+                } else if (mode == L"uninstall") {
+                    SetStatusText(L"Successfully uninstalled drivers.");
+                } else if (mode == L"install-watcher-service") {
+                    SetStatusText(L"Successfully installed watcher service.");
+                } else {
+                    SetStatusText(L"Successfully uninstalled watcher service.");
+                }
+            } else {
+                FlushOperationLog();
+                WriteRunJson(result);
+                SetStatusText(std::format(
+                    L"{} failed. Report: {}",
+                    mode,
+                    result.jsonPath.wstring()));
+            }
             return result;
         }
         RunResult result;
@@ -1713,28 +1897,26 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         GetClientRect(hwnd, &rc);
         const int pad = 16;
         const int buttonH = 34;
-        const int buttonW = 104;
-        const int statusH = 28;
-        const int checksH = 92;
+        const int buttonW = 120;
         const int debugH = 24;
         const int buttonY = rc.bottom - pad - buttonH;
         const int debugY = buttonY - 8 - debugH;
-        const int checksY = debugY - pad - checksH;
-        const int statusY = checksY - 8 - statusH;
-        const int previewBottom = std::max(pad + 120, statusY - pad);
+        const int previewBottom = std::max(pad + 120, debugY - pad);
 
         const int previewWidth = std::max(1, static_cast<int>(rc.right) - pad * 2);
         const int previewHeight = std::max(1, previewBottom - pad);
         MoveWindow(g_preview, pad, pad, previewWidth, previewHeight, TRUE);
-        MoveWindow(g_status, pad, statusY, rc.right - pad * 2, statusH, TRUE);
-        MoveWindow(g_checks, pad, checksY, rc.right - pad * 2, checksH, TRUE);
-        MoveWindow(g_debug, pad, debugY, std::min(260, std::max(1, static_cast<int>(rc.right) - pad * 2)), debugH, TRUE);
+        MoveWindow(g_status, 0, 0, 0, 0, FALSE);
+        MoveWindow(g_checks, 0, 0, 0, 0, FALSE);
+        MoveWindow(g_debug, pad, debugY, std::min(280, std::max(1, static_cast<int>(rc.right) - pad * 2)), debugH, TRUE);
 
-        int x = pad;
+        constexpr int buttonGap = 8;
+        const int buttonCount = 4;
+        int x = std::max(pad, static_cast<int>(rc.right) - pad - (buttonW * buttonCount) - (buttonGap * (buttonCount - 1)));
         for (int id : { IDC_INSTALL, IDC_UNINSTALL, IDC_VERIFY, IDC_CLOSE }) {
             HWND child = GetDlgItem(hwnd, id);
             MoveWindow(child, x, buttonY, buttonW, buttonH, TRUE);
-            x += buttonW + 8;
+            x += buttonW + buttonGap;
         }
     }
 
@@ -1749,20 +1931,18 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
     {
         ClearChecks();
         if ((mode == L"install" || mode == L"uninstall") && !IsAdministrator()) {
-            if (RelaunchElevated(mode == L"install" ? L"--install" : L"--uninstall")) {
-                SetStatusText(mode == L"install" ? L"Elevated install window opened." : L"Elevated uninstall window opened.");
-            } else {
+            if (!RelaunchElevated(mode == L"install" ? L"--install" : L"--uninstall")) {
                 SetStatusText(L"Elevation was cancelled or failed.");
             }
             return;
         }
         const SetupOptions options;
         const RunResult result = RunMode(mode, {}, options);
-        SetStatusText(std::format(
-            L"{} {}. Report: {}",
-            mode,
-            result.success ? L"succeeded" : L"failed",
-            result.jsonPath.wstring()));
+        if (result.success && mode == L"install") {
+            MessageBoxW(g_hwnd, L"Successfully installed drivers", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
+        } else if (result.success && mode == L"uninstall") {
+            MessageBoxW(g_hwnd, L"Successfully uninstalled drivers", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
+        }
     }
 
     LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1784,7 +1964,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             g_status = CreateWindowW(
                 L"STATIC",
                 L"Preview ready. Install, uninstall, or verify VirtuaCam.",
-                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                WS_CHILD | SS_LEFT,
                 0, 0, 0, 0,
                 hwnd,
                 ControlId(IDC_STATUS),
@@ -1793,7 +1973,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             g_checks = CreateWindowW(
                 L"LISTBOX",
                 nullptr,
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
+                WS_CHILD | WS_BORDER | WS_TABSTOP | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
                 0, 0, 0, 0,
                 hwnd,
                 ControlId(IDC_CHECKS),
@@ -1806,13 +1986,13 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             g_debug = CreateWindowW(
                 L"BUTTON",
                 L"&Debug next session",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 0, 0,
                 hwnd,
                 ControlId(IDC_DEBUG),
                 g_instance,
                 nullptr);
-            SendMessageW(g_debug, BM_SETCHECK, ReadSettingsDword(L"StartDebugMode", 0) ? BST_CHECKED : BST_UNCHECKED, 0);
+            g_debugChecked = ReadSettingsDword(L"StartDebugMode", 0);
             for (int id : { IDC_STATUS, IDC_CHECKS, IDC_INSTALL, IDC_UNINSTALL, IDC_VERIFY, IDC_CLOSE, IDC_DEBUG }) {
                 HWND child = GetDlgItem(hwnd, id);
                 if (child && g_uiFont) {
@@ -1837,9 +2017,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             case IDC_CLOSE: DestroyWindow(hwnd); return 0;
             case IDC_DEBUG:
             {
-                const bool enabled = SendMessageW(g_debug, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                if (WriteSettingsDword(L"StartDebugMode", enabled ? 1 : 0)) {
-                    SetStatusText(enabled ? L"Debug mode will start next session." : L"Debug mode disabled for next session.");
+                g_debugChecked = !g_debugChecked;
+                InvalidateRect(g_debug, nullptr, TRUE);
+                if (WriteSettingsDword(L"StartDebugMode", g_debugChecked ? 1 : 0)) {
+                    SetStatusText(g_debugChecked ? L"Debug mode will start next session." : L"Debug mode disabled for next session.");
                 } else {
                     SetStatusText(L"Could not save debug setting.");
                 }
@@ -1861,6 +2042,44 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             SetBkColor(dc, RGB(24, 24, 28));
             SetTextColor(dc, RGB(242, 242, 242));
             return reinterpret_cast<LRESULT>(g_panelBrush);
+        }
+        case WM_CTLCOLORBTN:
+        {
+            if (reinterpret_cast<HWND>(lParam) == g_debug) {
+                HDC dc = reinterpret_cast<HDC>(wParam);
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, RGB(242, 242, 242));
+                return reinterpret_cast<LRESULT>(g_windowBrush);
+            }
+            break;
+        }
+        case WM_DRAWITEM:
+        {
+            const auto draw = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            if (draw && draw->CtlID == IDC_DEBUG) {
+                FillRect(draw->hDC, &draw->rcItem, g_windowBrush);
+                SetBkMode(draw->hDC, TRANSPARENT);
+                SetTextColor(draw->hDC, RGB(242, 242, 242));
+
+                RECT box = draw->rcItem;
+                box.left += 2;
+                box.top += 4;
+                box.right = box.left + 16;
+                box.bottom = box.top + 16;
+                DrawFrameControl(draw->hDC, &box, DFC_BUTTON, DFCS_BUTTONCHECK | (g_debugChecked ? DFCS_CHECKED : 0));
+
+                RECT text = draw->rcItem;
+                text.left = box.right + 8;
+                DrawTextW(draw->hDC, L"Debug next session", -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+                if ((draw->itemState & ODS_FOCUS) != 0) {
+                    RECT focus = draw->rcItem;
+                    focus.left = text.left - 3;
+                    DrawFocusRect(draw->hDC, &focus);
+                }
+                return TRUE;
+            }
+            break;
         }
         case WM_KEYDOWN:
             if (wParam == VK_ESCAPE) {
@@ -1975,18 +2194,35 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     if (HasArg(args, L"--verify-only") || HasArg(args, L"/verify")) mode = L"verify-only";
     if (HasArg(args, L"--install") || HasArg(args, L"/install")) mode = L"install";
     if (HasArg(args, L"--uninstall") || HasArg(args, L"/uninstall")) mode = L"uninstall";
+    if (HasArg(args, L"--install-watcher-service") || HasArg(args, L"/install-watcher-service")) mode = L"install-watcher-service";
+    if (HasArg(args, L"--uninstall-watcher-service") || HasArg(args, L"/uninstall-watcher-service")) mode = L"uninstall-watcher-service";
 
     int exitCode = 0;
     if (!mode.empty()) {
         const RunResult result = RunMode(mode, GetJsonArg(args), options);
         exitCode = result.success ? 0 : 1;
         if (!quiet) {
-            std::wstring message = std::format(
-                L"{} {}\n\nReport:\n{}",
-                mode,
-                result.success ? L"succeeded" : L"failed",
-                result.jsonPath.wstring());
-            MessageBoxW(nullptr, message.c_str(), L"VirtuaCam Setup", result.success ? MB_OK | MB_ICONINFORMATION : MB_OK | MB_ICONWARNING);
+            if (result.success && mode == L"install") {
+                MessageBoxW(nullptr, L"Successfully installed drivers", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
+            } else if (result.success && mode == L"uninstall") {
+                MessageBoxW(nullptr, L"Successfully uninstalled drivers", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
+            } else if (result.success && mode == L"install-watcher-service") {
+                MessageBoxW(nullptr, L"Successfully installed watcher service", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
+            } else if (result.success && mode == L"uninstall-watcher-service") {
+                MessageBoxW(nullptr, L"Successfully uninstalled watcher service", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
+            } else if (result.success) {
+                std::wstring message = std::format(
+                    L"{} succeeded\n\nReport:\n{}",
+                    mode,
+                    result.jsonPath.wstring());
+                MessageBoxW(nullptr, message.c_str(), L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
+            } else {
+                std::wstring message = std::format(
+                    L"{} failed\n\nReport:\n{}",
+                    mode,
+                    result.jsonPath.wstring());
+                MessageBoxW(nullptr, message.c_str(), L"VirtuaCam Setup", MB_OK | MB_ICONWARNING);
+            }
         }
     } else {
         exitCode = RunUi();

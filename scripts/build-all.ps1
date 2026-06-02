@@ -58,6 +58,91 @@ function Invoke-NativeProcess {
     }
 }
 
+function Stop-VirtuaCamBuildRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$PackageRoot
+    )
+
+    $service = Get-Service -Name "VirtuaCamWatcher" -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -ne "Stopped") {
+        Write-Info "Stopping VirtuaCamWatcher before cleaning output."
+        try {
+            Stop-Service -Name "VirtuaCamWatcher" -Force -ErrorAction Stop
+            $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(10))
+        }
+        catch {
+            Write-Info "Could not stop VirtuaCamWatcher: $($_.Exception.Message)"
+        }
+    }
+
+    $packageRootFull = [System.IO.Path]::GetFullPath($PackageRoot).TrimEnd('\')
+    $processNames = @("VirtuaCam", "VirtuaCamProcess", "VirtuaCamSetup")
+    $processes = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue)
+    foreach ($process in $processes) {
+        $path = $null
+        try {
+            $path = [string]$process.MainModule.FileName
+        }
+        catch {
+            try {
+                $path = (Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)" -ErrorAction Stop).ExecutablePath
+            }
+            catch {
+                $path = $null
+            }
+        }
+
+        $isPackageProcess = $true
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            $pathFull = [System.IO.Path]::GetFullPath($path)
+            $isPackageProcess = $pathFull.StartsWith($packageRootFull + "\", [System.StringComparison]::OrdinalIgnoreCase)
+        }
+
+        if (-not $isPackageProcess) {
+            Write-Info ("Leaving unrelated process running: {0} ({1})" -f $process.ProcessName, $process.Id)
+            continue
+        }
+
+        Write-Info ("Stopping runtime process before cleaning output: {0} ({1})" -f $process.ProcessName, $process.Id)
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+
+    foreach ($process in $processes) {
+        Wait-Process -Id $process.Id -Timeout 5 -ErrorAction SilentlyContinue
+    }
+
+    Start-Sleep -Milliseconds 500
+}
+
+function Remove-PathWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$PackageRoot,
+        [int]$Retries = 8,
+        [int]$DelayMilliseconds = 750
+    )
+
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return
+        }
+
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        }
+        catch {
+            if ($attempt -ge $Retries) {
+                Fail "Could not remove '$Path' after stopping VirtuaCam runtime. Last error: $($_.Exception.Message)"
+            }
+
+            Write-Info ("Output cleanup blocked; retry {0}/{1}: {2}" -f $attempt, $Retries, $_.Exception.Message)
+            Stop-VirtuaCamBuildRuntime -PackageRoot $PackageRoot
+            Start-Sleep -Milliseconds $DelayMilliseconds
+        }
+    }
+}
+
 function Get-VsWherePath {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
     if (Test-Path -LiteralPath $vswhere) { return $vswhere }
@@ -324,8 +409,9 @@ $VcpkgRoot = [System.IO.Path]::GetFullPath($VcpkgRoot)
 $toolchainFile = Join-Path $VcpkgRoot "scripts\buildsystems\vcpkg.cmake"
 
 Write-Step "Prepare output layout"
+Stop-VirtuaCamBuildRuntime -PackageRoot $OutputRoot
 if ($Clean -and (Test-Path -LiteralPath $OutputRoot)) {
-    Remove-Item -LiteralPath $OutputRoot -Recurse -Force
+    Remove-PathWithRetry -Path $OutputRoot -PackageRoot $OutputRoot
 }
 $null = New-Item -ItemType Directory -Force -Path $OutputRoot, $driverPackageTmp, $audioDriverPackageTmp
 Write-Info "OutputRoot: $OutputRoot"
@@ -349,12 +435,6 @@ if (-not (Test-Path -LiteralPath $VcpkgRoot)) {
 }
 if (-not (Test-Path -LiteralPath $toolchainFile)) {
     Fail "vcpkg toolchain file missing: $toolchainFile"
-}
-
-foreach ($processName in @("VirtuaCam", "VirtuaCamProcess", "DirectPortBroker")) {
-    Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
-        Stop-Process -Id $_.Id -Force
-    }
 }
 
 if ($Clean -and (Test-Path -LiteralPath $softwareBuildDir)) {
