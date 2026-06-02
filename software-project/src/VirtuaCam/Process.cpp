@@ -456,7 +456,8 @@ void PublishDirectPortProducerStatus(
     HRESULT lastHRESULT,
     UINT64 staleCount = 0,
     UINT64 sourceCallbackQpc = 0,
-    UINT64 droppedCallbackSampleCount = 0)
+    UINT64 droppedCallbackSampleCount = 0,
+    bool contentDuplicate = false)
 {
     if (!mapping.view) {
         return;
@@ -471,7 +472,7 @@ void PublishDirectPortProducerStatus(
     const UINT64 sampleAgeQpcDelta =
         (sourceCallbackQpc != 0 && nowQpc >= sourceCallbackQpc) ? (nowQpc - sourceCallbackQpc) : 0;
 
-    if (fenceValue == mapping.lastPublishedFenceValue && mapping.frameCount > 0) {
+    if (((fenceValue == mapping.lastPublishedFenceValue) || contentDuplicate) && mapping.frameCount > 0) {
         ++mapping.duplicateCount;
     }
     if (staleCount > mapping.staleCount) {
@@ -2790,7 +2791,14 @@ namespace BuiltInCameraProducer
             if (g_pManifestView) {
                 InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
             }
-            PublishDirectPortProducerStatus(g_statusMapping, newFenceValue, S_OK);
+            PublishDirectPortProducerStatus(
+                g_statusMapping,
+                newFenceValue,
+                S_OK,
+                0,
+                0,
+                0,
+                true);
             if (!g_loggedFirstFrame) {
                 VirtuaCamLog::LogLine(std::format(
                     L"First producer frame: type=image size={}x{} frameValue={}",

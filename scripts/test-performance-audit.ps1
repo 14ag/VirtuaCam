@@ -592,6 +592,8 @@ Assert-Contains -Path $processCpp -Pattern "DroppedSamples\(\)" -Message "Async 
 Assert-Contains -Path $processCpp -Pattern "g_sourceReaderCallback->DroppedSamples\(\)" -Message "Producer status must publish async dropped-sample count."
 Assert-Contains -Path $processCpp -Pattern "m_latestCallbackQpc" -Message "Async Source Reader callback must capture producer-side QPC for sample age telemetry."
 Assert-Contains -Path $processCpp -Pattern "sampleAgeQpcDelta" -Message "Producer status must compute callback-to-publish sample age."
+Assert-Contains -Path $processCpp -Pattern "contentDuplicate" -Message "Producer status must support explicit unchanged-content telemetry."
+Assert-Contains -Path $processCpp -Pattern "g_staticImageMode[\s\S]*PublishDirectPortProducerStatus\([\s\S]*true\);" -Message "Static image mode must mark republished frames as duplicate content."
 Assert-Contains -Path $processCpp -Pattern "SelectRgb32MediaType" -Message "Camera/file producers must validate RGB32 media type before BGRA upload."
 $auditMetrics.producer.validatesRgb32 = $true
 Assert-Contains -Path $processCpp -Pattern "subtype != MFVideoFormat_RGB32" -Message "Camera/file producers must reject non-RGB32 current media types."
