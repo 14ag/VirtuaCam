@@ -7,6 +7,11 @@ param(
     [string]$FrameTracePath = "",
     [string]$ReferencePpmPath = "",
     [string]$CapturedPpmPath = "",
+    [string]$WriteQualityPatternPpmPath = "",
+    [ValidateSet("ColorBars", "ChromaChecker")]
+    [string]$QualityPattern = "ColorBars",
+    [int]$QualityPatternWidth = 640,
+    [int]$QualityPatternHeight = 360,
     [double]$MaxFreezeEventRate = -1.0,
     [double]$MaxFreezeTimeRatio = -1.0,
     [double]$MaxP95LatencyMs = -1.0,
@@ -228,6 +233,77 @@ function Read-PpmP6 {
     }
 }
 
+function Write-PpmP6 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][int]$Width,
+        [Parameter(Mandatory = $true)][int]$Height,
+        [Parameter(Mandatory = $true)][byte[]]$Data
+    )
+
+    if ($Width -le 0 -or $Height -le 0) { throw "[FAIL] Invalid PPM dimensions." }
+    $required = $Width * $Height * 3
+    if ($Data.Count -ne $required) { throw "[FAIL] PPM payload size mismatch." }
+
+    $parent = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+
+    $header = [Text.Encoding]::ASCII.GetBytes("P6`n$Width $Height`n255`n")
+    $bytes = New-Object byte[] ($header.Count + $Data.Count)
+    [Buffer]::BlockCopy($header, 0, $bytes, 0, $header.Count)
+    [Buffer]::BlockCopy($Data, 0, $bytes, $header.Count, $Data.Count)
+    [IO.File]::WriteAllBytes($Path, $bytes)
+}
+
+function New-QualityPatternPpmData {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet("ColorBars", "ChromaChecker")][string]$Pattern,
+        [Parameter(Mandatory = $true)][int]$Width,
+        [Parameter(Mandatory = $true)][int]$Height
+    )
+
+    if ($Width -le 0 -or $Height -le 0) { throw "[FAIL] Invalid quality pattern dimensions." }
+    $data = New-Object byte[] ($Width * $Height * 3)
+    $bars = @(
+        [byte[]]@(255, 255, 255),
+        [byte[]]@(255, 255, 0),
+        [byte[]]@(0, 255, 255),
+        [byte[]]@(0, 255, 0),
+        [byte[]]@(255, 0, 255),
+        [byte[]]@(255, 0, 0),
+        [byte[]]@(0, 0, 255),
+        [byte[]]@(0, 0, 0)
+    )
+    $checker = @(
+        [byte[]]@(255, 0, 0),
+        [byte[]]@(0, 0, 255),
+        [byte[]]@(0, 255, 0),
+        [byte[]]@(255, 0, 255)
+    )
+
+    for ($y = 0; $y -lt $Height; $y++) {
+        for ($x = 0; $x -lt $Width; $x++) {
+            if ($Pattern -eq "ColorBars") {
+                $barIndex = [Math]::Min($bars.Count - 1, [int][Math]::Floor(($x * $bars.Count) / $Width))
+                $rgb = $bars[$barIndex]
+            } else {
+                $tileX = [int][Math]::Floor($x / 16)
+                $tileY = [int][Math]::Floor($y / 16)
+                $rgb = $checker[($tileX + ($tileY * 2)) % $checker.Count]
+            }
+
+            $offset = (($y * $Width) + $x) * 3
+            $data[$offset] = $rgb[0]
+            $data[$offset + 1] = $rgb[1]
+            $data[$offset + 2] = $rgb[2]
+        }
+    }
+
+    return $data
+}
+
 function Measure-PpmPsnr {
     param(
         [Parameter(Mandatory = $true)][string]$ReferencePath,
@@ -353,12 +429,7 @@ if ($summarySelfTest.average -ne 25 -or $summarySelfTest.max -ne 40) {
 $ppmSelfTestDir = Join-Path $ArtifactRoot "_metric-selftest"
 New-Item -ItemType Directory -Path $ppmSelfTestDir -Force | Out-Null
 $ppmSelfTestPath = Join-Path $ppmSelfTestDir "bars.ppm"
-$ppmHeader = [Text.Encoding]::ASCII.GetBytes("P6`n2 1`n255`n")
-$ppmPixels = [byte[]]@(255, 0, 0, 0, 255, 0)
-$ppmBytes = New-Object byte[] ($ppmHeader.Count + $ppmPixels.Count)
-[Buffer]::BlockCopy($ppmHeader, 0, $ppmBytes, 0, $ppmHeader.Count)
-[Buffer]::BlockCopy($ppmPixels, 0, $ppmBytes, $ppmHeader.Count, $ppmPixels.Count)
-[IO.File]::WriteAllBytes($ppmSelfTestPath, $ppmBytes)
+Write-PpmP6 -Path $ppmSelfTestPath -Width 2 -Height 1 -Data ([byte[]]@(255, 0, 0, 0, 255, 0))
 $ssimSelfTest = Measure-PpmSsimY -ReferencePath $ppmSelfTestPath -CapturedPath $ppmSelfTestPath
 if ([Math]::Abs($ssimSelfTest.ssimY - 1.0) -gt 0.0000001) {
     throw "[FAIL] SSIM-Y metric self-test failed."
@@ -366,6 +437,18 @@ if ([Math]::Abs($ssimSelfTest.ssimY - 1.0) -gt 0.0000001) {
 $colorRangeSelfTest = Measure-PpmColorRange -Path $ppmSelfTestPath
 if ($colorRangeSelfTest.maxR -ne 255 -or $colorRangeSelfTest.maxG -ne 255 -or $colorRangeSelfTest.maxB -ne 0) {
     throw "[FAIL] color-range metric self-test failed."
+}
+$patternSelfTestPath = Join-Path $ppmSelfTestDir "pattern.ppm"
+Write-PpmP6 `
+    -Path $patternSelfTestPath `
+    -Width 64 `
+    -Height 32 `
+    -Data (New-QualityPatternPpmData -Pattern "ChromaChecker" -Width 64 -Height 32)
+$patternRangeSelfTest = Measure-PpmColorRange -Path $patternSelfTestPath
+if ($patternRangeSelfTest.minR -ne 0 -or $patternRangeSelfTest.maxR -ne 255 -or
+    $patternRangeSelfTest.minG -ne 0 -or $patternRangeSelfTest.maxG -ne 255 -or
+    $patternRangeSelfTest.minB -ne 0 -or $patternRangeSelfTest.maxB -ne 255) {
+    throw "[FAIL] quality pattern self-test failed."
 }
 Remove-Item -LiteralPath $ppmSelfTestDir -Recurse -Force
 
@@ -389,6 +472,13 @@ $auditMetrics = [ordered]@{
     runtimeSeconds = [int]$RuntimeSeconds
     noDebugPpmDumpCount = $null
     noDebugPpmDumpPass = $null
+    qualityPattern = [ordered]@{
+        written = $false
+        path = $null
+        pattern = $QualityPattern
+        width = $QualityPatternWidth
+        height = $QualityPatternHeight
+    }
     thresholds = [ordered]@{
         maxFreezeEventRate = $MaxFreezeEventRate
         maxFreezeTimeRatio = $MaxFreezeTimeRatio
@@ -552,6 +642,23 @@ $auditMetrics.freeze.staleFrameCounterPresent = $auditMetrics.producer.hasStaleC
 
 $driverText = Read-Text -Path $driverBridgeCpp
 $auditMetrics.driverBridge.legacyFallbackPreserved = ($driverText -match "UploadMappedFrame\(mapped\)")
+
+if (-not [string]::IsNullOrWhiteSpace($WriteQualityPatternPpmPath)) {
+    if (-not [System.IO.Path]::IsPathRooted($WriteQualityPatternPpmPath)) {
+        $WriteQualityPatternPpmPath = Join-Path $RepoRoot $WriteQualityPatternPpmPath
+    }
+    $patternData = New-QualityPatternPpmData `
+        -Pattern $QualityPattern `
+        -Width $QualityPatternWidth `
+        -Height $QualityPatternHeight
+    Write-PpmP6 `
+        -Path $WriteQualityPatternPpmPath `
+        -Width $QualityPatternWidth `
+        -Height $QualityPatternHeight `
+        -Data $patternData
+    $auditMetrics.qualityPattern.written = $true
+    $auditMetrics.qualityPattern.path = $WriteQualityPatternPpmPath
+}
 
 if (-not [string]::IsNullOrWhiteSpace($FrameTracePath)) {
     if (-not [System.IO.Path]::IsPathRooted($FrameTracePath)) {
@@ -728,6 +835,10 @@ $md = @(
     "- Generated UTC: $($auditMetrics.generatedAtUtc)",
     "- Target FPS: $($auditMetrics.targetFps)",
     "- Runtime seconds: $($auditMetrics.runtimeSeconds)",
+    "- Quality pattern written: $($auditMetrics.qualityPattern.written)",
+    "- Quality pattern path: $($auditMetrics.qualityPattern.path)",
+    "- Quality pattern kind: $($auditMetrics.qualityPattern.pattern)",
+    "- Quality pattern size: $($auditMetrics.qualityPattern.width)x$($auditMetrics.qualityPattern.height)",
     "- Max freeze event rate threshold: $($auditMetrics.thresholds.maxFreezeEventRate)",
     "- Max freeze time ratio threshold: $($auditMetrics.thresholds.maxFreezeTimeRatio)",
     "- Max P95 latency ms threshold: $($auditMetrics.thresholds.maxP95LatencyMs)",
