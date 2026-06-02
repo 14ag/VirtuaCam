@@ -4,7 +4,9 @@ param(
     [switch]$SkipRuntime,
     [int]$RuntimeSeconds = 3,
     [string]$ArtifactRoot = "",
-    [string]$FrameTracePath = ""
+    [string]$FrameTracePath = "",
+    [string]$ReferencePpmPath = "",
+    [string]$CapturedPpmPath = ""
 )
 
 Set-StrictMode -Version Latest
@@ -166,6 +168,89 @@ function Measure-Intervals {
     return Measure-NumericSummary -Values ([double[]]$intervals.ToArray())
 }
 
+function Read-PpmToken {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][ref]$Offset
+    )
+
+    while ($Offset.Value -lt $Bytes.Count) {
+        $b = $Bytes[$Offset.Value]
+        if ($b -eq 35) {
+            while ($Offset.Value -lt $Bytes.Count -and $Bytes[$Offset.Value] -notin 10, 13) { $Offset.Value++ }
+            continue
+        }
+        if ($b -notin 9, 10, 13, 32) { break }
+        $Offset.Value++
+    }
+
+    $start = $Offset.Value
+    while ($Offset.Value -lt $Bytes.Count -and $Bytes[$Offset.Value] -notin 9, 10, 13, 32) {
+        $Offset.Value++
+    }
+    if ($Offset.Value -le $start) { return "" }
+    return [Text.Encoding]::ASCII.GetString($Bytes, $start, $Offset.Value - $start)
+}
+
+function Read-PpmP6 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    [int]$offset = 0
+    $magic = Read-PpmToken -Bytes $bytes -Offset ([ref]$offset)
+    if ($magic -ne "P6") { throw "[FAIL] Unsupported PPM format in $Path. Expected P6." }
+    $width = [int](Read-PpmToken -Bytes $bytes -Offset ([ref]$offset))
+    $height = [int](Read-PpmToken -Bytes $bytes -Offset ([ref]$offset))
+    $max = [int](Read-PpmToken -Bytes $bytes -Offset ([ref]$offset))
+    if ($width -le 0 -or $height -le 0 -or $max -ne 255) {
+        throw "[FAIL] Invalid PPM header in $Path."
+    }
+    if ($offset -lt $bytes.Count -and $bytes[$offset] -in 9, 10, 13, 32) {
+        $offset++
+    }
+    $required = $width * $height * 3
+    if (($bytes.Count - $offset) -lt $required) {
+        throw "[FAIL] Short PPM payload in $Path."
+    }
+
+    $payload = New-Object byte[] $required
+    [Array]::Copy($bytes, $offset, $payload, 0, $required)
+    return [ordered]@{
+        width = $width
+        height = $height
+        data = $payload
+    }
+}
+
+function Measure-PpmPsnr {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReferencePath,
+        [Parameter(Mandatory = $true)][string]$CapturedPath
+    )
+
+    $reference = Read-PpmP6 -Path $ReferencePath
+    $captured = Read-PpmP6 -Path $CapturedPath
+    if ($reference.width -ne $captured.width -or $reference.height -ne $captured.height) {
+        throw "[FAIL] PPM dimensions differ: $ReferencePath vs $CapturedPath"
+    }
+
+    $sumSquaredError = 0.0
+    for ($i = 0; $i -lt $reference.data.Count; $i++) {
+        $delta = [double]$reference.data[$i] - [double]$captured.data[$i]
+        $sumSquaredError += $delta * $delta
+    }
+
+    $mse = $sumSquaredError / $reference.data.Count
+    $psnr = if ($mse -le 0.0) { 99.0 } else { 10.0 * [Math]::Log10((255.0 * 255.0) / $mse) }
+    return [ordered]@{
+        width = $reference.width
+        height = $reference.height
+        comparedChannelCount = $reference.data.Count
+        meanSquaredError = $mse
+        psnrDb = $psnr
+    }
+}
+
 $freezeSelfTest = Measure-FrameFreezeMetrics -FrameValues ([UInt64[]]@(1, 2, 2, 2, 3, 4, 4)) -FrameIntervalMs 33
 if ($freezeSelfTest.duplicateFrameCount -ne 3 -or $freezeSelfTest.freezeEventCount -ne 2) {
     throw "[FAIL] freeze metric self-test failed."
@@ -242,6 +327,9 @@ $auditMetrics = [ordered]@{
     quality = [ordered]@{
         ssimYMeasured = $false
         psnrMeasured = $false
+        psnrDb = $null
+        meanSquaredError = $null
+        comparedChannelCount = 0
         note = "Matched-frame SSIM/PSNR hooks require reference and captured frame pairs; cadence/freeze metrics are available from frame traces."
     }
 }
@@ -370,6 +458,27 @@ if (-not [string]::IsNullOrWhiteSpace($FrameTracePath)) {
     }
 }
 
+if (-not [string]::IsNullOrWhiteSpace($ReferencePpmPath) -or -not [string]::IsNullOrWhiteSpace($CapturedPpmPath)) {
+    if ([string]::IsNullOrWhiteSpace($ReferencePpmPath) -or [string]::IsNullOrWhiteSpace($CapturedPpmPath)) {
+        throw "[FAIL] Provide both -ReferencePpmPath and -CapturedPpmPath."
+    }
+    if (-not [System.IO.Path]::IsPathRooted($ReferencePpmPath)) {
+        $ReferencePpmPath = Join-Path $RepoRoot $ReferencePpmPath
+    }
+    if (-not [System.IO.Path]::IsPathRooted($CapturedPpmPath)) {
+        $CapturedPpmPath = Join-Path $RepoRoot $CapturedPpmPath
+    }
+    if (-not (Test-Path -LiteralPath $ReferencePpmPath)) { throw "[FAIL] Reference PPM not found: $ReferencePpmPath" }
+    if (-not (Test-Path -LiteralPath $CapturedPpmPath)) { throw "[FAIL] Captured PPM not found: $CapturedPpmPath" }
+
+    $psnr = Measure-PpmPsnr -ReferencePath $ReferencePpmPath -CapturedPath $CapturedPpmPath
+    $auditMetrics.quality.psnrMeasured = $true
+    $auditMetrics.quality.psnrDb = $psnr.psnrDb
+    $auditMetrics.quality.meanSquaredError = $psnr.meanSquaredError
+    $auditMetrics.quality.comparedChannelCount = $psnr.comparedChannelCount
+    $auditMetrics.quality.note = "PSNR measured from P6 PPM pair."
+}
+
 if (-not $SkipBuild) {
     $cmake = Get-Command cmake -ErrorAction SilentlyContinue
     if (-not $cmake) {
@@ -440,6 +549,8 @@ $md = @(
     "- Max latency ms: $($auditMetrics.latency.maxMs)",
     "- SSIM-Y measured: $($auditMetrics.quality.ssimYMeasured)",
     "- PSNR measured: $($auditMetrics.quality.psnrMeasured)",
+    "- PSNR dB: $($auditMetrics.quality.psnrDb)",
+    "- MSE: $($auditMetrics.quality.meanSquaredError)",
     "",
     "Note: $($auditMetrics.freeze.note)"
 )
