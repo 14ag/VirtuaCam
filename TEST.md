@@ -85,7 +85,7 @@ Parse changed or key PowerShell files first. Then run:
 .\scripts\test-driver-pnp-contract.ps1
 .\scripts\test-ai-window-cli.ps1
 .\scripts\test-capture-source-menu-contract.ps1
-.\scripts\build-all.ps1 -Clean
+.\scripts\build-all.ps1
 ```
 
 Pass criteria:

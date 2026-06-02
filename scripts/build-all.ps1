@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [switch]$Clean = $true,
     [string]$BuildConfig = "Release",
     [string]$VcpkgRoot = ""
 )
@@ -410,7 +409,7 @@ $toolchainFile = Join-Path $VcpkgRoot "scripts\buildsystems\vcpkg.cmake"
 
 Write-Step "Prepare output layout"
 Stop-VirtuaCamBuildRuntime -PackageRoot $OutputRoot
-if ($Clean -and (Test-Path -LiteralPath $OutputRoot)) {
+if (Test-Path -LiteralPath $OutputRoot) {
     Remove-PathWithRetry -Path $OutputRoot -PackageRoot $OutputRoot
 }
 $null = New-Item -ItemType Directory -Force -Path $OutputRoot, $driverPackageTmp, $audioDriverPackageTmp
@@ -437,10 +436,10 @@ if (-not (Test-Path -LiteralPath $toolchainFile)) {
     Fail "vcpkg toolchain file missing: $toolchainFile"
 }
 
-if ($Clean -and (Test-Path -LiteralPath $softwareBuildDir)) {
+if (Test-Path -LiteralPath $softwareBuildDir) {
     Remove-Item -LiteralPath $softwareBuildDir -Recurse -Force
 }
-if ($Clean -and (Test-Path -LiteralPath $wizardBuildDir)) {
+if (Test-Path -LiteralPath $wizardBuildDir) {
     Remove-Item -LiteralPath $wizardBuildDir -Recurse -Force
 }
 $null = New-Item -ItemType Directory -Force -Path $softwareBuildDir
@@ -544,7 +543,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Step "Build driver"
 
-$targets = if ($Clean) { "Clean;Build" } else { "Build" }
+$targets = "Clean;Build"
 Invoke-NativeProcess -FilePath $msbuild -Arguments @(
     $driverSolutionPath,
     "/m",

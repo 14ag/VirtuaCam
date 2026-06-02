@@ -55,7 +55,7 @@ This script is the only build entrypoint. It always stages the installable packa
 Useful variants stay on the same script:
 
 ```powershell
-.\scripts\build-all.ps1 -Clean
+.\scripts\build-all.ps1
 ```
 
 Clean is the default behavior. The script always builds and stages the full package.
