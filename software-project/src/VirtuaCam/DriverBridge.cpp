@@ -770,6 +770,7 @@ HRESULT DriverBridge::QueueReadbackAndMapReady(
         }
     }
 
+    ++m_readbackNotReadyCount;
     return DXGI_ERROR_WAS_STILL_DRAWING;
 }
 
@@ -1095,7 +1096,7 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
     }
 
     VirtuaCamLog::LogLine(std::format(
-        L"{} frame={} hw={} client={} queuedMappings={} queuedBytes={} completed={} completedFrames={} skipped={} lastFill=0x{:08X} stride={} widthBytes={} required={} byteCount={} remaining={} lastSetLen={} setOk={} setReject={} rejectReason={} outFmt={} uploadMask=0x{:08X} lastSetFmt={} staleReject={} busyReject={} lastAcceptedFrame={} lastAcceptedQpc={} lastAcceptedTime={} returned={}",
+        L"{} frame={} hw={} client={} queuedMappings={} queuedBytes={} completed={} completedFrames={} skipped={} readbackNotReady={} lastFill=0x{:08X} stride={} widthBytes={} required={} byteCount={} remaining={} lastSetLen={} setOk={} setReject={} rejectReason={} outFmt={} uploadMask=0x{:08X} lastSetFmt={} staleReject={} busyReject={} lastAcceptedFrame={} lastAcceptedQpc={} lastAcceptedTime={} returned={}",
         prefix ? prefix : L"Driver status",
         frameSequence,
         status.HardwareState,
@@ -1105,6 +1106,7 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
         status.NumMappingsCompleted,
         status.CompletedFrameCount,
         status.NumFramesSkipped,
+        m_readbackNotReadyCount,
         status.LastFillStatus,
         status.LastFillStride,
         status.LastFillWidthBytes,

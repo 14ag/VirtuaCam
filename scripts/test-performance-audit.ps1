@@ -120,6 +120,8 @@ Assert-Contains -Path $driverBridgeCpp -Pattern "kDriverReadbackPoolSize\s*=\s*3
 Assert-Contains -Path $driverBridgeCpp -Pattern "QueueReadbackAndMapReady" -Message "DriverBridge must queue GPU readbacks through the staging pool."
 Assert-Contains -Path $driverBridgeCpp -Pattern "D3D11_MAP_FLAG_DO_NOT_WAIT" -Message "DriverBridge readback pool must avoid blocking Map when possible."
 Assert-Contains -Path $driverBridgeCpp -Pattern "return DXGI_ERROR_WAS_STILL_DRAWING" -Message "DriverBridge must report readback-not-ready distinctly from driver warmup retry."
+Assert-Contains -Path $driverBridgeCpp -Pattern "m_readbackNotReadyCount" -Message "DriverBridge must count readback-not-ready events separately."
+Assert-Contains -Path $driverBridgeCpp -Pattern "readbackNotReady=" -Message "DriverBridge status logs must expose readback-not-ready count."
 Assert-Contains -Path (Join-Path $RepoRoot "software-project\src\VirtuaCam\App.cpp") -Pattern "readback not ready" -Message "App must log readback-not-ready separately from driver warmup."
 Assert-NotContains -Path $driverBridgeCpp -Pattern "Map\(m_stagingTexture\.get\(\), 0, D3D11_MAP_READ, 0" -Message "DriverBridge must not use single blocking BGRA staging maps."
 Assert-NotContains -Path $driverBridgeCpp -Pattern "Map\(m_nv12StagingTexture\.get\(\), 0, D3D11_MAP_READ, 0" -Message "DriverBridge must not use single blocking NV12 staging maps."
