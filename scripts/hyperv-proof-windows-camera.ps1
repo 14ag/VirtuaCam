@@ -99,7 +99,7 @@ try {
         param($SetupExe, $JsonPath)
         $stdout = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.out" -f [Guid]::NewGuid().ToString("N"))
         $stderr = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.err" -f [Guid]::NewGuid().ToString("N"))
-        $process = Start-Process -FilePath $SetupExe -ArgumentList @("--install", "--quiet", "--json", $JsonPath) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $process = Start-Process -FilePath $SetupExe -ArgumentList @("--install", "--json", $JsonPath) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         $lines = @()
         if (Test-Path -LiteralPath $stdout) { $lines += Get-Content -LiteralPath $stdout }
         if (Test-Path -LiteralPath $stderr) { $lines += Get-Content -LiteralPath $stderr }

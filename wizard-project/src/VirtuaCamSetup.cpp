@@ -267,6 +267,46 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         return result;
     }
 
+    void WriteStdHandleLine(DWORD stdHandleId, const std::wstring& line)
+    {
+        HANDLE output = GetStdHandle(stdHandleId);
+        if (!output || output == INVALID_HANDLE_VALUE) return;
+
+        std::wstring wideLine = line + L"\r\n";
+        DWORD mode = 0;
+        DWORD written = 0;
+        if (GetConsoleMode(output, &mode) != FALSE) {
+            WriteConsoleW(output, wideLine.c_str(), static_cast<DWORD>(wideLine.size()), &written, nullptr);
+            return;
+        }
+
+        std::string utf8 = WideToUtf8(wideLine);
+        if (!utf8.empty()) {
+            WriteFile(output, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+        }
+    }
+
+    void WriteHeadlessLine(const std::wstring& line)
+    {
+        WriteStdHandleLine(STD_OUTPUT_HANDLE, line);
+        WriteStdHandleLine(STD_ERROR_HANDLE, line);
+    }
+
+    void WriteHeadlessSummary(const RunResult& result)
+    {
+        WriteHeadlessLine(std::format(
+            L"{} {}",
+            result.mode,
+            result.success ? L"succeeded" : L"failed"));
+        for (const auto& check : result.checks) {
+            WriteHeadlessLine(std::format(
+                L"{} {}{}",
+                check.success ? L"OK" : L"FAIL",
+                check.name,
+                check.detail.empty() ? L"" : (L" - " + check.detail)));
+        }
+    }
+
     std::string JsonEscape(const std::wstring& value)
     {
         std::string utf8 = WideToUtf8(value);
@@ -2330,7 +2370,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     MFStartup(MF_VERSION);
 
     const std::vector<std::wstring> args = ParseArgs();
-    const bool quiet = HasArg(args, L"--quiet") || HasArg(args, L"/quiet");
+    const bool headless = !args.empty();
     const SetupOptions options = GetSetupOptions(args);
     std::wstring mode;
     if (HasArg(args, L"--install") || HasArg(args, L"/install")) mode = L"install";
@@ -2342,25 +2382,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     if (!mode.empty()) {
         const RunResult result = RunMode(mode, GetJsonArg(args), options);
         exitCode = result.success ? 0 : 1;
-        if (!quiet) {
-            if (result.success && mode == L"install-watcher-service") {
-                MessageBoxW(nullptr, L"Successfully installed watcher service", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
-            } else if (result.success && mode == L"uninstall-watcher-service") {
-                MessageBoxW(nullptr, L"Successfully uninstalled watcher service", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
-            } else if (result.success) {
-                std::wstring message = std::format(
-                    L"{} succeeded\n\nReport:\n{}",
-                    mode,
-                    result.jsonPath.wstring());
-                MessageBoxW(nullptr, message.c_str(), L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
-            } else {
-                std::wstring message = std::format(
-                    L"{} failed\n\nReport:\n{}",
-                    mode,
-                    result.jsonPath.wstring());
-                MessageBoxW(nullptr, message.c_str(), L"VirtuaCam Setup", MB_OK | MB_ICONWARNING);
-            }
-        }
+        WriteHeadlessSummary(result);
+    } else if (headless) {
+        WriteHeadlessLine(L"No headless setup action specified. Use --install, --uninstall, --install-watcher-service, or --uninstall-watcher-service.");
+        exitCode = 1;
     } else {
         exitCode = RunUi();
     }

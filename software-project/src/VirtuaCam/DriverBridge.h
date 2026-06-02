@@ -21,6 +21,7 @@ public:
     const std::wstring& GetLastError() const { return m_lastError; }
 
     HRESULT RegisterClientRequestEvent(HANDLE eventHandle);
+    HRESULT CheckDriverAvailability();
     HRESULT Connect();
     HRESULT Disconnect();
     HRESULT SetPreferredAspectRatio(AspectRatioMode mode);

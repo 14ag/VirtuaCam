@@ -72,7 +72,7 @@ bcdedit /set testsigning on
 Open an elevated PowerShell window in the repo root and install from the setup wizard:
 
 ```powershell
-.\output\VirtuaCamSetup.exe --install --quiet --json .\output\logs\wizard\install.json
+.\output\VirtuaCamSetup.exe --install --json .\output\logs\wizard\install.json
 ```
 
 The setup wizard is the only install entrypoint. It always installs from its own package directory.

@@ -63,7 +63,7 @@ The build is clean by default and always stages the complete software and driver
 Installer command:
 
 ```powershell
-.\output\VirtuaCamSetup.exe --install --quiet --json .\output\logs\wizard\install.json
+.\output\VirtuaCamSetup.exe --install --json .\output\logs\wizard\install.json
 ```
 
 There is one build script, one install script, and one staged package path:

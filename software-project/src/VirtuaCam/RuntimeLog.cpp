@@ -55,11 +55,8 @@ namespace
         return std::format(L"Win32 error {} (0x{:08X}): {}", error, error, msg);
     }
 
-    void BindConsoleOutputStreams()
+    void PrepareConsoleOutput()
     {
-        FILE* dummy = nullptr;
-        _wfreopen_s(&dummy, L"CONOUT$", L"w", stdout);
-        _wfreopen_s(&dummy, L"CONOUT$", L"w", stderr);
         SetConsoleOutputCP(CP_UTF8);
     }
 
@@ -70,20 +67,20 @@ namespace
 
         if (GetConsoleWindow() != nullptr)
         {
-            BindConsoleOutputStreams();
+            PrepareConsoleOutput();
             return true;
         }
 
         if (AttachConsole(ATTACH_PARENT_PROCESS) != FALSE)
         {
-            BindConsoleOutputStreams();
+            PrepareConsoleOutput();
             return true;
         }
 
         DWORD err = GetLastError();
         if (err == ERROR_ACCESS_DENIED)
         {
-            BindConsoleOutputStreams();
+            PrepareConsoleOutput();
             return true;
         }
 
@@ -93,7 +90,7 @@ namespace
         if (AllocConsole() == FALSE)
             return false;
 
-        BindConsoleOutputStreams();
+        PrepareConsoleOutput();
         return true;
     }
 
@@ -143,29 +140,35 @@ namespace
         return result;
     }
 
-    void WriteStdErrLineLocked(const std::wstring& line)
+    void WriteStdHandleLineLocked(DWORD stdHandleId, const std::wstring& line)
     {
-        HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
-        if (!err || err == INVALID_HANDLE_VALUE)
+        HANDLE output = GetStdHandle(stdHandleId);
+        if (!output || output == INVALID_HANDLE_VALUE)
             return;
 
-        if (!g_consoleReady && GetFileType(err) == FILE_TYPE_UNKNOWN)
+        if (!g_consoleReady && GetFileType(output) == FILE_TYPE_UNKNOWN)
             return;
 
         std::wstring wideLine = line + L"\r\n";
         DWORD mode = 0;
         DWORD written = 0;
-        if (GetConsoleMode(err, &mode) != FALSE)
+        if (GetConsoleMode(output, &mode) != FALSE)
         {
-            WriteConsoleW(err, wideLine.c_str(), static_cast<DWORD>(wideLine.size()), &written, nullptr);
+            WriteConsoleW(output, wideLine.c_str(), static_cast<DWORD>(wideLine.size()), &written, nullptr);
             return;
         }
 
         const std::string utf8Line = WideToUtf8(wideLine);
         if (!utf8Line.empty())
         {
-            WriteFile(err, utf8Line.data(), static_cast<DWORD>(utf8Line.size()), &written, nullptr);
+            WriteFile(output, utf8Line.data(), static_cast<DWORD>(utf8Line.size()), &written, nullptr);
         }
+    }
+
+    void WriteConsoleMirrorsLocked(const std::wstring& line)
+    {
+        WriteStdHandleLineLocked(STD_OUTPUT_HANDLE, line);
+        WriteStdHandleLineLocked(STD_ERROR_HANDLE, line);
     }
 
     void WriteLineLocked(const std::wstring& line)
@@ -177,17 +180,17 @@ namespace
             WriteFile(g_logFile, withNewline.data(), static_cast<DWORD>(withNewline.size() * sizeof(wchar_t)), &written, nullptr);
         }
 
-        WriteStdErrLineLocked(line);
+        WriteConsoleMirrorsLocked(line);
     }
 
-    void LogErrorLine(const std::wstring& message)
+    void LogConsoleVisibleLine(const std::wstring& message)
     {
         std::scoped_lock lock(g_logMutex);
         const std::wstring line = std::format(L"[{}] {}", FormatTimestamp(), message);
         if (g_initialized || g_logFile != INVALID_HANDLE_VALUE)
             WriteLineLocked(line);
         else
-            WriteStdErrLineLocked(line);
+            WriteConsoleMirrorsLocked(line);
     }
 
     bool WantsConsoleAlloc()
@@ -340,24 +343,21 @@ namespace VirtuaCamLog
 
     void LogLine(const std::wstring& message)
     {
-        std::scoped_lock lock(g_logMutex);
-        if (!g_initialized)
-            return;
-        WriteLineLocked(std::format(L"[{}] {}", FormatTimestamp(), message));
+        LogConsoleVisibleLine(message);
     }
 
     void LogWin32(const std::wstring& context, DWORD error)
     {
-        LogErrorLine(std::format(L"{} -> {}", context, FormatWin32Message(error)));
+        LogConsoleVisibleLine(std::format(L"{} -> {}", context, FormatWin32Message(error)));
     }
 
     void LogHr(const std::wstring& context, HRESULT hr)
     {
-        LogErrorLine(std::format(L"{} -> HRESULT 0x{:08X}", context, static_cast<unsigned>(hr)));
+        LogConsoleVisibleLine(std::format(L"{} -> HRESULT 0x{:08X}", context, static_cast<unsigned>(hr)));
         if ((hr & 0xFFFF0000) == 0x80070000)
         {
             DWORD win32 = HRESULT_CODE(hr);
-            LogErrorLine(std::format(L"  {}", FormatWin32Message(win32)));
+            LogConsoleVisibleLine(std::format(L"  {}", FormatWin32Message(win32)));
         }
     }
 
@@ -365,7 +365,7 @@ namespace VirtuaCamLog
     {
         std::wstring msg = (message ? message : L"");
         std::wstring ttl = (title ? title : L"");
-        LogErrorLine(std::format(L"GUI error: {} (HRESULT 0x{:08X})", msg, static_cast<unsigned>(hr)));
+        LogConsoleVisibleLine(std::format(L"GUI error: {} (HRESULT 0x{:08X})", msg, static_cast<unsigned>(hr)));
         MessageBoxW(hwnd, msg.c_str(), ttl.c_str(), MB_OK | MB_ICONERROR);
     }
 }

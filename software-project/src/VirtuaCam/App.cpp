@@ -946,6 +946,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         VirtuaCamLog::LogLine(std::format(L"DriverBridge last error: {}", g_driverBridge->GetLastError()));
     } else {
         ApplyDriverAspectPolicy();
+        const HRESULT hrAvailable = g_driverBridge->CheckDriverAvailability();
+        if (FAILED(hrAvailable)) {
+            VirtuaCamLog::LogHr(L"Virtual Camera Driver is not installed or not available", hrAvailable);
+            if (!g_driverStart) {
+                VirtuaCamLog::ShowAndLogError(
+                    g_hMainWnd,
+                    L"Virtual Camera Driver is not installed or not available.\nUse VirtuaCamSetup.exe Install, then run the camera test again.",
+                    L"VirtuaCam driver not installed",
+                    hrAvailable);
+            }
+        }
     }
 
     VirtuaCamLog::LogLine(L"Entering message loop.");

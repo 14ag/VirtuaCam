@@ -103,6 +103,9 @@ if ($driverBridgeText -match "HRESULT DriverBridge::Initialize\(\)[\s\S]{0,260}E
 if ($appText -match "DriverBridge failed to connect to the avshws kernel driver") {
     throw "App startup must not show the old DriverBridge modal when driver is absent."
 }
+if ($appText -notmatch "Virtual Camera Driver is not installed or not available[\s\S]{0,420}ShowAndLogError") {
+    throw "App startup must show an explicit actionable driver-missing indicator."
+}
 if ($driverBridgeText -notmatch "HRESULT DriverBridge::SendFrame\([^\)]*\)[\s\S]{0,260}EnsurePropertySetReady\(\)[\s\S]{0,260}ApplyPendingAspectPolicyIfIdle\(\)[\s\S]{0,260}Connect\(\)") {
     throw "DriverBridge SendFrame must probe/defer policy before connecting."
 }
@@ -124,8 +127,27 @@ if ($runtimeLogText -match "void LogHr\([^\)]*\)[\s\S]{0,220}LogLine\(") {
 if ($runtimeLogText -match "void LogWin32\([^\)]*\)[\s\S]{0,220}LogLine\(") {
     throw "RuntimeLog Win32 errors must go through stderr-visible error logging, not debug-only LogLine."
 }
-Assert-Contains -Path "software-project\src\VirtuaCam\RuntimeLog.cpp" -Pattern "GetStdHandle\(STD_ERROR_HANDLE\)" -Message "Runtime errors must write to stderr for console/redirected test runs."
-Assert-Contains -Path "software-project\src\VirtuaCam\RuntimeLog.cpp" -Pattern "LogErrorLine" -Message "RuntimeLog must keep an error path visible when normal logging is disabled."
+Assert-Contains -Path "software-project\src\VirtuaCam\RuntimeLog.cpp" -Pattern "WriteStdHandleLineLocked\(STD_OUTPUT_HANDLE, line\)" -Message "Runtime messages must mirror to stdout for console/redirected test runs."
+Assert-Contains -Path "software-project\src\VirtuaCam\RuntimeLog.cpp" -Pattern "WriteStdHandleLineLocked\(STD_ERROR_HANDLE, line\)" -Message "Runtime messages must mirror to stderr for console/redirected test runs."
+Assert-Contains -Path "software-project\src\VirtuaCam\RuntimeLog.cpp" -Pattern "LogConsoleVisibleLine" -Message "RuntimeLog must keep all messages visible when normal logging is disabled."
+$driverBridgeText = Get-Content -LiteralPath (Join-Path $repoRoot "software-project\src\VirtuaCam\DriverBridge.cpp") -Raw
+if ($driverBridgeText -match "return\s+m_connected\s*\|\|\s*IsDriverClientActive\(\)") {
+    throw "Driver-start auto-exit must not treat app-side upload connection as active driver use."
+}
+Assert-Contains -Path "software-project\src\VirtuaCam\DriverBridge.cpp" -Pattern "return IsDriverClientActive\(\);" -Message "Driver-start auto-exit must use actual driver capture activity."
+$setupText = Get-Content -LiteralPath (Join-Path $repoRoot "wizard-project\src\VirtuaCamSetup.cpp") -Raw
+if ($setupText -match "if \(!mode\.empty\(\)\)[\s\S]{0,900}MessageBoxW") {
+    throw "Setup headless mode must not show popups."
+}
+if ($setupText -match "succeeded\\n\\nReport|succeeded[\s\S]{0,180}result\.jsonPath") {
+    throw "Setup headless success summary must not reference a local report path."
+}
+Assert-Contains -Path "wizard-project\src\VirtuaCamSetup.cpp" -Pattern "WriteStdHandleLine\(STD_OUTPUT_HANDLE, line\)" -Message "Setup headless output must mirror to stdout."
+Assert-Contains -Path "wizard-project\src\VirtuaCamSetup.cpp" -Pattern "WriteStdHandleLine\(STD_ERROR_HANDLE, line\)" -Message "Setup headless output must mirror to stderr."
+Assert-Contains -Path "wizard-project\src\VirtuaCamSetup.cpp" -Pattern "WriteHeadlessSummary\(result\)" -Message "Setup headless mode must print console summary."
+Assert-NotContains -Path "wizard-project\src\VirtuaCamSetup.cpp" -Pattern "--quiet|/quiet" -Message "Setup must not expose a quiet flag; any flag means headless."
+Assert-NotContains -Path "README.md" -Pattern "--quiet" -Message "README must not document a setup quiet flag."
+Assert-NotContains -Path "CONTRIBUTING.md" -Pattern "--quiet" -Message "CONTRIBUTING must not document a setup quiet flag."
 Assert-Contains -Path "scripts\hyperv-proof-chrome.ps1" -Pattern 'EnvUserKey\s+"DRIVER_TEST_VM_USERNAME"' -Message "Chrome VM proof must use .env guest username in noninteractive runs."
 Assert-Contains -Path "scripts\hyperv-proof-chrome.ps1" -Pattern 'EnvPasswordKey\s+"DRIVER_TEST_VM_PASSWORD"' -Message "Chrome VM proof must use .env guest password in noninteractive runs."
 Assert-Contains -Path "scripts\playwright-vm-webcam-proof.ps1" -Pattern '\[ValidateRange\(1,\s*10\)\]\[int\]\$CdpConnectAttempts\s*=\s*3' -Message "Playwright proof must retry transient CDP attach failures by default."

@@ -644,7 +644,9 @@ bool DriverBridge::IsDriverClientActive()
 
 bool DriverBridge::IsDriverInUse()
 {
-    return m_connected || IsDriverClientActive();
+    // m_connected only means this app opened the driver upload side. Auto-exit
+    // must track an external capture stream, which makes the driver run.
+    return IsDriverClientActive();
 }
 
 HRESULT DriverBridge::ApplyPendingAspectPolicyIfIdle()
@@ -1385,6 +1387,11 @@ HRESULT DriverBridge::Connect()
     return hr;
 }
 
+HRESULT DriverBridge::CheckDriverAvailability()
+{
+    return EnsurePropertySetReady();
+}
+
 HRESULT DriverBridge::RegisterClientRequestEvent(HANDLE eventHandle)
 {
     RETURN_IF_FAILED(EnsurePropertySetReady());
@@ -1503,7 +1510,7 @@ HRESULT DriverBridge::SetAspectPolicy(AspectRatioMode preferredMode, ULONG allow
     const HRESULT readyHr = EnsurePropertySetReady();
     if (FAILED(readyHr)) {
         VirtuaCamLog::LogLine(std::format(
-            L"DriverBridge aspect policy deferred until driver is ready: preferred={} allowedMask=0x{:X} hr=0x{:08X}",
+            L"Virtual Camera Driver is not installed or not available; DriverBridge aspect policy deferred until driver is ready: preferred={} allowedMask=0x{:X} hr=0x{:08X}",
             VirtuaCamConfig::AspectRatioName(preferredMode),
             allowedMask,
             static_cast<unsigned>(readyHr)));
