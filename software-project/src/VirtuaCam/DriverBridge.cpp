@@ -24,6 +24,7 @@ namespace
     constexpr UINT kDriverBytesPerPixel = 3;
     constexpr UINT kMaxDriverDimension = 1920;
     constexpr size_t kDriverReadbackPoolSize = 3;
+    constexpr ULONGLONG kDriverProbeRetryMs = 2000;
 
     struct DriverBlitConstants
     {
@@ -333,9 +334,9 @@ HRESULT DriverBridge::Initialize()
 {
     m_lastError.clear();
     m_connected = false;
-    RETURN_IF_FAILED(EnsurePropertySetReady());
+    m_nextDriverProbeTick = 0;
     m_active = true;
-    VirtuaCamLog::LogLine(L"DriverBridge initialized");
+    VirtuaCamLog::LogLine(L"DriverBridge initialized; driver connection deferred until first frame");
     return S_OK;
 }
 
@@ -350,6 +351,7 @@ void DriverBridge::Shutdown()
 
     m_active = false;
     m_connected = false;
+    m_nextDriverProbeTick = 0;
     m_selectedDevicePath.clear();
     m_selectedFriendlyName.clear();
     m_driverHandle.reset();
@@ -640,9 +642,21 @@ bool DriverBridge::IsDriverClientActive()
         status.ClientConnected != 0;
 }
 
+bool DriverBridge::IsDriverInUse()
+{
+    return m_connected || IsDriverClientActive();
+}
+
 HRESULT DriverBridge::ApplyPendingAspectPolicyIfIdle()
 {
-    if (!m_hasPendingAspectPolicy || IsDriverClientActive()) {
+    if (!m_hasPendingAspectPolicy) {
+        return S_OK;
+    }
+    const HRESULT readyHr = EnsurePropertySetReady();
+    if (FAILED(readyHr)) {
+        return S_OK;
+    }
+    if (IsDriverClientActive()) {
         return S_OK;
     }
 
@@ -1141,7 +1155,19 @@ HRESULT DriverBridge::EnsurePropertySetReady()
     if (m_driverHandle || m_propertySet) {
         return S_OK;
     }
-    return FindDriverFilter();
+    const ULONGLONG now = GetTickCount64();
+    if (m_nextDriverProbeTick != 0 && now < m_nextDriverProbeTick) {
+        return HRESULT_FROM_WIN32(ERROR_NOT_READY);
+    }
+
+    const HRESULT hr = FindDriverFilter();
+    if (FAILED(hr)) {
+        m_nextDriverProbeTick = now + kDriverProbeRetryMs;
+        return hr;
+    }
+
+    m_nextDriverProbeTick = 0;
+    return S_OK;
 }
 
 HRESULT DriverBridge::SetDriverProperty(ULONG propertyId, void* data, ULONG dataLength, ULONG* bytesReturned)
@@ -1457,6 +1483,7 @@ HRESULT DriverBridge::ApplyAspectPolicyNow(AspectRatioMode preferredMode, ULONG 
         allowedMask,
         m_outputWidth,
         m_outputHeight));
+    m_hasPendingAspectPolicy = false;
     return S_OK;
 }
 
@@ -1469,11 +1496,22 @@ HRESULT DriverBridge::SetAspectPolicy(AspectRatioMode preferredMode, ULONG allow
         allowedMask = ASPECT_RATIO_MASK_ALL;
     }
 
+    m_pendingPreferredMode = preferredMode;
+    m_pendingAllowedMask = allowedMask;
+    m_hasPendingAspectPolicy = true;
+
+    const HRESULT readyHr = EnsurePropertySetReady();
+    if (FAILED(readyHr)) {
+        VirtuaCamLog::LogLine(std::format(
+            L"DriverBridge aspect policy deferred until driver is ready: preferred={} allowedMask=0x{:X} hr=0x{:08X}",
+            VirtuaCamConfig::AspectRatioName(preferredMode),
+            allowedMask,
+            static_cast<unsigned>(readyHr)));
+        return S_OK;
+    }
+
     if (IsDriverClientActive()) {
         RETURN_IF_FAILED(ApplyDriverAspectProperties(preferredMode, allowedMask));
-        m_pendingPreferredMode = preferredMode;
-        m_pendingAllowedMask = allowedMask;
-        m_hasPendingAspectPolicy = true;
         VirtuaCamLog::LogLine(std::format(
             L"DriverBridge aspect output resize deferred until camera reconnect: preferred={} allowedMask=0x{:X} currentOutput={}x{}",
             VirtuaCamConfig::AspectRatioName(preferredMode),
@@ -1534,8 +1572,9 @@ HRESULT DriverBridge::ReinitializeAfterFailure(HRESULT failureHr)
 HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
 {
     RETURN_HR_IF(E_UNEXPECTED, !m_active);
-    RETURN_IF_FAILED(Connect());
+    RETURN_IF_FAILED(EnsurePropertySetReady());
     RETURN_IF_FAILED(ApplyPendingAspectPolicyIfIdle());
+    RETURN_IF_FAILED(Connect());
     RETURN_IF_FAILED(RefreshDriverGeometry());
     RETURN_IF_FAILED(EnsureGpuResources(sourceTexture));
     RETURN_IF_FAILED(EnsureSourceTextureView(sourceTexture));

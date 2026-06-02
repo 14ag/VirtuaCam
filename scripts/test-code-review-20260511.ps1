@@ -96,6 +96,24 @@ $appText = Get-Content -LiteralPath (Join-Path $repoRoot "software-project\src\V
 if ($appText -notmatch "else if \(g_driverStart\)[\s\S]{0,500}driver inactive for 5 seconds") {
     throw "--driver branch must own inactive auto-exit behavior."
 }
+$driverBridgeText = Get-Content -LiteralPath (Join-Path $repoRoot "software-project\src\VirtuaCam\DriverBridge.cpp") -Raw
+if ($driverBridgeText -match "HRESULT DriverBridge::Initialize\(\)[\s\S]{0,260}EnsurePropertySetReady") {
+    throw "DriverBridge init must not probe the AVStream driver during app startup."
+}
+if ($appText -match "DriverBridge failed to connect to the avshws kernel driver") {
+    throw "App startup must not show the old DriverBridge modal when driver is absent."
+}
+if ($driverBridgeText -notmatch "HRESULT DriverBridge::SendFrame\([^\)]*\)[\s\S]{0,260}EnsurePropertySetReady\(\)[\s\S]{0,260}ApplyPendingAspectPolicyIfIdle\(\)[\s\S]{0,260}Connect\(\)") {
+    throw "DriverBridge SendFrame must probe/defer policy before connecting."
+}
+if ($driverBridgeText -notmatch "HRESULT DriverBridge::SetAspectPolicy\([^\)]*\)[\s\S]{0,520}m_hasPendingAspectPolicy = true;[\s\S]{0,520}EnsurePropertySetReady\(\)[\s\S]{0,520}return S_OK;") {
+    throw "DriverBridge aspect policy must be staged and deferred when the driver is unavailable."
+}
+Assert-Contains -Path "software-project\src\VirtuaCam\DriverBridge.h" -Pattern "bool IsConnected\(\) const" -Message "DriverBridge must expose connected state for --driver auto-exit."
+Assert-Contains -Path "software-project\src\VirtuaCam\DriverBridge.h" -Pattern "bool IsDriverInUse\(\)" -Message "DriverBridge must expose real driver-use state for --driver auto-exit."
+Assert-Contains -Path "software-project\src\VirtuaCam\DriverBridge.cpp" -Pattern "kDriverProbeRetryMs" -Message "DriverBridge must back off missing-driver probes."
+Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "g_driverBridge->IsDriverInUse\(\)" -Message "--driver auto-exit must track real driver use, not lazy bridge init."
+Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "waiting for driver availability" -Message "Driver availability wait must be quiet/throttled, not modal."
 Assert-Contains -Path "scripts\hyperv-proof-chrome.ps1" -Pattern 'EnvUserKey\s+"DRIVER_TEST_VM_USERNAME"' -Message "Chrome VM proof must use .env guest username in noninteractive runs."
 Assert-Contains -Path "scripts\hyperv-proof-chrome.ps1" -Pattern 'EnvPasswordKey\s+"DRIVER_TEST_VM_PASSWORD"' -Message "Chrome VM proof must use .env guest password in noninteractive runs."
 Assert-Contains -Path "scripts\playwright-vm-webcam-proof.ps1" -Pattern '\[ValidateRange\(1,\s*10\)\]\[int\]\$CdpConnectAttempts\s*=\s*3' -Message "Playwright proof must retry transient CDP attach failures by default."

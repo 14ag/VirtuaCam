@@ -322,7 +322,7 @@ void SetAspectRatioMode(AspectRatioMode mode)
 }
 
 const VirtuaCam::Discovery* GetGlobalDiscovery() { return g_discovery.get(); }
-bool GetDriverBridgeStatus() { return g_driverBridge && g_driverBridge->IsActive(); }
+bool GetDriverBridgeStatus() { return g_driverBridge && g_driverBridge->IsDriverInUse(); }
 const SourceState& GetMainSourceState() { return g_mainSourceState; }
 const SourceState& GetPipSourceState(PipPosition pos) {
     switch (pos) {
@@ -944,12 +944,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     if (FAILED(hrDriver)) {
         VirtuaCamLog::LogHr(L"DriverBridge::Initialize failed", hrDriver);
         VirtuaCamLog::LogLine(std::format(L"DriverBridge last error: {}", g_driverBridge->GetLastError()));
-        if (!g_driverStart) {
-            std::wstring message =
-                L"DriverBridge failed to connect to the avshws kernel driver.\n"
-                L"Make sure driver-project is installed.";
-            VirtuaCamLog::ShowAndLogError(g_hMainWnd, message.c_str(), L"Error", hrDriver);
-        }
     } else {
         ApplyDriverAspectPolicy();
     }
@@ -1010,6 +1004,7 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
     static bool s_loggedDefaultFeed = false;
     static UINT s_driverWarmupRetryLogCount = 0;
     static UINT s_driverReadbackRetryLogCount = 0;
+    static UINT s_driverUnavailableLogCount = 0;
     static bool s_hasSentFrame = false;
     static UINT64 s_lastSentFrameValue = 0;
     static ULONGLONG s_lastDefaultFeedSendTick = 0;
@@ -1066,12 +1061,20 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
             if (s_driverWarmupRetryLogCount == 1 || (s_driverWarmupRetryLogCount % 120) == 0) {
                 VirtuaCamLog::LogLine(L"DriverBridge::SendFrame waiting for driver stream to start");
             }
+        } else if (hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND) ||
+            hr == HRESULT_FROM_WIN32(ERROR_NOT_READY) ||
+            hr == HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED)) {
+            ++s_driverUnavailableLogCount;
+            if (s_driverUnavailableLogCount == 1 || (s_driverUnavailableLogCount % 120) == 0) {
+                VirtuaCamLog::LogLine(L"DriverBridge::SendFrame waiting for driver availability");
+            }
         } else {
             VirtuaCamLog::LogHr(L"DriverBridge::SendFrame failed", hr);
         }
     } else {
         s_driverWarmupRetryLogCount = 0;
         s_driverReadbackRetryLogCount = 0;
+        s_driverUnavailableLogCount = 0;
         s_hasSentFrame = true;
         s_lastSentFrameValue = brokerFrameValue;
         if (brokerState != BrokerState::Connected) {

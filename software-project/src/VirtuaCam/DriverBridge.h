@@ -16,6 +16,8 @@ public:
     HRESULT Initialize();
     void Shutdown();
     bool IsActive() const { return m_active; }
+    bool IsConnected() const { return m_connected; }
+    bool IsDriverInUse();
     const std::wstring& GetLastError() const { return m_lastError; }
 
     HRESULT RegisterClientRequestEvent(HANDLE eventHandle);
@@ -115,6 +117,7 @@ private:
     UINT64 m_frameExNv12UploadCount = 0;
     UINT64 m_legacyBgr24UploadCount = 0;
     UINT64 m_frameExFallbackToBgr24Count = 0;
+    ULONGLONG m_nextDriverProbeTick = 0;
     UINT m_outputWidth = 1920;
     UINT m_outputHeight = 1080;
     ULONG m_outputFormat = 0;
