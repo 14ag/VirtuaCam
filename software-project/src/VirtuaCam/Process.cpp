@@ -453,7 +453,8 @@ HRESULT InitializeDirectPortStatusMapping(
 void PublishDirectPortProducerStatus(
     DirectPortStatusMapping& mapping,
     UINT64 fenceValue,
-    HRESULT lastHRESULT)
+    HRESULT lastHRESULT,
+    UINT64 staleCount = 0)
 {
     if (!mapping.view) {
         return;
@@ -466,6 +467,9 @@ void PublishDirectPortProducerStatus(
 
     if (fenceValue == mapping.lastPublishedFenceValue && mapping.frameCount > 0) {
         ++mapping.duplicateCount;
+    }
+    if (staleCount > mapping.staleCount) {
+        mapping.staleCount = staleCount;
     }
     mapping.lastPublishedFenceValue = fenceValue;
     ++mapping.frameCount;
@@ -2303,6 +2307,12 @@ namespace BuiltInCameraProducer
             return true;
         }
 
+        UINT64 DroppedSamples()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_droppedSamples;
+        }
+
         void Shutdown()
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -2830,7 +2840,11 @@ namespace BuiltInCameraProducer
         if (g_pManifestView) {
             InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
         }
-        PublishDirectPortProducerStatus(g_statusMapping, newFenceValue, S_OK);
+        PublishDirectPortProducerStatus(
+            g_statusMapping,
+            newFenceValue,
+            S_OK,
+            g_sourceReaderCallback ? g_sourceReaderCallback->DroppedSamples() : 0);
 
         if (!g_loggedFirstFrame) {
             VirtuaCamLog::LogLine(std::format(
