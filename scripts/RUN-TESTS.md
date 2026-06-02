@@ -42,6 +42,7 @@ $paths = @(
   '.\scripts\run-vhlk-failed-only.ps1',
   '.\scripts\export-vhlk-failed-tests.ps1',
   '.\scripts\export-vhlk-remaining-tests.ps1',
+  '.\scripts\export-vhlk-all-tests.ps1',
   '.\scripts\filter-vhlk-test-list.ps1',
   '.\scripts\test-vhlk-runner-flow.ps1',
   '.\scripts\test-setup-registry-debug-mic.ps1',
@@ -52,7 +53,6 @@ $paths = @(
   '.\scripts\hyperv-common.ps1',
   '.\scripts\hyperv-proof-windows-camera.ps1',
   '.\scripts\build-all.ps1',
-  '.\scripts\install-all.ps1',
   '.\scripts\install-driver-for-vhlk.ps1'
 )
 foreach ($path in $paths) {
@@ -223,6 +223,24 @@ Pass criteria:
 - `run-vhlk-tests.ps1` fresh-starts `vhlk` and `driver-test`, installs staged `output\` into DUT, then queues the full project.
 - Final vHLK run completes without failed status.
 - Any impossible lab/tool blocker is documented under `docs\` and skipped only on the next failed-only run.
+
+For a full rerun that must skip documented blockers, export all project test names, filter `docs\vhlk-blocked-test-names.txt`, then pass the filtered list to `run-vhlk-tests.ps1`. Also pass the blocker list so stale queued/running blocked results are canceled and cleaned but not re-queued.
+
+```powershell
+.\scripts\export-vhlk-all-tests.ps1
+.\scripts\filter-vhlk-test-list.ps1 `
+  -InputPath .\test-reports\vhlk-all-export-<timestamp>\all-test-names.txt `
+  -SkipPath .\docs\vhlk-blocked-test-names.txt `
+  -OutputPath .\test-reports\vhlk-all-export-<timestamp>\all-test-names.filtered.txt
+.\scripts\run-vhlk-tests.ps1 `
+  -TestNameListPath .\test-reports\vhlk-all-export-<timestamp>\all-test-names.filtered.txt `
+  -BlockedTestNameListPath .\docs\vhlk-blocked-test-names.txt `
+  -PendingStartTimeoutSeconds 300 `
+  -TimeoutMinutes 480 `
+  -ResearchGateFailureCount 2 `
+  -StopOnFailureCount 10 `
+  -MaxControllerReconnectFailures 5
+```
 
 ## Stage 6 - Post-vHLK Documentation Assertion
 

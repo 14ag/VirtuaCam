@@ -30,7 +30,9 @@ if ([string]::IsNullOrWhiteSpace($GuestRoot)) {
 $session = $null
 $guestScriptsRoot = Join-Path $GuestRoot "scripts"
 $guestToolsRoot = Join-Path $guestScriptsRoot "tools"
-$guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
+$guestPackageRoot = Join-Path $GuestRoot "output"
+$guestSetupExe = Join-Path $guestPackageRoot "VirtuaCamSetup.exe"
+$guestInstallJson = Join-Path $GuestRoot "setup-install.json"
 $exitCode = 1
 
 function Set-VhlkCameraFrameServerMode {
@@ -139,24 +141,30 @@ try {
     } -ArgumentList $GuestRoot, $guestScriptsRoot, $guestToolsRoot | Out-Null
 
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "output") -GuestPath $GuestRoot -Recurse -LogPath $logPath
-    Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\install-all.ps1") -GuestPath $guestScriptsRoot -LogPath $logPath
-    Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\tools\artifact-manifest.ps1") -GuestPath $guestToolsRoot -LogPath $logPath
 
     Write-HvLog -Message "Configuring Media Foundation frame server for vHLK." -LogPath $logPath -Level STEP
     Set-VhlkCameraFrameServerMode -GuestSession $session -OutputName "camera-frame-server-mode-before-install.json" | Out-Null
 
-    Write-HvLog -Message "Installing staged package in DUT for vHLK." -LogPath $logPath -Level STEP
+    Write-HvLog -Message "Installing staged package in DUT for vHLK with VirtuaCamSetup.exe." -LogPath $logPath -Level STEP
     $install = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
-        param($InstallScript)
-        $lines = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript -SkipWatcherService 2>&1
+        param($SetupExe, $JsonPath)
+        $stdout = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.out" -f [Guid]::NewGuid().ToString("N"))
+        $stderr = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.err" -f [Guid]::NewGuid().ToString("N"))
+        $process = Start-Process -FilePath $SetupExe -ArgumentList @("--install", "--quiet", "--skip-watcher-service", "--json", $JsonPath) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $lines = @()
+        if (Test-Path -LiteralPath $stdout) { $lines += Get-Content -LiteralPath $stdout }
+        if (Test-Path -LiteralPath $stderr) { $lines += Get-Content -LiteralPath $stderr }
+        $json = if (Test-Path -LiteralPath $JsonPath) { Get-Content -LiteralPath $JsonPath -Raw } else { "" }
         [pscustomobject]@{
-            ExitCode = $LASTEXITCODE
+            ExitCode = $process.ExitCode
             Output = [string]::Join([Environment]::NewLine, @($lines | ForEach-Object { [string]$_ }))
+            Json = $json
         }
-    } -ArgumentList $guestInstallAll
+    } -ArgumentList $guestSetupExe, $guestInstallJson
     $install.Output | Set-Content -LiteralPath (Join-Path $artifactDir "guest-driver-install.txt") -Encoding UTF8
+    $install.Json | Set-Content -LiteralPath (Join-Path $artifactDir "guest-driver-install.json") -Encoding UTF8
     if ($install.ExitCode -ne 0) {
-        throw "install-all failed in guest: $($install.ExitCode)"
+        throw "VirtuaCamSetup.exe install failed in guest: $($install.ExitCode)"
     }
 
     if ($install.Output -match '(?i)reboot is needed|reboot is required|pending system reboot|a reboot is required') {

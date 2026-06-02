@@ -14,6 +14,7 @@ param(
     [int]$ResearchGateFailureCount = 0,
     [int]$StopOnFailureCount = 0,
     [string]$TestNameListPath = "",
+    [string]$BlockedTestNameListPath = "",
     [string]$LabSwitchName = "hlk-lab",
     [string]$LabHostIp = "192.168.240.1",
     [string]$LabControllerIp = "192.168.240.10",
@@ -161,6 +162,17 @@ try {
         if ($selectedTestNames.Count -lt 1) {
             throw "Test name list is empty: $resolvedTestNameListPath"
         }
+    }
+    $blockedTestNames = @()
+    if (-not [string]::IsNullOrWhiteSpace($BlockedTestNameListPath)) {
+        $resolvedBlockedTestNameListPath = Resolve-HvPath -Path $BlockedTestNameListPath -BasePath $repoRoot
+        if (-not (Test-Path -LiteralPath $resolvedBlockedTestNameListPath)) {
+            throw "Blocked test name list not found: $resolvedBlockedTestNameListPath"
+        }
+        $blockedTestNames = @(Get-Content -LiteralPath $resolvedBlockedTestNameListPath |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { $_.Trim() } |
+            Sort-Object -Unique)
     }
 
     if (-not $SkipFreshStart) {
@@ -442,7 +454,7 @@ try {
     } while ($true)
 
     $remoteInit = {
-        param($ProjectName, $PlaylistPath, $ReloadPlaylist, $CleanResults, $DryRun, $DutComputerName, [string[]]$SelectedTestNames)
+        param($ProjectName, $PlaylistPath, $ReloadPlaylist, $CleanResults, $DryRun, $DutComputerName, [string[]]$SelectedTestNames, [string[]]$BlockedTestNames)
 
         Set-StrictMode -Version Latest
         $ErrorActionPreference = "Stop"
@@ -495,13 +507,14 @@ try {
         }
 
         $tests = @($project.GetTests())
+        $byName = @{}
+        foreach ($test in $tests) {
+            $byName[[string]$test.Name] = $test
+        }
+
         $testsToQueue = @($tests)
         $missingSelectedTests = @()
         if ($SelectedTestNames -and $SelectedTestNames.Count -gt 0) {
-            $byName = @{}
-            foreach ($test in $tests) {
-                $byName[[string]$test.Name] = $test
-            }
             $testsToQueue = @()
             foreach ($name in $SelectedTestNames) {
                 if ($byName.ContainsKey($name)) {
@@ -515,7 +528,22 @@ try {
             }
         }
 
+        $missingBlockedTests = @()
         $testsToManage = if ($SelectedTestNames -and $SelectedTestNames.Count -gt 0) { @($testsToQueue) } else { @($tests) }
+        if ($BlockedTestNames -and $BlockedTestNames.Count -gt 0) {
+            $manageByName = @{}
+            foreach ($test in $testsToManage) {
+                $manageByName[[string]$test.Name] = $test
+            }
+            foreach ($name in $BlockedTestNames) {
+                if ($byName.ContainsKey($name)) {
+                    $manageByName[$name] = $byName[$name]
+                } else {
+                    $missingBlockedTests += $name
+                }
+            }
+            $testsToManage = @($manageByName.Values)
+        }
         $activeCancelled = 0
         $activeCancelErrors = @()
         if (-not $DryRun) {
@@ -589,8 +617,10 @@ try {
             DutComputerName  = $DutComputerName
             QueueMode        = "DirectToDutMachine"
             ManagedTests     = @($testsToManage | ForEach-Object { [string]$_.Name })
+            BlockedManagedTests = @($BlockedTestNames | ForEach-Object { [string]$_ })
             SelectedTestNames = @($testsToQueue | ForEach-Object { [string]$_.Name })
             MissingSelectedTests = $missingSelectedTests
+            MissingBlockedTests = $missingBlockedTests
             QueuedResults    = $queuedResults.Count
             QueueErrors      = $queueErrors
             StartedAt        = (Get-Date).ToString("s")
@@ -607,7 +637,8 @@ try {
         $cleanResults,
         [bool]$DryRun,
         $dutComputerName,
-        $selectedTestNames)
+        $selectedTestNames,
+        $blockedTestNames)
 
     $init | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDir "queue-result.json") -Encoding UTF8
 

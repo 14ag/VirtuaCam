@@ -71,7 +71,8 @@ $guestRoot = "C:\Temp\VirtuaCamHyperV\camera-proof"
 $guestPackageRoot = Join-Path $guestRoot "output"
 $guestScriptsRoot = Join-Path $guestRoot "scripts"
 $guestToolsRoot = Join-Path $guestScriptsRoot "tools"
-$guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
+$guestSetupExe = Join-Path $guestPackageRoot "VirtuaCamSetup.exe"
+$guestInstallJson = Join-Path $guestRoot "setup-install.json"
 $guestAudioIoctlFuzz = Join-Path $guestScriptsRoot "test-audio-ioctl-fuzz.ps1"
 $guestWebcamHtml = Join-Path $guestRoot "webcam.html"
 $guestScreenshotPath = Join-Path $guestRoot "windows-camera-proof.png"
@@ -90,21 +91,27 @@ try {
     } -ArgumentList $guestRoot, $guestScriptsRoot, $guestToolsRoot | Out-Null
 
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "output") -GuestPath $guestRoot -Recurse -LogPath $logPath
-    Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\install-all.ps1") -GuestPath $guestScriptsRoot -LogPath $logPath
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\test-audio-ioctl-fuzz.ps1") -GuestPath $guestScriptsRoot -LogPath $logPath
-    Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\tools\artifact-manifest.ps1") -GuestPath $guestToolsRoot -LogPath $logPath
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "software-project\webcam.html") -GuestPath $guestRoot -LogPath $logPath
 
-    Write-HvLog -Message "Installing staged package inside guest." -LogPath $logPath -Level STEP
+    Write-HvLog -Message "Installing staged package with VirtuaCamSetup.exe inside guest." -LogPath $logPath -Level STEP
     $install = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
-        param($InstallScript)
-        $lines = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript 2>&1
+        param($SetupExe, $JsonPath)
+        $stdout = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.out" -f [Guid]::NewGuid().ToString("N"))
+        $stderr = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.err" -f [Guid]::NewGuid().ToString("N"))
+        $process = Start-Process -FilePath $SetupExe -ArgumentList @("--install", "--quiet", "--json", $JsonPath) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $lines = @()
+        if (Test-Path -LiteralPath $stdout) { $lines += Get-Content -LiteralPath $stdout }
+        if (Test-Path -LiteralPath $stderr) { $lines += Get-Content -LiteralPath $stderr }
+        $json = if (Test-Path -LiteralPath $JsonPath) { Get-Content -LiteralPath $JsonPath -Raw } else { "" }
         [pscustomobject]@{
-            ExitCode = $LASTEXITCODE
+            ExitCode = $process.ExitCode
             Output = [string]::Join([Environment]::NewLine, @($lines | ForEach-Object { [string]$_ }))
+            Json = $json
         }
-    } -ArgumentList $guestInstallAll
+    } -ArgumentList $guestSetupExe, $guestInstallJson
     Set-Content -LiteralPath (Join-Path $runDir "guest-driver-install.txt") -Value $install.Output
+    Set-Content -LiteralPath (Join-Path $runDir "guest-driver-install.json") -Value $install.Json
     if ($install.ExitCode -ne 0) {
         throw "driver.InstallFailed"
     }

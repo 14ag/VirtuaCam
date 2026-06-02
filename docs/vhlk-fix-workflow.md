@@ -4,10 +4,11 @@ This checklist tracks the `vhlk-fixes` branch. Run stages in order. Do not run f
 
 ## Current Baseline
 
-- Latest saved vHLK run: `test-reports/vhlk-oneclick-20260513-021033`.
-- Saved result: `113` total, `26` passed, `77` failed, `7` not run, `2` queued, and `1` running when the controller/session broke.
-- Complete local failed-name fallback: `test-reports/vhlk-oneclick-20260512-202918/failed-test-names.txt` with `106` names.
-- Use controller export first when available. Use the fallback list only if controller export is unavailable.
+- Latest full selected vHLK rerun: `test-reports/vhlk-oneclick-20260601-221605`.
+- Latest all-name export: `test-reports/vhlk-all-export-20260601-220320`.
+- Saved result: `111/111` selected tests passed, `0` failed.
+- Documented blockers skipped: `Camera Driver Usage Indicator Manual Test` and the NV12 preferred-stream photo-capture blocker in `docs\vhlk-blocked-test-names.txt`.
+- Use controller export first when available. Use checked-in fallback lists only if controller export is unavailable.
 
 ## Stage 0 - Rules And Inputs
 
@@ -34,7 +35,7 @@ Run:
 
 Checklist:
 
-- [x] Parsed changed/key PowerShell scripts: `hyperv-common.ps1`, `run-vhlk-tests.ps1`, `run-vhlk-smoke-3tests.ps1`, `test-driver-dshow-probe.ps1`, `hyperv-proof-windows-camera.ps1`, `hyperv-proof-chrome.ps1`, `build-all.ps1`, and `install-all.ps1`.
+- [x] Parsed changed/key PowerShell scripts: `hyperv-common.ps1`, `run-vhlk-tests.ps1`, `run-vhlk-smoke-3tests.ps1`, `test-driver-dshow-probe.ps1`, `hyperv-proof-windows-camera.ps1`, `hyperv-proof-chrome.ps1`, `build-all.ps1`, and `install-driver-for-vhlk.ps1`.
 - [x] `test-vhlk-runner-flow.ps1` passed.
 - [x] `test-code-review-20260511.ps1` passed after adding Chrome proof `.env` coverage.
 - [x] `test-frame-ex-abi.ps1` passed.

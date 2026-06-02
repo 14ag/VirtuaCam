@@ -168,6 +168,7 @@ try {
         -DutCheckpointName $DutCheckpointName `
         -ProjectName $ProjectName `
         -TestNameListPath $TestNameListPath `
+        -BlockedTestNameListPath $BlockedTestNameListPath `
         -PendingStartTimeoutSeconds $PendingStartTimeoutSeconds `
         -TimeoutMinutes $TimeoutMinutes `
         -ResearchGateFailureCount $ResearchGateFailureCount `
