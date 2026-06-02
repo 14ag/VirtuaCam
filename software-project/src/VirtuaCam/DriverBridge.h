@@ -111,6 +111,10 @@ private:
     size_t m_nv12ReadbackWriteIndex = 0;
     UINT64 m_readbackSequence = 0;
     UINT64 m_readbackNotReadyCount = 0;
+    UINT64 m_frameExBgraUploadCount = 0;
+    UINT64 m_frameExNv12UploadCount = 0;
+    UINT64 m_legacyBgr24UploadCount = 0;
+    UINT64 m_frameExFallbackToBgr24Count = 0;
     UINT m_outputWidth = 1920;
     UINT m_outputHeight = 1080;
     ULONG m_outputFormat = 0;

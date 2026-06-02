@@ -455,6 +455,7 @@ Remove-Item -LiteralPath $ppmSelfTestDir -Recurse -Force
 $appCpp = Join-Path $SourceRoot "VirtuaCam\App.cpp"
 $brokerCpp = Join-Path $SourceRoot "VirtuaCam\Broker.cpp"
 $driverBridgeCpp = Join-Path $SourceRoot "VirtuaCam\DriverBridge.cpp"
+$driverBridgeH = Join-Path $SourceRoot "VirtuaCam\DriverBridge.h"
 $multiplexerCpp = Join-Path $SourceRoot "VirtuaCam\Multiplexer.cpp"
 $multiplexerH = Join-Path $SourceRoot "VirtuaCam\Multiplexer.h"
 $processCpp = Join-Path $SourceRoot "VirtuaCam\Process.cpp"
@@ -505,6 +506,7 @@ $auditMetrics = [ordered]@{
         usesNonBlockingMap = $false
         hasReadbackNotReadyCounter = $false
         logsReadbackNotReady = $false
+        hasUploadPathCounters = $false
         legacyFallbackPreserved = $false
     }
     freeze = [ordered]@{
@@ -623,6 +625,15 @@ Assert-Contains -Path $driverBridgeCpp -Pattern "return DXGI_ERROR_WAS_STILL_DRA
 Assert-Contains -Path $driverBridgeCpp -Pattern "m_readbackNotReadyCount" -Message "DriverBridge must count readback-not-ready events separately."
 $auditMetrics.driverBridge.hasReadbackNotReadyCounter = $true
 Assert-Contains -Path $driverBridgeCpp -Pattern "readbackNotReady=" -Message "DriverBridge status logs must expose readback-not-ready count."
+Assert-Contains -Path $driverBridgeCpp -Pattern "frameExBgra=" -Message "DriverBridge status logs must expose BGRA FrameEx upload count."
+Assert-Contains -Path $driverBridgeCpp -Pattern "frameExNv12=" -Message "DriverBridge status logs must expose NV12 FrameEx upload count."
+Assert-Contains -Path $driverBridgeCpp -Pattern "legacyBgr24=" -Message "DriverBridge status logs must expose legacy BGR24 upload count."
+Assert-Contains -Path $driverBridgeCpp -Pattern "frameExFallbackBgr24=" -Message "DriverBridge status logs must expose FrameEx fallback count."
+Assert-Contains -Path $driverBridgeH -Pattern "m_frameExBgraUploadCount" -Message "DriverBridge must count BGRA FrameEx uploads."
+Assert-Contains -Path $driverBridgeH -Pattern "m_frameExNv12UploadCount" -Message "DriverBridge must count NV12 FrameEx uploads."
+Assert-Contains -Path $driverBridgeH -Pattern "m_legacyBgr24UploadCount" -Message "DriverBridge must count legacy BGR24 uploads."
+Assert-Contains -Path $driverBridgeH -Pattern "m_frameExFallbackToBgr24Count" -Message "DriverBridge must count FrameEx fallback-to-BGR24 uploads."
+$auditMetrics.driverBridge.hasUploadPathCounters = $true
 Assert-Contains -Path (Join-Path $RepoRoot "software-project\src\VirtuaCam\App.cpp") -Pattern "readback not ready" -Message "App must log readback-not-ready separately from driver warmup."
 $auditMetrics.driverBridge.logsReadbackNotReady = $true
 Assert-NotContains -Path $driverBridgeCpp -Pattern "Map\(m_stagingTexture\.get\(\), 0, D3D11_MAP_READ, 0" -Message "DriverBridge must not use single blocking BGRA staging maps."

@@ -372,6 +372,10 @@ void DriverBridge::Shutdown()
     m_frameExSupported = false;
     m_outputFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
     m_uploadFormatMask = 0;
+    m_frameExBgraUploadCount = 0;
+    m_frameExNv12UploadCount = 0;
+    m_legacyBgr24UploadCount = 0;
+    m_frameExFallbackToBgr24Count = 0;
 }
 
 bool DriverBridge::IsRecoverableSendFailure(HRESULT hr)
@@ -1096,7 +1100,7 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
     }
 
     VirtuaCamLog::LogLine(std::format(
-        L"{} frame={} hw={} client={} queuedMappings={} queuedBytes={} completed={} completedFrames={} skipped={} readbackNotReady={} lastFill=0x{:08X} stride={} widthBytes={} required={} byteCount={} remaining={} lastSetLen={} setOk={} setReject={} rejectReason={} outFmt={} uploadMask=0x{:08X} lastSetFmt={} staleReject={} busyReject={} lastAcceptedFrame={} lastAcceptedQpc={} lastAcceptedTime={} returned={}",
+        L"{} frame={} hw={} client={} queuedMappings={} queuedBytes={} completed={} completedFrames={} skipped={} readbackNotReady={} frameExBgra={} frameExNv12={} legacyBgr24={} frameExFallbackBgr24={} lastFill=0x{:08X} stride={} widthBytes={} required={} byteCount={} remaining={} lastSetLen={} setOk={} setReject={} rejectReason={} outFmt={} uploadMask=0x{:08X} lastSetFmt={} staleReject={} busyReject={} lastAcceptedFrame={} lastAcceptedQpc={} lastAcceptedTime={} returned={}",
         prefix ? prefix : L"Driver status",
         frameSequence,
         status.HardwareState,
@@ -1107,6 +1111,10 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
         status.CompletedFrameCount,
         status.NumFramesSkipped,
         m_readbackNotReadyCount,
+        m_frameExBgraUploadCount,
+        m_frameExNv12UploadCount,
+        m_legacyBgr24UploadCount,
+        m_frameExFallbackToBgr24Count,
         status.LastFillStatus,
         status.LastFillStride,
         status.LastFillWidthBytes,
@@ -1579,6 +1587,12 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
         hr = UploadMappedFrameExBgra(mapped);
         if (FAILED(hr)) {
             hr = UploadMappedFrame(mapped);
+            if (SUCCEEDED(hr)) {
+                ++m_frameExFallbackToBgr24Count;
+                ++m_legacyBgr24UploadCount;
+            }
+        } else {
+            ++m_frameExBgraUploadCount;
         }
         m_context->Unmap(mappedTexture, 0);
 
@@ -1620,6 +1634,9 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
             if (SUCCEEDED(hr)) {
                 hr = UploadMappedFrameExNv12(mapped);
                 m_context->Unmap(mappedTexture, 0);
+                if (SUCCEEDED(hr)) {
+                    ++m_frameExNv12UploadCount;
+                }
             }
         }
 
@@ -1638,6 +1655,9 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
         &mappedTexture));
     hr = UploadMappedFrame(mapped);
     m_context->Unmap(mappedTexture, 0);
+    if (SUCCEEDED(hr)) {
+        ++m_legacyBgr24UploadCount;
+    }
 
     if (FAILED(hr) && IsRecoverableSendFailure(hr)) {
         HRESULT hrReinit = ReinitializeAfterFailure(hr);
