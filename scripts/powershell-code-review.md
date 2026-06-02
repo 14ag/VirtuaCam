@@ -50,9 +50,9 @@ Suggest: add `(Get-Item $path).Length -gt 0` assertion for critical signed artif
 
 ---
 
-### 2.3 `install-all.ps1`
+### 2.3 Legacy install script
 
-🟡 **`Write-InstallLog` appends to file but doesn't guard concurrent writes.** If `install-all.ps1` is ever invoked in parallel (e.g., two VMs), the log file will be corrupted. Low risk today but worth noting.
+Resolved: install automation now uses `VirtuaCamSetup.exe --install --quiet --json`; the old PowerShell install entrypoint was removed.
 
 🟡 **`Protect-VirtuaCamRegistryKey` sets ACLs but no rollback on failure.** If the `SetAccessControl` call throws mid-application, the key may end up in a partially-tightened ACL state that blocks subsequent installs. Wrap in `try/catch` with a restore of the original SDDL.
 
@@ -320,7 +320,7 @@ This is visible in process listings (`tasklist`, Process Monitor) on the guest d
 **Recommendation:** consolidate into `hyperv-common.ps1` (or new `hyperv-hlk-common.ps1`).
 
 ### 4.2 pnputil Exit Code 2 Not Handled
-Occurs in `install-all.ps1`, `hyperv-clean-checkpoint.ps1`. Exit code 2 = reboot required (not an error). Treat as `$rebootRequired = $true` and continue.
+Occurs in setup-driver install flows and `hyperv-clean-checkpoint.ps1`. Exit code 2 = reboot required (not an error). Treat as `$rebootRequired = $true` and continue.
 
 ### 4.3 Credential Exposure via cmdkey
 `hyperv-hlk-client.ps1` and `hyperv-hlk-preflight.ps1` call `cmdkey` with plaintext password in a `cmd.exe` argument string. Visible in process listings. Mitigate: write a temp `.cmd` file, invoke, delete — or use `net use` with `PSCredential`.
@@ -343,7 +343,7 @@ Both VHLK runners use `\r` for in-place spinner. Redirected output (CI, log file
 | 4 | Inline camera script string — extract to file | `hyperv-proof-windows-camera.ps1` | 🟡 |
 | 5 | `$shadow` variable `$deadline` inside remote scriptblock | `hyperv-proof-windows-camera.ps1` | 🟡 |
 | 6 | Extract `Get-DriverResidue` / `Get-HlkArpEntries` to shared module | `hlk-client` + `hlk-preflight` | 🟡 |
-| 7 | pnputil exit 2 = reboot required, not error | `install-all.ps1`, `clean-checkpoint` | 🟡 |
+| 7 | pnputil exit 2 = reboot required, not error | setup wizard, `clean-checkpoint` | 🟡 |
 | 8 | `Update-AttemptState` JSON write needs error guard | `hyperv-proof-chrome.ps1` | 🟡 |
 | 9 | `$before`/`$after` path comparison case-sensitivity | `test-performance-audit.ps1` | 🟡 |
 | 10 | `sshd -T` version-dependent exit code issue | `hyperv-enable-ssh.ps1` | 🟡 |

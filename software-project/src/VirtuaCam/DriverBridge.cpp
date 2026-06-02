@@ -23,6 +23,7 @@ namespace
     constexpr UINT kDriverHeight = 1080;
     constexpr UINT kDriverBytesPerPixel = 3;
     constexpr UINT kMaxDriverDimension = 1920;
+    constexpr size_t kDriverReadbackPoolSize = 3;
 
     struct DriverBlitConstants
     {
@@ -142,9 +143,15 @@ namespace
         ULONG UploadFormatMask = 0;
         ULONG LastSetDataFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
         ULONG ReservedStatus[3] = {};
+        ULONG StaleUploadRejectedCount = 0;
+        ULONG BusyUploadRejectedCount = 0;
+        ULONGLONG LastAcceptedFrameId = 0;
+        ULONGLONG LastAcceptedPerformanceCounter = 0;
+        ULONGLONG LastAcceptedSystemTime100ns = 0;
     };
 
     static_assert(offsetof(DriverStatusSnapshot, OutputFormat) == VIRTUACAM_DRIVER_STATUS_V1_SIZE);
+    static_assert(offsetof(DriverStatusSnapshot, StaleUploadRejectedCount) > VIRTUACAM_DRIVER_STATUS_V1_SIZE);
 
     bool IsWarmupRejectStatus(const DriverStatusSnapshot& status)
     {
@@ -353,7 +360,7 @@ void DriverBridge::Shutdown()
     m_pixelShader.reset();
     m_vertexShader.reset();
     ResetFrameExResources();
-    m_stagingTexture.reset();
+    ResetReadbackPools();
     m_scaledRtv.reset();
     m_scaledTexture.reset();
     m_context.reset();
@@ -515,7 +522,7 @@ HRESULT DriverBridge::EnsureGpuResources(ID3D11Texture2D* sourceTexture)
         RETURN_IF_FAILED(CreateShaders());
     }
 
-    bool recreateTextures = !m_scaledTexture || !m_stagingTexture || !m_scaledRtv;
+    bool recreateTextures = !m_scaledTexture || m_bgraReadbackSlots.empty() || !m_scaledRtv;
     if (!recreateTextures && m_scaledTexture) {
         D3D11_TEXTURE2D_DESC currentDesc = {};
         m_scaledTexture->GetDesc(&currentDesc);
@@ -527,7 +534,7 @@ HRESULT DriverBridge::EnsureGpuResources(ID3D11Texture2D* sourceTexture)
     if (recreateTextures) {
         m_scaledRtv.reset();
         m_scaledTexture.reset();
-        m_stagingTexture.reset();
+        ResetReadbackPools();
         ResetFrameExResources();
 
         D3D11_TEXTURE2D_DESC scaledDesc = {};
@@ -542,11 +549,12 @@ HRESULT DriverBridge::EnsureGpuResources(ID3D11Texture2D* sourceTexture)
         RETURN_IF_FAILED(m_device->CreateTexture2D(&scaledDesc, nullptr, m_scaledTexture.put()));
         RETURN_IF_FAILED(m_device->CreateRenderTargetView(m_scaledTexture.get(), nullptr, m_scaledRtv.put()));
 
-        D3D11_TEXTURE2D_DESC stagingDesc = scaledDesc;
-        stagingDesc.Usage = D3D11_USAGE_STAGING;
-        stagingDesc.BindFlags = 0;
-        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        RETURN_IF_FAILED(m_device->CreateTexture2D(&stagingDesc, nullptr, m_stagingTexture.put()));
+        RETURN_IF_FAILED(EnsureReadbackPool(
+            m_bgraReadbackSlots,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            m_outputWidth,
+            m_outputHeight,
+            std::addressof(m_stagingTexture)));
         m_rgbBuffer.resize(static_cast<size_t>(m_outputWidth) * m_outputHeight * kDriverBytesPerPixel);
         VirtuaCamLog::LogLine(std::format(
             L"DriverBridge output geometry {}x{}",
@@ -604,7 +612,7 @@ HRESULT DriverBridge::RefreshDriverGeometry()
     m_outputHeight = newHeight;
     m_scaledRtv.reset();
     m_scaledTexture.reset();
-    m_stagingTexture.reset();
+    ResetReadbackPools();
     ResetFrameExResources();
     m_rgbBuffer.resize(static_cast<size_t>(m_outputWidth) * m_outputHeight * kDriverBytesPerPixel);
     return S_OK;
@@ -649,6 +657,8 @@ void DriverBridge::ResetFrameExResources()
     m_videoContext.reset();
     m_videoDevice.reset();
     m_nv12StagingTexture.reset();
+    m_nv12ReadbackSlots.clear();
+    m_nv12ReadbackWriteIndex = 0;
     m_nv12Texture.reset();
 }
 
@@ -684,9 +694,98 @@ bool DriverBridge::IsFrameExSupported()
     return m_frameExSupported;
 }
 
+HRESULT DriverBridge::EnsureReadbackPool(
+    std::vector<ReadbackSlot>& slots,
+    DXGI_FORMAT format,
+    UINT width,
+    UINT height,
+    wil::com_ptr_nothrow<ID3D11Texture2D>* firstSlotAlias)
+{
+    RETURN_HR_IF_NULL(E_UNEXPECTED, m_device);
+    RETURN_HR_IF(E_INVALIDARG, width == 0 || height == 0);
+
+    slots.clear();
+    slots.resize(kDriverReadbackPoolSize);
+
+    D3D11_TEXTURE2D_DESC stagingDesc = {};
+    stagingDesc.Width = width;
+    stagingDesc.Height = height;
+    stagingDesc.MipLevels = 1;
+    stagingDesc.ArraySize = 1;
+    stagingDesc.Format = format;
+    stagingDesc.SampleDesc.Count = 1;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+    for (auto& slot : slots) {
+        RETURN_IF_FAILED(m_device->CreateTexture2D(&stagingDesc, nullptr, slot.texture.put()));
+        slot.hasCopy = false;
+        slot.sequence = 0;
+    }
+
+    if (firstSlotAlias) {
+        *firstSlotAlias = slots.front().texture;
+    }
+    return S_OK;
+}
+
+HRESULT DriverBridge::QueueReadbackAndMapReady(
+    std::vector<ReadbackSlot>& slots,
+    size_t& writeIndex,
+    ID3D11Texture2D* sourceTexture,
+    D3D11_MAPPED_SUBRESOURCE& mapped,
+    ID3D11Texture2D** mappedTexture)
+{
+    RETURN_HR_IF_NULL(E_POINTER, sourceTexture);
+    RETURN_HR_IF_NULL(E_POINTER, mappedTexture);
+    RETURN_HR_IF(E_UNEXPECTED, slots.empty());
+    RETURN_HR_IF_NULL(E_UNEXPECTED, m_context);
+
+    ReadbackSlot& writeSlot = slots[writeIndex % slots.size()];
+    m_context->CopyResource(writeSlot.texture.get(), sourceTexture);
+    writeSlot.hasCopy = true;
+    writeSlot.sequence = ++m_readbackSequence;
+    writeIndex = (writeIndex + 1) % slots.size();
+
+    for (size_t offset = 0; offset < slots.size(); ++offset) {
+        ReadbackSlot& slot = slots[(writeIndex + offset) % slots.size()];
+        if (!slot.hasCopy) {
+            continue;
+        }
+
+        HRESULT hr = m_context->Map(
+            slot.texture.get(),
+            0,
+            D3D11_MAP_READ,
+            D3D11_MAP_FLAG_DO_NOT_WAIT,
+            &mapped);
+        if (SUCCEEDED(hr)) {
+            slot.hasCopy = false;
+            *mappedTexture = slot.texture.get();
+            return S_OK;
+        }
+        if (hr != DXGI_ERROR_WAS_STILL_DRAWING) {
+            return hr;
+        }
+    }
+
+    return HRESULT_FROM_WIN32(ERROR_RETRY);
+}
+
+void DriverBridge::ResetReadbackPools()
+{
+    m_stagingTexture.reset();
+    m_bgraReadbackSlots.clear();
+    m_bgraReadbackWriteIndex = 0;
+    m_nv12StagingTexture.reset();
+    m_nv12ReadbackSlots.clear();
+    m_nv12ReadbackWriteIndex = 0;
+}
+
 HRESULT DriverBridge::EnsureNv12Resources()
 {
-    if (m_nv12Texture && m_nv12StagingTexture && m_videoProcessor &&
+    if (m_nv12Texture && !m_nv12ReadbackSlots.empty() && m_videoProcessor &&
         m_videoInputView && m_videoOutputView) {
         return S_OK;
     }
@@ -711,11 +810,14 @@ HRESULT DriverBridge::EnsureNv12Resources()
     nv12Desc.BindFlags = D3D11_BIND_RENDER_TARGET;
     RETURN_IF_FAILED(m_device->CreateTexture2D(&nv12Desc, nullptr, m_nv12Texture.put()));
 
-    D3D11_TEXTURE2D_DESC stagingDesc = nv12Desc;
-    stagingDesc.Usage = D3D11_USAGE_STAGING;
-    stagingDesc.BindFlags = 0;
-    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    RETURN_IF_FAILED(m_device->CreateTexture2D(&stagingDesc, nullptr, m_nv12StagingTexture.put()));
+    RETURN_IF_FAILED(EnsureReadbackPool(
+        m_nv12ReadbackSlots,
+        DXGI_FORMAT_NV12,
+        m_outputWidth,
+        m_outputHeight,
+        std::addressof(m_nv12StagingTexture)));
+
+    m_nv12ReadbackWriteIndex = 0;
 
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDesc = {};
     contentDesc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
@@ -895,7 +997,7 @@ HRESULT DriverBridge::UploadMappedFrame(const D3D11_MAPPED_SUBRESOURCE& mapped)
                 ++nonBlackPixels;
             }
         }
-        const std::wstring logDir = (std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"logs").wstring();
+        const std::wstring logDir = VirtuaCamLog::GetLogDir();
         CreateDirectoryW(logDir.c_str(), nullptr);
         const std::wstring framePath = (std::filesystem::path(logDir) / std::format(L"driverbridge-frame-{:06}.ppm", n)).wstring();
         DumpBgr24FrameAsPpm(
@@ -993,7 +1095,7 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
     }
 
     VirtuaCamLog::LogLine(std::format(
-        L"{} frame={} hw={} client={} queuedMappings={} queuedBytes={} completed={} completedFrames={} skipped={} lastFill=0x{:08X} stride={} widthBytes={} required={} byteCount={} remaining={} lastSetLen={} setOk={} setReject={} rejectReason={} outFmt={} uploadMask=0x{:08X} lastSetFmt={} returned={}",
+        L"{} frame={} hw={} client={} queuedMappings={} queuedBytes={} completed={} completedFrames={} skipped={} lastFill=0x{:08X} stride={} widthBytes={} required={} byteCount={} remaining={} lastSetLen={} setOk={} setReject={} rejectReason={} outFmt={} uploadMask=0x{:08X} lastSetFmt={} staleReject={} busyReject={} lastAcceptedFrame={} lastAcceptedQpc={} lastAcceptedTime={} returned={}",
         prefix ? prefix : L"Driver status",
         frameSequence,
         status.HardwareState,
@@ -1016,6 +1118,11 @@ void DriverBridge::LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequ
         status.OutputFormat,
         status.UploadFormatMask,
         status.LastSetDataFormat,
+        status.StaleUploadRejectedCount,
+        status.BusyUploadRejectedCount,
+        status.LastAcceptedFrameId,
+        status.LastAcceptedPerformanceCounter,
+        status.LastAcceptedSystemTime100ns,
         returned));
 }
 
@@ -1329,7 +1436,7 @@ HRESULT DriverBridge::ApplyAspectPolicyNow(AspectRatioMode preferredMode, ULONG 
         m_outputHeight = desiredHeight;
         m_scaledRtv.reset();
         m_scaledTexture.reset();
-        m_stagingTexture.reset();
+        ResetReadbackPools();
         ResetFrameExResources();
         m_rgbBuffer.resize(static_cast<size_t>(m_outputWidth) * m_outputHeight * kDriverBytesPerPixel);
     }
@@ -1456,15 +1563,22 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
     const bool frameExSupported = IsFrameExSupported();
 
     if (frameExSupported && CanUseFrameEx(VIRTUACAM_FRAME_FORMAT_BGRA32)) {
-        m_context->CopyResource(m_stagingTexture.get(), m_scaledTexture.get());
-
         D3D11_MAPPED_SUBRESOURCE mapped = {};
-        RETURN_IF_FAILED(m_context->Map(m_stagingTexture.get(), 0, D3D11_MAP_READ, 0, &mapped));
+        ID3D11Texture2D* mappedTexture = nullptr;
+        hr = QueueReadbackAndMapReady(
+            m_bgraReadbackSlots,
+            m_bgraReadbackWriteIndex,
+            m_scaledTexture.get(),
+            mapped,
+            &mappedTexture);
+        if (FAILED(hr)) {
+            return hr;
+        }
         hr = UploadMappedFrameExBgra(mapped);
         if (FAILED(hr)) {
             hr = UploadMappedFrame(mapped);
         }
-        m_context->Unmap(m_stagingTexture.get(), 0);
+        m_context->Unmap(mappedTexture, 0);
 
         if (SUCCEEDED(hr)) {
             return hr;
@@ -1493,13 +1607,17 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
         }
 
         if (SUCCEEDED(hr)) {
-            m_context->CopyResource(m_nv12StagingTexture.get(), m_nv12Texture.get());
-
             D3D11_MAPPED_SUBRESOURCE mapped = {};
-            hr = m_context->Map(m_nv12StagingTexture.get(), 0, D3D11_MAP_READ, 0, &mapped);
+            ID3D11Texture2D* mappedTexture = nullptr;
+            hr = QueueReadbackAndMapReady(
+                m_nv12ReadbackSlots,
+                m_nv12ReadbackWriteIndex,
+                m_nv12Texture.get(),
+                mapped,
+                &mappedTexture);
             if (SUCCEEDED(hr)) {
                 hr = UploadMappedFrameExNv12(mapped);
-                m_context->Unmap(m_nv12StagingTexture.get(), 0);
+                m_context->Unmap(mappedTexture, 0);
             }
         }
 
@@ -1508,12 +1626,16 @@ HRESULT DriverBridge::SendFrame(ID3D11Texture2D* sourceTexture)
         }
     }
 
-    m_context->CopyResource(m_stagingTexture.get(), m_scaledTexture.get());
-
     D3D11_MAPPED_SUBRESOURCE mapped = {};
-    RETURN_IF_FAILED(m_context->Map(m_stagingTexture.get(), 0, D3D11_MAP_READ, 0, &mapped));
+    ID3D11Texture2D* mappedTexture = nullptr;
+    RETURN_IF_FAILED(QueueReadbackAndMapReady(
+        m_bgraReadbackSlots,
+        m_bgraReadbackWriteIndex,
+        m_scaledTexture.get(),
+        mapped,
+        &mappedTexture));
     hr = UploadMappedFrame(mapped);
-    m_context->Unmap(m_stagingTexture.get(), 0);
+    m_context->Unmap(mappedTexture, 0);
 
     if (FAILED(hr) && IsRecoverableSendFailure(hr)) {
         HRESULT hrReinit = ReinitializeAfterFailure(hr);

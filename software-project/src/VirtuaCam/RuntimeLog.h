@@ -26,6 +26,7 @@ namespace VirtuaCamLog
     std::wstring GetExePath();
     std::wstring GetExeDir();
     std::wstring GetCurrentDir();
+    std::wstring GetLogDir();
     std::wstring GetLogPath();
 
     void ShowAndLogError(HWND hwnd, PCWSTR message, PCWSTR title, HRESULT hr);

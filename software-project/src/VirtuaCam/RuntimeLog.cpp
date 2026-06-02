@@ -187,6 +187,11 @@ namespace VirtuaCamLog
         return dir;
     }
 
+    std::wstring GetLogDir()
+    {
+        return GetLogDirFs().wstring();
+    }
+
     std::wstring GetLogPath()
     {
         std::scoped_lock lock(g_logMutex);

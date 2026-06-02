@@ -37,7 +37,7 @@ This design avoids the Media Foundation virtual camera output path. The broker c
 Use the repository root scripts. This subproject does not have a separate public build or install path.
 
 1. From the repo root, run `.\scripts\build-all.ps1`.
-2. From an elevated PowerShell window in the repo root, run `.\scripts\install-all.ps1`.
+2. From an elevated PowerShell window in the repo root, run `.\output\VirtuaCamSetup.exe --install --quiet --json .\output\logs\wizard\install.json`.
 3. Launch `.\output\VirtuaCam.exe`.
 4. Select a source from the tray icon menu.
 5. Open the target app and select `VirtuaCam` or `Virtual Camera Driver` as the camera.

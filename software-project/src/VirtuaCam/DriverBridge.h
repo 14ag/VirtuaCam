@@ -26,6 +26,13 @@ public:
     HRESULT SendFrame(ID3D11Texture2D* sourceTexture);
 
 private:
+    struct ReadbackSlot
+    {
+        wil::com_ptr_nothrow<ID3D11Texture2D> texture;
+        bool hasCopy = false;
+        UINT64 sequence = 0;
+    };
+
     static bool IsRecoverableSendFailure(HRESULT hr);
     HRESULT EnsurePropertySetReady();
     bool IsPropertySetSupported(ULONG propertyId, DWORD* supportFlags = nullptr);
@@ -48,6 +55,19 @@ private:
     HRESULT TrySendFrameEx(const VIRTUACAM_FRAME_EX_HEADER& header);
     bool CanUseFrameEx(ULONG uploadFormat) const;
     bool IsFrameExSupported();
+    HRESULT EnsureReadbackPool(
+        std::vector<ReadbackSlot>& slots,
+        DXGI_FORMAT format,
+        UINT width,
+        UINT height,
+        wil::com_ptr_nothrow<ID3D11Texture2D>* firstSlotAlias = nullptr);
+    HRESULT QueueReadbackAndMapReady(
+        std::vector<ReadbackSlot>& slots,
+        size_t& writeIndex,
+        ID3D11Texture2D* sourceTexture,
+        D3D11_MAPPED_SUBRESOURCE& mapped,
+        ID3D11Texture2D** mappedTexture);
+    void ResetReadbackPools();
     void ResetFrameExResources();
     void LogDriverStatusSnapshot(const wchar_t* prefix, long frameSequence);
     void SetLastError(const std::wstring& message) { m_lastError = message; }
@@ -85,6 +105,11 @@ private:
 
     std::vector<BYTE> m_rgbBuffer;
     std::vector<BYTE> m_frameExBuffer;
+    std::vector<ReadbackSlot> m_bgraReadbackSlots;
+    std::vector<ReadbackSlot> m_nv12ReadbackSlots;
+    size_t m_bgraReadbackWriteIndex = 0;
+    size_t m_nv12ReadbackWriteIndex = 0;
+    UINT64 m_readbackSequence = 0;
     UINT m_outputWidth = 1920;
     UINT m_outputHeight = 1080;
     ULONG m_outputFormat = 0;

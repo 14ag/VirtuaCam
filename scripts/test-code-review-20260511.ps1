@@ -75,7 +75,7 @@ Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "--broke
 Assert-NotContains -Path "software-project\src\VirtuaCam\Multiplexer.cpp" -Pattern "reinterpret_cast<HANDLE>\(static_cast<UINT_PTR>\(streamInfo\.sharedFenceHandleValue\)\)" -Message "Multiplexer must not own untrusted raw handle values."
 
 Assert-Order -Path "software-project\src\VirtuaCam\Broker.cpp" -First "context4->Signal" -Second "context->Flush();" -Message "Broker publish must flush after signal."
-Assert-Order -Path "software-project\src\VirtuaCam\Consumer.cpp" -First "g_context4->Signal" -Second "g_context->Flush();" -Message "Consumer publish must flush after signal."
+Assert-Order -Path "software-project\src\VirtuaCam\Process.cpp" -First "g_d3d11Context4->Signal" -Second "g_d3d11Context->Flush();" -Message "Producer publish must flush after signal."
 Assert-Order -Path "software-project\src\VirtuaCam\Multiplexer.cpp" -First "m_context4->Signal" -Second "m_context->Flush();" -Message "Multiplexer publish must flush after signal."
 Assert-Contains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern "VirtuaCamExeSha256" -Message "Service mode must verify installed executable hash."
 Assert-NotContains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern "VIRTUACAM_STARTUP_ARGS[\s\S]{0,600}Watcher service" -Message "Service launch must ignore VIRTUACAM_STARTUP_ARGS."

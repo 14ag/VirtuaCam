@@ -21,6 +21,7 @@ HRESULT CreateCurrentUserOnlySecurityAttributes(wil::unique_hlocal_security_desc
 std::wstring GetProducerManifestName(DWORD pid);
 std::wstring GetProducerTextureName(DWORD pid);
 std::wstring GetProducerFenceName(DWORD pid);
+std::wstring GetProducerStatusName(DWORD pid);
 std::wstring GetBrokerManifestName();
 std::wstring GetBrokerTextureName();
 std::wstring GetBrokerFenceName();
@@ -50,6 +51,26 @@ struct BroadcastManifest {
     volatile VCamCommand command;
 };
 
+inline constexpr UINT32 VIRTUACAM_DIRECTPORT_STATUS_MAGIC = 0x31534356u; // VCS1
+inline constexpr UINT32 VIRTUACAM_DIRECTPORT_STATUS_VERSION = 1u;
+
+struct DirectPortStatusV1 {
+    UINT32 magic;
+    UINT32 version;
+    UINT32 size;
+    DWORD ownerPid;
+    volatile LONGLONG publishSequence;
+    UINT64 qpcFrequency;
+    UINT64 producerFrameQpc;
+    UINT64 lastPublishedFenceValue;
+    UINT64 frameCount;
+    UINT64 duplicateCount;
+    UINT64 staleCount;
+    HRESULT lastHRESULT;
+    ULONG reserved0;
+    UINT64 reserved[8];
+};
+
 bool InitializeBroadcastManifest(
     BroadcastManifest* manifest,
     DWORD ownerPid,
@@ -67,6 +88,22 @@ bool ValidateBroadcastManifest(
     const LUID* expectedAdapterLuid,
     std::wstring& textureName,
     std::wstring& fenceName);
+bool InitializeDirectPortStatus(
+    DirectPortStatusV1* status,
+    DWORD ownerPid,
+    UINT64 qpcFrequency);
+void PublishDirectPortStatus(
+    DirectPortStatusV1* status,
+    UINT64 producerFrameQpc,
+    UINT64 lastPublishedFenceValue,
+    UINT64 frameCount,
+    UINT64 duplicateCount,
+    UINT64 staleCount,
+    HRESULT lastHRESULT);
+bool ReadDirectPortStatusStable(
+    const DirectPortStatusV1* status,
+    DWORD expectedOwnerPid,
+    DirectPortStatusV1& snapshot);
 
 void TraceMFAttributes(IUnknown* unknown, PCWSTR prefix);
 std::wstring PKSIDENTIFIER_ToString(PKSIDENTIFIER id, ULONG length);
