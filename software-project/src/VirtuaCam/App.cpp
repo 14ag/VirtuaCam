@@ -1009,6 +1009,7 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
     static bool s_loggedFirstTexture = false;
     static bool s_loggedDefaultFeed = false;
     static UINT s_driverWarmupRetryLogCount = 0;
+    static UINT s_driverReadbackRetryLogCount = 0;
     static bool s_hasSentFrame = false;
     static UINT64 s_lastSentFrameValue = 0;
     static ULONGLONG s_lastDefaultFeedSendTick = 0;
@@ -1055,7 +1056,12 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
 
     HRESULT hr = g_driverBridge->SendFrame(sharedTexture.get());
     if (FAILED(hr)) {
-        if (hr == HRESULT_FROM_WIN32(ERROR_RETRY)) {
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            ++s_driverReadbackRetryLogCount;
+            if (s_driverReadbackRetryLogCount == 1 || (s_driverReadbackRetryLogCount % 120) == 0) {
+                VirtuaCamLog::LogLine(L"DriverBridge::SendFrame readback not ready");
+            }
+        } else if (hr == HRESULT_FROM_WIN32(ERROR_RETRY)) {
             ++s_driverWarmupRetryLogCount;
             if (s_driverWarmupRetryLogCount == 1 || (s_driverWarmupRetryLogCount % 120) == 0) {
                 VirtuaCamLog::LogLine(L"DriverBridge::SendFrame waiting for driver stream to start");
@@ -1065,6 +1071,7 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
         }
     } else {
         s_driverWarmupRetryLogCount = 0;
+        s_driverReadbackRetryLogCount = 0;
         s_hasSentFrame = true;
         s_lastSentFrameValue = brokerFrameValue;
         if (brokerState != BrokerState::Connected) {

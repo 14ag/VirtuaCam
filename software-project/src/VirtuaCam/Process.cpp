@@ -2558,6 +2558,41 @@ namespace BuiltInCameraProducer
         return hr;
     }
 
+    HRESULT SelectRgb32MediaType(IMFSourceReader* reader, IMFMediaType** currentTypeOut)
+    {
+        RETURN_HR_IF_NULL(E_POINTER, reader);
+        RETURN_HR_IF_NULL(E_POINTER, currentTypeOut);
+        *currentTypeOut = nullptr;
+
+        ComPtr<IMFMediaType> outputType;
+        RETURN_IF_FAILED(MFCreateMediaType(&outputType));
+        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
+        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32));
+
+        bool rgb32Selected = false;
+        for (DWORD i = 0;; ++i) {
+            ComPtr<IMFMediaType> nativeType;
+            HRESULT hr = reader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, i, &nativeType);
+            if (hr == MF_E_NO_MORE_TYPES) break;
+            RETURN_IF_FAILED(hr);
+
+            if (SUCCEEDED(reader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, nativeType.Get())) &&
+                SUCCEEDED(reader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, outputType.Get()))) {
+                rgb32Selected = true;
+                break;
+            }
+        }
+        RETURN_HR_IF(MF_E_INVALIDMEDIATYPE, !rgb32Selected);
+
+        ComPtr<IMFMediaType> currentType;
+        RETURN_IF_FAILED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &currentType));
+        GUID subtype = GUID_NULL;
+        RETURN_IF_FAILED(currentType->GetGUID(MF_MT_SUBTYPE, &subtype));
+        RETURN_HR_IF(MF_E_INVALIDMEDIATYPE, subtype != MFVideoFormat_RGB32);
+
+        return currentType.CopyTo(currentTypeOut);
+    }
+
     HRESULT InitializeProducer(const wchar_t* args)
     {
         std::wstring argsStr = args ? args : L"";
@@ -2591,27 +2626,8 @@ namespace BuiltInCameraProducer
         callback->SetReader(g_sourceReader.Get());
         g_sourceReaderCallback = callback;
 
-        ComPtr<IMFMediaType> outputType;
-        RETURN_IF_FAILED(MFCreateMediaType(&outputType));
-        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
-        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32));
-
-        // Pick a native type that the source reader can accept, then request RGB32.
-        for (DWORD i = 0;; ++i) {
-            ComPtr<IMFMediaType> nativeType;
-            HRESULT hr = g_sourceReader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, i, &nativeType);
-            if (hr == MF_E_NO_MORE_TYPES) break;
-            RETURN_IF_FAILED(hr);
-
-            if (SUCCEEDED(g_sourceReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, nativeType.Get()))) {
-                if (SUCCEEDED(g_sourceReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, outputType.Get()))) {
-                    break;
-                }
-            }
-        }
-
         ComPtr<IMFMediaType> currentType;
-        RETURN_IF_FAILED(g_sourceReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &currentType));
+        RETURN_IF_FAILED(SelectRgb32MediaType(g_sourceReader.Get(), &currentType));
         MFGetAttributeSize(currentType.Get(), MF_MT_FRAME_SIZE, (UINT32*)&g_videoWidth, (UINT32*)&g_videoHeight);
         RETURN_HR_IF(E_FAIL, g_videoWidth <= 0 || g_videoHeight <= 0);
 
@@ -2719,25 +2735,8 @@ namespace BuiltInCameraProducer
         callback->SetReader(g_sourceReader.Get());
         g_sourceReaderCallback = callback;
 
-        ComPtr<IMFMediaType> outputType;
-        RETURN_IF_FAILED(MFCreateMediaType(&outputType));
-        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
-        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32));
-
-        for (DWORD i = 0;; ++i) {
-            ComPtr<IMFMediaType> nativeType;
-            HRESULT hr = g_sourceReader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, i, &nativeType);
-            if (hr == MF_E_NO_MORE_TYPES) break;
-            RETURN_IF_FAILED(hr);
-
-            if (SUCCEEDED(g_sourceReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, nativeType.Get())) &&
-                SUCCEEDED(g_sourceReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, outputType.Get()))) {
-                break;
-            }
-        }
-
         ComPtr<IMFMediaType> currentType;
-        RETURN_IF_FAILED(g_sourceReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &currentType));
+        RETURN_IF_FAILED(SelectRgb32MediaType(g_sourceReader.Get(), &currentType));
         MFGetAttributeSize(currentType.Get(), MF_MT_FRAME_SIZE, (UINT32*)&g_videoWidth, (UINT32*)&g_videoHeight);
         RETURN_HR_IF(E_FAIL, g_videoWidth <= 0 || g_videoHeight <= 0);
 
@@ -2807,6 +2806,11 @@ namespace BuiltInCameraProducer
         BYTE* data = nullptr;
         DWORD length = 0;
         if (FAILED(buffer->Lock(&data, NULL, &length)) || !data) return false;
+        const UINT64 requiredBytes = static_cast<UINT64>(g_videoWidth) * static_cast<UINT64>(g_videoHeight) * 4ull;
+        if (static_cast<UINT64>(length) < requiredBytes) {
+            (void)buffer->Unlock();
+            return false;
+        }
         if (FAILED(EnsureCameraSourceTexture(static_cast<UINT>(g_videoWidth), static_cast<UINT>(g_videoHeight)))) {
             (void)buffer->Unlock();
             return false;

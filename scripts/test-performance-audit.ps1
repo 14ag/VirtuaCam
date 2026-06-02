@@ -95,6 +95,9 @@ Assert-Contains -Path $processCpp -Pattern "class AsyncSourceReaderCallback fina
 Assert-Contains -Path $processCpp -Pattern "MF_SOURCE_READER_ASYNC_CALLBACK" -Message "Source Reader callback must be configured before reader creation."
 Assert-Contains -Path $processCpp -Pattern "TryTakeLatest" -Message "Async Source Reader path must expose a latest-sample handoff."
 Assert-Contains -Path $processCpp -Pattern "m_droppedSamples" -Message "Async Source Reader callback must overwrite stale samples instead of queuing unbounded frames."
+Assert-Contains -Path $processCpp -Pattern "SelectRgb32MediaType" -Message "Camera/file producers must validate RGB32 media type before BGRA upload."
+Assert-Contains -Path $processCpp -Pattern "subtype != MFVideoFormat_RGB32" -Message "Camera/file producers must reject non-RGB32 current media types."
+Assert-Contains -Path $processCpp -Pattern "length\) < requiredBytes" -Message "Camera/file producers must reject short RGB32 sample buffers."
 Assert-NotContains -Path $processCpp -Pattern "ReadSample\([^\r\n]*&streamFlags" -Message "Camera/file hot path must not use blocking Source Reader ReadSample output parameters."
 Assert-Contains -Path $discoveryH -Pattern "DiscoverStreams\(const std::map<DWORD, UINT64>& expectedProducers\)" -Message "Discovery must support expected-producer fast path."
 Assert-Contains -Path $discoveryCpp -Pattern "TryAddStreamForPid" -Message "Discovery must use PID-targeted manifest probing."
@@ -116,6 +119,8 @@ Assert-Contains -Path $driverBridgeCpp -Pattern "DriverFrameDumpEnabled\(\) && \
 Assert-Contains -Path $driverBridgeCpp -Pattern "kDriverReadbackPoolSize\s*=\s*3" -Message "DriverBridge must keep a three-slot readback pool."
 Assert-Contains -Path $driverBridgeCpp -Pattern "QueueReadbackAndMapReady" -Message "DriverBridge must queue GPU readbacks through the staging pool."
 Assert-Contains -Path $driverBridgeCpp -Pattern "D3D11_MAP_FLAG_DO_NOT_WAIT" -Message "DriverBridge readback pool must avoid blocking Map when possible."
+Assert-Contains -Path $driverBridgeCpp -Pattern "return DXGI_ERROR_WAS_STILL_DRAWING" -Message "DriverBridge must report readback-not-ready distinctly from driver warmup retry."
+Assert-Contains -Path (Join-Path $RepoRoot "software-project\src\VirtuaCam\App.cpp") -Pattern "readback not ready" -Message "App must log readback-not-ready separately from driver warmup."
 Assert-NotContains -Path $driverBridgeCpp -Pattern "Map\(m_stagingTexture\.get\(\), 0, D3D11_MAP_READ, 0" -Message "DriverBridge must not use single blocking BGRA staging maps."
 Assert-NotContains -Path $driverBridgeCpp -Pattern "Map\(m_nv12StagingTexture\.get\(\), 0, D3D11_MAP_READ, 0" -Message "DriverBridge must not use single blocking NV12 staging maps."
 

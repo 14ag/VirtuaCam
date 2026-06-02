@@ -770,7 +770,7 @@ HRESULT DriverBridge::QueueReadbackAndMapReady(
         }
     }
 
-    return HRESULT_FROM_WIN32(ERROR_RETRY);
+    return DXGI_ERROR_WAS_STILL_DRAWING;
 }
 
 void DriverBridge::ResetReadbackPools()
