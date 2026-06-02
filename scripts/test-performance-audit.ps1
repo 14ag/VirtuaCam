@@ -96,6 +96,28 @@ function Measure-FrameFreezeMetrics {
     }
 }
 
+function Measure-NumericSummary {
+    param([Parameter(Mandatory = $true)][double[]]$Values)
+
+    if (-not $Values -or $Values.Count -eq 0) {
+        return [ordered]@{
+            average = $null
+            p95 = $null
+            max = $null
+        }
+    }
+
+    $sorted = @($Values | Sort-Object)
+    $sum = 0.0
+    foreach ($value in $Values) { $sum += $value }
+    $p95Index = [Math]::Min($sorted.Count - 1, [Math]::Max(0, [int][Math]::Ceiling($sorted.Count * 0.95) - 1))
+    return [ordered]@{
+        average = $sum / $Values.Count
+        p95 = [double]$sorted[$p95Index]
+        max = [double]$sorted[-1]
+    }
+}
+
 function Read-FrameTraceValues {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -112,9 +134,45 @@ function Read-FrameTraceValues {
     return [UInt64[]]$values.ToArray()
 }
 
+function Read-FrameTraceNumberColumn {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][int]$ColumnIndex
+    )
+
+    $values = New-Object System.Collections.Generic.List[double]
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) { continue }
+        $parts = $trimmed -split ","
+        if ($parts.Count -le $ColumnIndex) { continue }
+        $parsed = 0.0
+        if ([double]::TryParse($parts[$ColumnIndex].Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+            $values.Add($parsed)
+        }
+    }
+    return [double[]]$values.ToArray()
+}
+
+function Measure-Intervals {
+    param([Parameter(Mandatory = $true)][double[]]$TimestampsMs)
+
+    $intervals = New-Object System.Collections.Generic.List[double]
+    for ($i = 1; $i -lt $TimestampsMs.Count; $i++) {
+        if ($TimestampsMs[$i] -ge $TimestampsMs[$i - 1]) {
+            $intervals.Add($TimestampsMs[$i] - $TimestampsMs[$i - 1])
+        }
+    }
+    return Measure-NumericSummary -Values ([double[]]$intervals.ToArray())
+}
+
 $freezeSelfTest = Measure-FrameFreezeMetrics -FrameValues ([UInt64[]]@(1, 2, 2, 2, 3, 4, 4)) -FrameIntervalMs 33
 if ($freezeSelfTest.duplicateFrameCount -ne 3 -or $freezeSelfTest.freezeEventCount -ne 2) {
     throw "[FAIL] freeze metric self-test failed."
+}
+$summarySelfTest = Measure-NumericSummary -Values ([double[]]@(10, 20, 30, 40))
+if ($summarySelfTest.average -ne 25 -or $summarySelfTest.max -ne 40) {
+    throw "[FAIL] numeric summary self-test failed."
 }
 
 $appCpp = Join-Path $SourceRoot "VirtuaCam\App.cpp"
@@ -168,6 +226,18 @@ $auditMetrics = [ordered]@{
         duplicateFrameCount = 0
         freezeEventCount = 0
         note = "Runtime frame-freeze rate needs a consumer frame-id trace; static contracts are validated here."
+    }
+    cadence = [ordered]@{
+        measured = $false
+        averageIntervalMs = $null
+        p95IntervalMs = $null
+        maxIntervalMs = $null
+    }
+    latency = [ordered]@{
+        measured = $false
+        averageMs = $null
+        p95Ms = $null
+        maxMs = $null
     }
     quality = [ordered]@{
         ssimYMeasured = $false
@@ -280,6 +350,24 @@ if (-not [string]::IsNullOrWhiteSpace($FrameTracePath)) {
     $auditMetrics.freeze.duplicateFrameCount = $freezeMetrics.duplicateFrameCount
     $auditMetrics.freeze.freezeEventCount = $freezeMetrics.freezeEventCount
     $auditMetrics.freeze.note = "Freeze metrics measured from frame trace: $FrameTracePath"
+
+    $timestampsMs = Read-FrameTraceNumberColumn -Path $FrameTracePath -ColumnIndex 1
+    if ($timestampsMs.Count -gt 1) {
+        $cadence = Measure-Intervals -TimestampsMs $timestampsMs
+        $auditMetrics.cadence.measured = $true
+        $auditMetrics.cadence.averageIntervalMs = $cadence.average
+        $auditMetrics.cadence.p95IntervalMs = $cadence.p95
+        $auditMetrics.cadence.maxIntervalMs = $cadence.max
+    }
+
+    $latencyMs = Read-FrameTraceNumberColumn -Path $FrameTracePath -ColumnIndex 2
+    if ($latencyMs.Count -gt 0) {
+        $latency = Measure-NumericSummary -Values $latencyMs
+        $auditMetrics.latency.measured = $true
+        $auditMetrics.latency.averageMs = $latency.average
+        $auditMetrics.latency.p95Ms = $latency.p95
+        $auditMetrics.latency.maxMs = $latency.max
+    }
 }
 
 if (-not $SkipBuild) {
@@ -342,6 +430,14 @@ $md = @(
     "- Freeze event rate: $($auditMetrics.freeze.freezeEventRate)",
     "- Freeze time ratio measured: $($auditMetrics.freeze.freezeTimeRatioMeasured)",
     "- Freeze time ratio: $($auditMetrics.freeze.freezeTimeRatio)",
+    "- Cadence measured: $($auditMetrics.cadence.measured)",
+    "- Average interval ms: $($auditMetrics.cadence.averageIntervalMs)",
+    "- P95 interval ms: $($auditMetrics.cadence.p95IntervalMs)",
+    "- Max interval ms: $($auditMetrics.cadence.maxIntervalMs)",
+    "- Latency measured: $($auditMetrics.latency.measured)",
+    "- Average latency ms: $($auditMetrics.latency.averageMs)",
+    "- P95 latency ms: $($auditMetrics.latency.p95Ms)",
+    "- Max latency ms: $($auditMetrics.latency.maxMs)",
     "- SSIM-Y measured: $($auditMetrics.quality.ssimYMeasured)",
     "- PSNR measured: $($auditMetrics.quality.psnrMeasured)",
     "",
