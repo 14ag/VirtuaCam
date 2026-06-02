@@ -63,13 +63,13 @@ The build is clean by default and always stages the complete software and driver
 Installer command:
 
 ```powershell
-.\scripts\install-all.ps1
+.\output\VirtuaCamSetup.exe --install --quiet --json .\output\logs\wizard\install.json
 ```
 
 There is one build script, one install script, and one staged package path:
 
 - `scripts\build-all.ps1`
-- `scripts\install-all.ps1`
+- `output\VirtuaCamSetup.exe`
 - `output/`
 
 If you add, remove, or rename staged binaries, update `scripts/tools/artifact-manifest.ps1` so build and install stay aligned.

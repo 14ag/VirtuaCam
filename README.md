@@ -10,7 +10,7 @@ Repository goal: build and install a virtual camera that appears to Windows came
 ## What is here
 
 - `scripts\build-all.ps1`: single build entrypoint; builds software and driver and stages everything into `output/`
-- `scripts\install-all.ps1`: single install entrypoint; installs only from `output/`, registers `DirectPortClient.dll`, and configures startup
+- `output\VirtuaCamSetup.exe`: single install entrypoint; installs only from `output/`, registers `DirectPortClient.dll`, and configures startup
 - `scripts\clean-output.ps1`: removes `output/` so the next build recreates a fresh staged package
 - `scripts\test-code-review-20260511.ps1`: whitebox checks for the 2026-05-11 code-review fixes
 - `scripts\test-performance-audit.ps1`: whitebox/runtime checks for the 2026-05-11 performance-audit fixes
@@ -69,13 +69,13 @@ If the installer later reports `TESTSIGNING is OFF`, enable it once and reboot:
 bcdedit /set testsigning on
 ```
 
-Open an elevated PowerShell window in the repo root and install from the single install script:
+Open an elevated PowerShell window in the repo root and install from the setup wizard:
 
 ```powershell
-.\scripts\install-all.ps1
+.\output\VirtuaCamSetup.exe --install --quiet --json .\output\logs\wizard\install.json
 ```
 
-This script is the only install entrypoint. It always installs from `.\output`.
+The setup wizard is the only install entrypoint. It always installs from its own package directory.
 
 ## Run
 
