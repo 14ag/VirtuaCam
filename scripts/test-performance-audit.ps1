@@ -501,7 +501,7 @@ if (-not $SkipRuntime) {
     $before = Get-PpmDumpList
     $proc = $null
     try {
-        $proc = Start-Process -FilePath $exePath -ArgumentList "/startup" -WorkingDirectory (Split-Path -Parent $exePath) -WindowStyle Hidden -PassThru
+        $proc = Start-Process -FilePath $exePath -WorkingDirectory (Split-Path -Parent $exePath) -WindowStyle Hidden -PassThru
         Start-Sleep -Seconds $RuntimeSeconds
     }
     finally {

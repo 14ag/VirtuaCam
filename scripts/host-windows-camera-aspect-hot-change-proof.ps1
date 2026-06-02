@@ -269,7 +269,6 @@ try {
     New-Item -Path $settingsPath -Force | Out-Null
     Set-ItemProperty -Path $settingsPath -Name AspectRatio -Value $InitialAspectRatio
     $runtime = Start-Process -FilePath (Join-Path $packageRoot "VirtuaCam.exe") -ArgumentList @(
-        "/startup",
         "-debug",
         "--source-display-index",
         ([string]$DisplayIndex)

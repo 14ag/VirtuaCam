@@ -472,7 +472,6 @@ try {
     if (-not $launchBrowser) {
         $virtuaCamRuntime = Invoke-WithAttemptEnvironment -AttemptValue $attemptId -Action {
             Start-Process -FilePath $runtimeExe -WorkingDirectory $packageRoot -ArgumentList @(
-                "/startup",
                 "-debug",
                 "--source-window-hwnd", $sourceWindowHwndText
             ) -WindowStyle Hidden -PassThru

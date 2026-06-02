@@ -274,7 +274,6 @@ try {
     Set-ItemProperty -Path $settingsPath -Name AspectRatio -Value $AspectRatio
     $env:VIRTUACAM_DRIVER_FRAME_DUMP = "1"
     $runtime = Start-Process -FilePath (Join-Path $packageRoot "VirtuaCam.exe") -ArgumentList @(
-        "/startup",
         "-debug",
         "--source-display-index",
         ([string]$DisplayIndex)

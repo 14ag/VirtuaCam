@@ -79,7 +79,17 @@ Assert-Order -Path "software-project\src\VirtuaCam\Process.cpp" -First "g_d3d11C
 Assert-Order -Path "software-project\src\VirtuaCam\Multiplexer.cpp" -First "m_context4->Signal" -Second "m_context->Flush();" -Message "Multiplexer publish must flush after signal."
 Assert-Contains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern "VirtuaCamExeSha256" -Message "Service mode must verify installed executable hash."
 Assert-NotContains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern "VIRTUACAM_STARTUP_ARGS[\s\S]{0,600}Watcher service" -Message "Service launch must ignore VIRTUACAM_STARTUP_ARGS."
-Assert-Contains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern "/startup --driver" -Message "Watcher/service must launch app with --driver auto-exit flag."
+$oldTrayFlag = "/" + "startup"
+$oldStartupMode = "Startup " + "mode"
+$processText = Get-Content -LiteralPath (Join-Path $repoRoot "software-project\src\VirtuaCam\Process.cpp") -Raw
+if ($processText -notlike '*launchArgs = enableDebugLogging ? L"--driver -debug" : L"--driver"*') {
+    throw "Watcher launch must use --driver only."
+}
+if ($processText -notlike '*launchArgs = L"--driver"*') {
+    throw "Service launch must use --driver only."
+}
+Assert-NotContains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern ([regex]::Escape("$oldTrayFlag --driver")) -Message "Watcher/service must not combine old tray flag with --driver."
+Assert-NotContains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "g_silentStart|$([regex]::Escape($oldTrayFlag))|-startup|$oldStartupMode" -Message "Redundant tray-silent mode must stay removed."
 Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "g_driverStart = HasArg\(cmdLine, L`"--driver`"\)" -Message "App must auto-exit only for --driver launches."
 Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "5ull \* 1000ull" -Message "--driver inactive timeout must be 5 seconds."
 $appText = Get-Content -LiteralPath (Join-Path $repoRoot "software-project\src\VirtuaCam\App.cpp") -Raw

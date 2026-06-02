@@ -252,7 +252,7 @@ try {
                 }
 
                 if (Test-Path -LiteralPath $exe) {
-                    Start-Process -FilePath $exe -ArgumentList "/startup -debug" | Out-Null
+                    Start-Process -FilePath $exe -ArgumentList "-debug" | Out-Null
                 }
 
                 switch ($Mode) {

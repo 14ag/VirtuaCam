@@ -1487,7 +1487,7 @@ namespace BuiltInCaptureProducer
         return GetDefaultVirtuaCamExePath();
     }
 
-    bool LaunchVirtuaCamStartupInActiveSession(const std::wstring& exePath, const std::wstring& startupArgs)
+    bool LaunchVirtuaCamForDriverAccessInActiveSession(const std::wstring& exePath, const std::wstring& launchArgs)
     {
         const DWORD sessionId = WTSGetActiveConsoleSessionId();
         if (sessionId == 0xFFFFFFFF) {
@@ -1524,7 +1524,7 @@ namespace BuiltInCaptureProducer
         si.lpDesktop = (LPWSTR)L"winsta0\\default";
 
         PROCESS_INFORMATION pi{};
-        const std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, startupArgs);
+        const std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, launchArgs);
         std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
         cmdLineMutable.push_back(L'\0');
 
@@ -1556,12 +1556,12 @@ namespace BuiltInCaptureProducer
         return true;
     }
 
-    bool LaunchVirtuaCamStartup()
+    bool LaunchVirtuaCamForDriverAccess()
     {
         std::wstring exePath = GetVirtuaCamExePathFromRegistryOrDefault();
         const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
         const bool enableDebugLogging = HasArg(cmdLine, L"-debug");
-        std::wstring startupArgs = enableDebugLogging ? L"/startup --driver -debug" : L"/startup --driver";
+        std::wstring launchArgs = enableDebugLogging ? L"--driver -debug" : L"--driver";
 
         wchar_t extraArgs[1024] = {};
         const DWORD extraArgsLength = GetEnvironmentVariableW(
@@ -1569,8 +1569,8 @@ namespace BuiltInCaptureProducer
             extraArgs,
             ARRAYSIZE(extraArgs));
         if (extraArgsLength > 0 && extraArgsLength < ARRAYSIZE(extraArgs)) {
-            startupArgs += L" ";
-            startupArgs += extraArgs;
+            launchArgs += L" ";
+            launchArgs += extraArgs;
         }
 
         // Prefer ShellExecuteExW for normal user-session watcher; fall back to CreateProcessAsUser for service/session-0.
@@ -1578,8 +1578,8 @@ namespace BuiltInCaptureProducer
         sei.cbSize = sizeof(sei);
         sei.fMask = SEE_MASK_NOCLOSEPROCESS;
         sei.lpFile = exePath.c_str();
-        sei.lpParameters = startupArgs.c_str();
-        sei.nShow = SW_HIDE;
+        sei.lpParameters = launchArgs.c_str();
+        sei.nShow = SW_SHOWNORMAL;
         if (ShellExecuteExW(&sei)) {
             if (sei.hProcess) {
                 CloseHandle(sei.hProcess);
@@ -1589,7 +1589,7 @@ namespace BuiltInCaptureProducer
 
         const DWORD err = GetLastError();
         VirtuaCamLog::LogWin32(std::format(L"ShellExecuteExW failed for {}; falling back to CreateProcessAsUser", exePath), err);
-        return LaunchVirtuaCamStartupInActiveSession(exePath, startupArgs);
+        return LaunchVirtuaCamForDriverAccessInActiveSession(exePath, launchArgs);
     }
 
     HANDLE OpenClientRequestEventHandle()
@@ -1666,7 +1666,7 @@ namespace BuiltInCaptureProducer
 
                 if (!IsProcessRunning(L"VirtuaCam.exe")) {
                     if (launchFailCount < 3) {
-                        if (LaunchVirtuaCamStartup()) {
+                        if (LaunchVirtuaCamForDriverAccess()) {
                             launchFailCount = 0;
                         } else {
                             launchFailCount++;
@@ -1934,13 +1934,13 @@ static std::wstring GetTrustedVirtuaCamExePathForService()
     return canonicalExePath;
 }
 
-static bool LaunchVirtuaCamStartupFromService()
+static bool LaunchVirtuaCamForDriverAccessFromService()
 {
     std::wstring exePath = GetTrustedVirtuaCamExePathForService();
     if (exePath.empty()) {
         return false;
     }
-    std::wstring startupArgs = L"/startup --driver";
+    std::wstring launchArgs = L"--driver";
 
     const DWORD sessionId = WTSGetActiveConsoleSessionId();
     if (sessionId == 0xFFFFFFFF) {
@@ -1977,7 +1977,7 @@ static bool LaunchVirtuaCamStartupFromService()
     si.lpDesktop = (LPWSTR)L"winsta0\\default";
 
     PROCESS_INFORMATION pi{};
-    const std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, startupArgs);
+    const std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, launchArgs);
     std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
     cmdLineMutable.push_back(L'\0');
 
@@ -2065,7 +2065,7 @@ static DWORD RunWatcherLoopForService(HANDLE stopEvent)
 
             if (!IsProcessRunningForService(L"VirtuaCam.exe")) {
                 if (launchFailCount < 3) {
-                    if (LaunchVirtuaCamStartupFromService()) {
+                    if (LaunchVirtuaCamForDriverAccessFromService()) {
                         launchFailCount = 0;
                     } else {
                         launchFailCount++;
