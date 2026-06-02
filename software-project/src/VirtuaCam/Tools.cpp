@@ -511,32 +511,36 @@ bool ReadDirectPortStatusStable(
         return false;
     }
 
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        const auto beginSequence = InterlockedCompareExchange64(
-            const_cast<volatile LONGLONG*>(&status->publishSequence),
-            0,
-            0);
-        if ((beginSequence & 1) != 0) {
-            YieldProcessor();
-            continue;
-        }
+    __try {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const auto beginSequence = InterlockedCompareExchange64(
+                const_cast<volatile LONGLONG*>(&status->publishSequence),
+                0,
+                0);
+            if ((beginSequence & 1) != 0) {
+                YieldProcessor();
+                continue;
+            }
 
-        MemoryBarrier();
-        CopyMemory(&snapshot, status, sizeof(snapshot));
-        MemoryBarrier();
+            MemoryBarrier();
+            CopyMemory(&snapshot, status, sizeof(snapshot));
+            MemoryBarrier();
 
-        const auto endSequence = InterlockedCompareExchange64(
-            const_cast<volatile LONGLONG*>(&status->publishSequence),
-            0,
-            0);
-        if (beginSequence == endSequence &&
-            (endSequence & 1) == 0 &&
-            snapshot.magic == VIRTUACAM_DIRECTPORT_STATUS_MAGIC &&
-            snapshot.version == VIRTUACAM_DIRECTPORT_STATUS_VERSION &&
-            snapshot.size == sizeof(DirectPortStatusV1) &&
-            snapshot.ownerPid == expectedOwnerPid) {
-            return true;
+            const auto endSequence = InterlockedCompareExchange64(
+                const_cast<volatile LONGLONG*>(&status->publishSequence),
+                0,
+                0);
+            if (beginSequence == endSequence &&
+                (endSequence & 1) == 0 &&
+                snapshot.magic == VIRTUACAM_DIRECTPORT_STATUS_MAGIC &&
+                snapshot.version == VIRTUACAM_DIRECTPORT_STATUS_VERSION &&
+                snapshot.size == sizeof(DirectPortStatusV1) &&
+                snapshot.ownerPid == expectedOwnerPid) {
+                return true;
+            }
         }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 
     ZeroMemory(&snapshot, sizeof(snapshot));

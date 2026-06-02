@@ -40,10 +40,10 @@ The script runs a clean build by default and stages the full package in `output/
 The staged INF uses `PnpLockdown=1`, DIRID `13`, and `ServiceBinary=%13%\avshws.sys` for current package-isolation validation.
 
 ## Installation
-Use the repository root install script:
+Use the setup wizard from the staged package:
 
 ```powershell
-.\output\VirtuaCamSetup.exe --install --quiet --json .\output\logs\wizard\install.json
+.\output\VirtuaCamSetup.exe --install --json .\output\logs\wizard\install.json
 ```
 
 If needed first:

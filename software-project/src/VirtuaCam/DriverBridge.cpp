@@ -25,6 +25,7 @@ namespace
     constexpr UINT kMaxDriverDimension = 1920;
     constexpr size_t kDriverReadbackPoolSize = 3;
     constexpr ULONGLONG kDriverProbeRetryMs = 2000;
+    constexpr ULONG kDriverHardwareStateStopped = 0;
 
     struct DriverBlitConstants
     {
@@ -638,8 +639,7 @@ bool DriverBridge::IsDriverClientActive()
         return false;
     }
 
-    return status.HardwareState == kDriverHardwareStateRunning &&
-        status.ClientConnected != 0;
+    return status.HardwareState != kDriverHardwareStateStopped;
 }
 
 bool DriverBridge::IsDriverInUse()

@@ -84,6 +84,8 @@ $guestPackageRoot = Join-Path $guestRoot "output"
 $guestSetupExe = Join-Path $guestPackageRoot "VirtuaCamSetup.exe"
 $guestInstallJson = Join-Path $guestRoot "setup-install.json"
 $guestProbeExe = Join-Path $guestProbeToolsRoot "dshow_probe.exe"
+$hostPackageStageRoot = Join-Path $artifactDir "vm-copy-stage"
+$hostPackageStageOutput = Join-Path $hostPackageStageRoot "output"
 
 try {
     Write-HvLog -Message ("Restoring checkpoint '{0}' for DirectShow probe gate." -f $CheckpointName) -LogPath $logPath -Level STEP
@@ -103,7 +105,15 @@ try {
         $null = New-Item -ItemType Directory -Force -Path $Root, $ScriptsRoot, $ScriptToolsRoot, $ProbeToolsRoot
     } -ArgumentList $guestRoot, $guestScriptsRoot, $guestScriptToolsRoot, $guestProbeToolsRoot | Out-Null
 
-    Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "output") -GuestPath $guestRoot -Recurse -LogPath $logPath
+    if (Test-Path -LiteralPath $hostPackageStageRoot) {
+        Remove-Item -LiteralPath $hostPackageStageRoot -Recurse -Force
+    }
+    $null = New-Item -ItemType Directory -Force -Path $hostPackageStageOutput
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot "output") -Force |
+        Where-Object { $_.Name -ne "logs" } |
+        Copy-Item -Destination $hostPackageStageOutput -Recurse -Force
+
+    Copy-HvToGuest -Session $session -LocalPath $hostPackageStageOutput -GuestPath $guestRoot -Recurse -LogPath $logPath
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "tools\dshow-probe\build\dshow_probe.exe") -GuestPath $guestProbeToolsRoot -LogPath $logPath
 
     Write-HvLog -Message "Installing staged package with VirtuaCamSetup.exe before DirectShow probes." -LogPath $logPath -Level STEP

@@ -63,6 +63,7 @@ static bool g_startDebugMode = false;
 static constexpr ULONGLONG kAppFrameIntervalMs = 33;
 static constexpr ULONGLONG kDefaultFeedRefreshMs = 1000;
 static constexpr ULONGLONG kDriverStartInactiveExitMs = 5ull * 1000ull;
+static constexpr DWORD kProducerGracefulStopMs = 3000;
 
 const wchar_t* SourceModeToString(SourceMode mode)
 {
@@ -104,6 +105,7 @@ void InitializeAudio();
 void SelectAudioForCameraPassthrough(int cameraIndex);
 void SetSourceFileMode(SourceMode newMode, const std::wstring& path);
 void ApplySavedAudioSelection();
+bool HasLiveProducerProcess();
 bool HasArg(const std::wstring& cmdLine, const wchar_t* arg);
 bool TryGetArgU64(const std::wstring& cmdLine, const wchar_t* arg, UINT64& outValue);
 int PrintCapturableWindowsJson();
@@ -323,6 +325,21 @@ void SetAspectRatioMode(AspectRatioMode mode)
 
 const VirtuaCam::Discovery* GetGlobalDiscovery() { return g_discovery.get(); }
 bool GetDriverBridgeStatus() { return g_driverBridge && g_driverBridge->IsDriverInUse(); }
+
+bool HasLiveProducerProcess()
+{
+    for (const auto& [key, pi] : g_producerProcesses) {
+        UNREFERENCED_PARAMETER(key);
+        if (!pi.hProcess) {
+            continue;
+        }
+        DWORD exitCode = 0;
+        if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode == STILL_ACTIVE) {
+            return true;
+        }
+    }
+    return false;
+}
 const SourceState& GetMainSourceState() { return g_mainSourceState; }
 const SourceState& GetPipSourceState(PipPosition pos) {
     switch (pos) {
@@ -560,14 +577,45 @@ void SelectAudioForCameraPassthrough(int cameraIndex)
     UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_AUTO);
 }
 
+void StopProducerProcess(const std::wstring& key, PROCESS_INFORMATION& pi)
+{
+    if (pi.hProcess) {
+        DWORD exitCode = 0;
+        const bool running =
+            GetExitCodeProcess(pi.hProcess, &exitCode) &&
+            exitCode == STILL_ACTIVE;
+        if (running) {
+            if (pi.dwThreadId != 0 && PostThreadMessageW(pi.dwThreadId, WM_QUIT, 0, 0)) {
+                VirtuaCamLog::LogLine(std::format(L"Producer stop requested: key={} pid={}", key, pi.dwProcessId));
+            } else {
+                VirtuaCamLog::LogWin32(std::format(L"PostThreadMessageW producer stop failed: key={} pid={}", key, pi.dwProcessId), GetLastError());
+            }
+
+            const DWORD waitResult = WaitForSingleObject(pi.hProcess, kProducerGracefulStopMs);
+            if (waitResult == WAIT_TIMEOUT) {
+                VirtuaCamLog::LogLine(std::format(L"Producer graceful stop timed out; terminating: key={} pid={}", key, pi.dwProcessId));
+                TerminateProcess(pi.hProcess, 0);
+                WaitForSingleObject(pi.hProcess, 1000);
+            } else if (waitResult == WAIT_FAILED) {
+                VirtuaCamLog::LogWin32(std::format(L"WaitForSingleObject producer failed: key={} pid={}", key, pi.dwProcessId), GetLastError());
+            }
+        }
+        CloseHandle(pi.hProcess);
+        pi.hProcess = nullptr;
+    }
+
+    if (pi.hThread) {
+        CloseHandle(pi.hThread);
+        pi.hThread = nullptr;
+    }
+}
+
 void TerminateProducer(const std::wstring& key)
 {
-    if (g_producerProcesses.count(key))
-    {
-        TerminateProcess(g_producerProcesses[key].hProcess, 0);
-        CloseHandle(g_producerProcesses[key].hProcess);
-        CloseHandle(g_producerProcesses[key].hThread);
-        g_producerProcesses.erase(key);
+    auto it = g_producerProcesses.find(key);
+    if (it != g_producerProcesses.end()) {
+        StopProducerProcess(key, it->second);
+        g_producerProcesses.erase(it);
     }
 }
 
@@ -991,19 +1039,21 @@ void OnIdle() {
         brokerState = g_pfnGetBrokerState();
         const bool driverActive = GetDriverBridgeStatus();
         UpdateTelemetry(brokerState, driverActive);
-        if (driverActive) {
+        const bool sourceActive = brokerState == BrokerState::Connected || HasLiveProducerProcess();
+        const bool keepAliveActive = driverActive || sourceActive;
+        if (keepAliveActive) {
             s_driverInactiveSinceTick = 0;
         } else if (g_driverStart) {
             if (s_driverInactiveSinceTick == 0) {
                 s_driverInactiveSinceTick = now;
             } else if (now - s_driverInactiveSinceTick >= kDriverStartInactiveExitMs) {
-                VirtuaCamLog::LogLine(L"Driver-start mode: driver inactive for 5 seconds; exiting app while watcher remains active");
+                VirtuaCamLog::LogLine(L"Driver-start mode: no active driver stream or producer for 5 seconds; exiting app while watcher remains active");
                 PostMessageW(g_hMainWnd, WM_CLOSE, 0, 0);
                 return;
             }
         }
         s_lastBrokerState = brokerState;
-        s_lastDriverActive = driverActive;
+        s_lastDriverActive = keepAliveActive;
     }
     const UINT64 brokerFrameValue = g_pfnGetBrokerFrameValue ? g_pfnGetBrokerFrameValue() : 0;
     TrySendBrokerFrameToDriver(brokerFrameRendered, brokerState, brokerFrameValue);
@@ -1171,6 +1221,12 @@ void ShutdownSystem() {
         g_audioCapture.reset();
     }
 
+    for (auto& [key, pi] : g_producerProcesses)
+    {
+        StopProducerProcess(key, pi);
+    }
+    g_producerProcesses.clear();
+
     if (g_driverBridge) {
         g_driverBridge->Shutdown();
         g_driverBridge.reset();
@@ -1181,19 +1237,6 @@ void ShutdownSystem() {
         FreeLibrary(g_hBrokerDll);
         g_hBrokerDll = nullptr;
     }
-
-    for (auto const& [key, pi] : g_producerProcesses)
-    {
-        if (pi.hProcess) {
-            TerminateProcess(pi.hProcess, 0);
-            WaitForSingleObject(pi.hProcess, 5000);
-            CloseHandle(pi.hProcess);
-        }
-        if (pi.hThread) {
-            CloseHandle(pi.hThread);
-        }
-    }
-    g_producerProcesses.clear();
 
     if (g_discovery) {
         g_discovery->Teardown();

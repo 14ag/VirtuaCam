@@ -88,13 +88,16 @@ if ($processText -notlike '*launchArgs = enableDebugLogging ? L"--driver -debug"
 if ($processText -notlike '*launchArgs = L"--driver"*') {
     throw "Service launch must use --driver only."
 }
+if ($processText -notmatch "serviceMode = HasArg\(cmdLine, L`"--service`"\)[\s\S]{0,180}enableDebugLogging = HasArg\(cmdLine, L`"-debug`"\) \|\| serviceMode") {
+    throw "Watcher service mode must enable runtime logging by default."
+}
 Assert-NotContains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern ([regex]::Escape("$oldTrayFlag --driver")) -Message "Watcher/service must not combine old tray flag with --driver."
 Assert-NotContains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "g_silentStart|$([regex]::Escape($oldTrayFlag))|-startup|$oldStartupMode" -Message "Redundant tray-silent mode must stay removed."
 Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "g_driverStart = HasArg\(cmdLine, L`"--driver`"\)" -Message "App must auto-exit only for --driver launches."
 Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "5ull \* 1000ull" -Message "--driver inactive timeout must be 5 seconds."
 $appText = Get-Content -LiteralPath (Join-Path $repoRoot "software-project\src\VirtuaCam\App.cpp") -Raw
-if ($appText -notmatch "else if \(g_driverStart\)[\s\S]{0,500}driver inactive for 5 seconds") {
-    throw "--driver branch must own inactive auto-exit behavior."
+if ($appText -notmatch "else if \(g_driverStart\)[\s\S]{0,500}no active driver stream or producer for 5 seconds") {
+    throw "--driver branch must own producer-aware inactive auto-exit behavior."
 }
 $driverBridgeText = Get-Content -LiteralPath (Join-Path $repoRoot "software-project\src\VirtuaCam\DriverBridge.cpp") -Raw
 if ($driverBridgeText -match "HRESULT DriverBridge::Initialize\(\)[\s\S]{0,260}EnsurePropertySetReady") {
@@ -130,11 +133,24 @@ if ($runtimeLogText -match "void LogWin32\([^\)]*\)[\s\S]{0,220}LogLine\(") {
 Assert-Contains -Path "software-project\src\VirtuaCam\RuntimeLog.cpp" -Pattern "WriteStdHandleLineLocked\(STD_OUTPUT_HANDLE, line\)" -Message "Runtime messages must mirror to stdout for console/redirected test runs."
 Assert-Contains -Path "software-project\src\VirtuaCam\RuntimeLog.cpp" -Pattern "WriteStdHandleLineLocked\(STD_ERROR_HANDLE, line\)" -Message "Runtime messages must mirror to stderr for console/redirected test runs."
 Assert-Contains -Path "software-project\src\VirtuaCam\RuntimeLog.cpp" -Pattern "LogConsoleVisibleLine" -Message "RuntimeLog must keep all messages visible when normal logging is disabled."
+Assert-Contains -Path "software-project\src\VirtuaCam\Tools.cpp" -Pattern "ReadDirectPortStatusStable[\s\S]{0,900}__try" -Message "DirectPort status sidecar reads must be protected against stale mappings."
 $driverBridgeText = Get-Content -LiteralPath (Join-Path $repoRoot "software-project\src\VirtuaCam\DriverBridge.cpp") -Raw
 if ($driverBridgeText -match "return\s+m_connected\s*\|\|\s*IsDriverClientActive\(\)") {
     throw "Driver-start auto-exit must not treat app-side upload connection as active driver use."
 }
-Assert-Contains -Path "software-project\src\VirtuaCam\DriverBridge.cpp" -Pattern "return IsDriverClientActive\(\);" -Message "Driver-start auto-exit must use actual driver capture activity."
+Assert-Contains -Path "software-project\src\VirtuaCam\DriverBridge.cpp" -Pattern "status\.HardwareState != kDriverHardwareStateStopped" -Message "Driver-start auto-exit must treat paused/running camera pins as active."
+Assert-Contains -Path "driver-project\hwsim.cpp" -Pattern "if \(isRunning\) \{[\s\S]{0,220}KeSetEvent\(registeredClientRequestEventObject[\s\S]{0,220}KeSetEvent\(namedClientRequestEventObject" -Message "Driver must signal watcher on every camera RUN transition, even after stale client state."
+Assert-NotContains -Path "driver-project\hwsim.cpp" -Pattern "if \(!clientConnected \|\| acceptedFrameCount == 0\)" -Message "Driver watcher signal must not be suppressed by stale client/accepted-frame counters."
+Assert-Contains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern "Watcher service: client request event signaled" -Message "Watcher service must log client request wakeups for blackbox diagnosis."
+Assert-Contains -Path "software-project\src\VirtuaCam\Process.cpp" -Pattern "Watcher service: launched VirtuaCam\.exe pid=" -Message "Watcher service must log launch success for blackbox diagnosis."
+$appText = Get-Content -LiteralPath (Join-Path $repoRoot "software-project\src\VirtuaCam\App.cpp") -Raw
+Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "sourceActive = brokerState == BrokerState::Connected \|\| HasLiveProducerProcess\(\)" -Message "Driver-start mode must stay alive while a producer source is connected or starting."
+Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "keepAliveActive = driverActive \|\| sourceActive" -Message "Driver-start idle gate must use driver or producer activity."
+Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "PostThreadMessageW\(pi\.dwThreadId, WM_QUIT" -Message "Producer shutdown must request graceful WM_QUIT before fallback termination."
+if ($appText -match "void TerminateProducer\([^\)]*\)[\s\S]{0,180}TerminateProcess") {
+    throw "Source switching must not kill producers before graceful shutdown."
+}
+Assert-Order -Path "software-project\src\VirtuaCam\App.cpp" -First "StopProducerProcess(key, pi);" -Second "g_driverBridge->Shutdown();" -Message "Shutdown must stop producers before driver/broker teardown to release WGC capture cleanly."
 $setupText = Get-Content -LiteralPath (Join-Path $repoRoot "wizard-project\src\VirtuaCamSetup.cpp") -Raw
 if ($setupText -match "if \(!mode\.empty\(\)\)[\s\S]{0,900}MessageBoxW") {
     throw "Setup headless mode must not show popups."
@@ -145,9 +161,16 @@ if ($setupText -match "succeeded\\n\\nReport|succeeded[\s\S]{0,180}result\.jsonP
 Assert-Contains -Path "wizard-project\src\VirtuaCamSetup.cpp" -Pattern "WriteStdHandleLine\(STD_OUTPUT_HANDLE, line\)" -Message "Setup headless output must mirror to stdout."
 Assert-Contains -Path "wizard-project\src\VirtuaCamSetup.cpp" -Pattern "WriteStdHandleLine\(STD_ERROR_HANDLE, line\)" -Message "Setup headless output must mirror to stderr."
 Assert-Contains -Path "wizard-project\src\VirtuaCamSetup.cpp" -Pattern "WriteHeadlessSummary\(result\)" -Message "Setup headless mode must print console summary."
+Assert-Contains -Path "wizard-project\src\VirtuaCamSetup.cpp" -Pattern "failure[\s\S]{0,160}restart/1000/restart/5000" -Message "Setup must configure watcher service failure restart."
+Assert-Contains -Path "wizard-project\src\VirtuaCamSetup.cpp" -Pattern "failureflag[\s\S]{0,120}kWatcherServiceName" -Message "Setup must enable watcher service failure actions for non-crash exits."
 Assert-NotContains -Path "wizard-project\src\VirtuaCamSetup.cpp" -Pattern "--quiet|/quiet" -Message "Setup must not expose a quiet flag; any flag means headless."
+Assert-NotContains -Path "software-project\src\VirtuaCam\UI.cpp" -Pattern "--quiet|/quiet|--verify-only|/verify" -Message "Runtime UI must not launch removed setup quiet/verify flags."
 Assert-NotContains -Path "README.md" -Pattern "--quiet" -Message "README must not document a setup quiet flag."
 Assert-NotContains -Path "CONTRIBUTING.md" -Pattern "--quiet" -Message "CONTRIBUTING must not document a setup quiet flag."
+Assert-NotContains -Path "driver-project\README.md" -Pattern "--quiet" -Message "Driver README must not document a setup quiet flag."
+Assert-NotContains -Path "software-project\README.md" -Pattern "--quiet" -Message "Software README must not document a setup quiet flag."
+Assert-NotContains -Path "wiki\Getting-Started.md" -Pattern "--quiet" -Message "Getting Started wiki must not document a setup quiet flag."
+Assert-NotContains -Path "wiki\Testing.md" -Pattern "--quiet" -Message "Testing wiki must not document a setup quiet flag."
 Assert-Contains -Path "scripts\hyperv-proof-chrome.ps1" -Pattern 'EnvUserKey\s+"DRIVER_TEST_VM_USERNAME"' -Message "Chrome VM proof must use .env guest username in noninteractive runs."
 Assert-Contains -Path "scripts\hyperv-proof-chrome.ps1" -Pattern 'EnvPasswordKey\s+"DRIVER_TEST_VM_PASSWORD"' -Message "Chrome VM proof must use .env guest password in noninteractive runs."
 Assert-Contains -Path "scripts\playwright-vm-webcam-proof.ps1" -Pattern '\[ValidateRange\(1,\s*10\)\]\[int\]\$CdpConnectAttempts\s*=\s*3' -Message "Playwright proof must retry transient CDP attach failures by default."

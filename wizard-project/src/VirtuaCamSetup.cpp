@@ -1428,6 +1428,16 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             detail = L"Failed to set watcher service description";
             return false;
         }
+        RunLoggedCommand(
+            SystemToolPath(L"sc.exe"),
+            { L"failure", kWatcherServiceName, L"reset=", L"60", L"actions=", L"restart/1000/restart/5000/\"\"/0" },
+            { 0 },
+            30000);
+        RunLoggedCommand(
+            SystemToolPath(L"sc.exe"),
+            { L"failureflag", kWatcherServiceName, L"1" },
+            { 0 },
+            30000);
         if (!RunLoggedCommand(SystemToolPath(L"sc.exe"), { L"start", kWatcherServiceName }, { 0, 1056 }, 30000)) {
             detail = L"Failed to start watcher service";
             return false;

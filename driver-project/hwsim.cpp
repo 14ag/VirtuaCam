@@ -2873,8 +2873,6 @@ void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
 {
     PKEVENT registeredClientRequestEventObject = NULL;
     PKEVENT namedClientRequestEventObject = NULL;
-    BOOLEAN clientConnected = FALSE;
-    LONG acceptedFrameCount = 0;
     KIRQL irql;
 
     DbgPrint("[avshws] HwSim::NotifyCameraState running=%lu connected=%lu irql=%lu\n", (ULONG)isRunning, (ULONG)IsClientConnected(), (ULONG)KeGetCurrentIrql());
@@ -2888,17 +2886,14 @@ void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
         namedClientRequestEventObject = m_NamedClientRequestEventObject;
         ObReferenceObject(namedClientRequestEventObject);
     }
-    clientConnected = m_ClientConnected;
-    acceptedFrameCount = m_SetDataAcceptedCount;
     KeReleaseSpinLock(&m_FrameLock, irql);
 
     if (isRunning) {
-        if (!clientConnected || acceptedFrameCount == 0) {
-            if (registeredClientRequestEventObject) {
-                KeSetEvent(registeredClientRequestEventObject, IO_NO_INCREMENT, FALSE);
-            } else if (namedClientRequestEventObject) {
-                KeSetEvent(namedClientRequestEventObject, IO_NO_INCREMENT, FALSE);
-            }
+        if (registeredClientRequestEventObject) {
+            KeSetEvent(registeredClientRequestEventObject, IO_NO_INCREMENT, FALSE);
+        }
+        if (namedClientRequestEventObject) {
+            KeSetEvent(namedClientRequestEventObject, IO_NO_INCREMENT, FALSE);
         }
     } else {
         if (registeredClientRequestEventObject) {

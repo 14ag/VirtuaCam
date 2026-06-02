@@ -52,7 +52,7 @@ Suggest: add `(Get-Item $path).Length -gt 0` assertion for critical signed artif
 
 ### 2.3 Legacy install script
 
-Resolved: install automation now uses `VirtuaCamSetup.exe --install --quiet --json`; the old PowerShell install entrypoint was removed.
+Resolved: install automation now uses `VirtuaCamSetup.exe --install --json`; the old PowerShell install entrypoint was removed.
 
 🟡 **`Protect-VirtuaCamRegistryKey` sets ACLs but no rollback on failure.** If the `SetAccessControl` call throws mid-application, the key may end up in a partially-tightened ACL state that blocks subsequent installs. Wrap in `try/catch` with a restore of the original SDDL.
 

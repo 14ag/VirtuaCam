@@ -1601,21 +1601,72 @@ namespace BuiltInCaptureProducer
         return LaunchVirtuaCamForDriverAccessInActiveSession(exePath, launchArgs);
     }
 
-    HANDLE OpenClientRequestEventHandle()
+    HANDLE CreateNamedClientRequestEventHandle(const wchar_t* logPrefix)
     {
-        HANDLE eventHandle = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kGlobalClientRequestEventName);
+        wil::unique_hlocal_security_descriptor eventDescriptor;
+        SECURITY_ATTRIBUTES eventAttributes = {};
+        PSECURITY_DESCRIPTOR rawDescriptor = nullptr;
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100002;;;AU)(A;;0x100002;;;IU)",
+                SDDL_REVISION_1,
+                &rawDescriptor,
+                nullptr)) {
+            eventDescriptor.reset(rawDescriptor);
+            eventAttributes.nLength = sizeof(eventAttributes);
+            eventAttributes.lpSecurityDescriptor = eventDescriptor.get();
+        }
+
+        HANDLE eventHandle = CreateEventW(
+            eventAttributes.lpSecurityDescriptor ? &eventAttributes : nullptr,
+            TRUE,
+            FALSE,
+            kGlobalClientRequestEventName);
         if (eventHandle) {
+            VirtuaCamLog::LogLine(std::format(
+                L"{} using named client request event {}",
+                logPrefix ? logPrefix : L"Watcher",
+                kGlobalClientRequestEventName));
             return eventHandle;
         }
 
-        return OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kClientRequestEventName);
+        const DWORD globalCreateError = GetLastError();
+        eventHandle = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kGlobalClientRequestEventName);
+        if (eventHandle) {
+            VirtuaCamLog::LogLine(std::format(
+                L"{} opened existing named client request event {}",
+                logPrefix ? logPrefix : L"Watcher",
+                kGlobalClientRequestEventName));
+            return eventHandle;
+        }
+
+        VirtuaCamLog::LogWin32(
+            std::format(
+                L"{} CreateEventW failed for {}; falling back to session-local event",
+                logPrefix ? logPrefix : L"Watcher",
+                kGlobalClientRequestEventName),
+            globalCreateError);
+
+        eventHandle = CreateEventW(nullptr, TRUE, FALSE, kClientRequestEventName);
+        if (eventHandle) {
+            VirtuaCamLog::LogLine(std::format(
+                L"{} using fallback client request event {}",
+                logPrefix ? logPrefix : L"Watcher",
+                kClientRequestEventName));
+            return eventHandle;
+        }
+
+        VirtuaCamLog::LogWin32(
+            std::format(
+                L"{} CreateEventW failed for fallback client request event",
+                logPrefix ? logPrefix : L"Watcher"),
+            GetLastError());
+        return nullptr;
     }
 
     HANDLE CreateRegisteredClientRequestEventHandle()
     {
-        HANDLE eventHandle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE eventHandle = CreateNamedClientRequestEventHandle(L"Watcher");
         if (!eventHandle) {
-            VirtuaCamLog::LogWin32(L"CreateEventW failed for watcher request event", GetLastError());
             return nullptr;
         }
 
@@ -1623,19 +1674,18 @@ namespace BuiltInCaptureProducer
         HRESULT hr = driverBridge.Initialize();
         if (FAILED(hr)) {
             VirtuaCamLog::LogHr(L"Watcher DriverBridge::Initialize failed", hr);
-            CloseHandle(eventHandle);
-            return nullptr;
+            return eventHandle;
         }
 
         hr = driverBridge.RegisterClientRequestEvent(eventHandle);
         if (FAILED(hr)) {
             VirtuaCamLog::LogHr(L"Watcher DriverBridge::RegisterClientRequestEvent failed", hr);
-            CloseHandle(eventHandle);
-            return nullptr;
+            VirtuaCamLog::LogLine(L"Watcher continuing with named client request event fallback");
+            return eventHandle;
         }
 
         VirtuaCamLog::LogLine(std::format(
-            L"Watcher registered session-local client request event handle=0x{:X}",
+            L"Watcher registered client request event handle=0x{:X}",
             static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(eventHandle))));
         return eventHandle;
     }
@@ -1990,6 +2040,8 @@ static bool LaunchVirtuaCamForDriverAccessFromService()
     std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
     cmdLineMutable.push_back(L'\0');
 
+    VirtuaCamLog::LogLine(std::format(L"Watcher service: launching {}", cmdLine));
+
     const DWORD createFlags = CREATE_UNICODE_ENVIRONMENT;
     const BOOL ok = CreateProcessAsUserW(
         primaryToken.get(),
@@ -2013,16 +2065,58 @@ static bool LaunchVirtuaCamForDriverAccessFromService()
         return false;
     }
 
+    VirtuaCamLog::LogLine(std::format(L"Watcher service: launched VirtuaCam.exe pid={}", pi.dwProcessId));
     if (pi.hThread) CloseHandle(pi.hThread);
     if (pi.hProcess) CloseHandle(pi.hProcess);
     return true;
 }
 
+static HANDLE CreateNamedClientRequestEventHandleForService()
+{
+    wil::unique_hlocal_security_descriptor eventDescriptor;
+    SECURITY_ATTRIBUTES eventAttributes = {};
+    PSECURITY_DESCRIPTOR rawDescriptor = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100002;;;AU)(A;;0x100002;;;IU)",
+            SDDL_REVISION_1,
+            &rawDescriptor,
+            nullptr)) {
+        eventDescriptor.reset(rawDescriptor);
+        eventAttributes.nLength = sizeof(eventAttributes);
+        eventAttributes.lpSecurityDescriptor = eventDescriptor.get();
+    }
+
+    HANDLE eventHandle = CreateEventW(
+        eventAttributes.lpSecurityDescriptor ? &eventAttributes : nullptr,
+        TRUE,
+        FALSE,
+        kGlobalClientRequestEventName);
+    if (eventHandle) {
+        VirtuaCamLog::LogLine(std::format(
+            L"Watcher service: using named client request event {}",
+            kGlobalClientRequestEventName));
+        return eventHandle;
+    }
+
+    const DWORD globalCreateError = GetLastError();
+    eventHandle = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kGlobalClientRequestEventName);
+    if (eventHandle) {
+        VirtuaCamLog::LogLine(std::format(
+            L"Watcher service: opened existing named client request event {}",
+            kGlobalClientRequestEventName));
+        return eventHandle;
+    }
+
+    VirtuaCamLog::LogWin32(
+        std::format(L"Watcher service: CreateEventW failed for {}", kGlobalClientRequestEventName),
+        globalCreateError);
+    return nullptr;
+}
+
 static HANDLE CreateRegisteredClientRequestEventHandleForService()
 {
-    HANDLE eventHandle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE eventHandle = CreateNamedClientRequestEventHandleForService();
     if (!eventHandle) {
-        VirtuaCamLog::LogWin32(L"Watcher service: CreateEventW failed", GetLastError());
         return nullptr;
     }
 
@@ -2030,15 +2124,14 @@ static HANDLE CreateRegisteredClientRequestEventHandleForService()
     HRESULT hr = driverBridge.Initialize();
     if (FAILED(hr)) {
         VirtuaCamLog::LogHr(L"Watcher service: DriverBridge::Initialize failed", hr);
-        CloseHandle(eventHandle);
-        return nullptr;
+        return eventHandle;
     }
 
     hr = driverBridge.RegisterClientRequestEvent(eventHandle);
     if (FAILED(hr)) {
         VirtuaCamLog::LogHr(L"Watcher service: DriverBridge::RegisterClientRequestEvent failed", hr);
-        CloseHandle(eventHandle);
-        return nullptr;
+        VirtuaCamLog::LogLine(L"Watcher service: continuing with named client request event fallback");
+        return eventHandle;
     }
 
     VirtuaCamLog::LogLine(std::format(
@@ -2072,6 +2165,7 @@ static DWORD RunWatcherLoopForService(HANDLE stopEvent)
                 break;
             }
 
+            VirtuaCamLog::LogLine(L"Watcher service: client request event signaled");
             if (!IsProcessRunningForService(L"VirtuaCam.exe")) {
                 if (launchFailCount < 3) {
                     if (LaunchVirtuaCamForDriverAccessFromService()) {
@@ -2080,6 +2174,8 @@ static DWORD RunWatcherLoopForService(HANDLE stopEvent)
                         launchFailCount++;
                     }
                 }
+            } else {
+                VirtuaCamLog::LogLine(L"Watcher service: VirtuaCam.exe already running; launch skipped");
             }
             ResetEvent(requestEvent);
         }
@@ -2964,7 +3060,8 @@ void LoadProducerModule(const std::wstring& type, ProducerModule& module)
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lpCmdLine, _In_ int)
 {
     const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
-    const bool enableDebugLogging = HasArg(cmdLine, L"-debug");
+    const bool serviceMode = HasArg(cmdLine, L"--service");
+    const bool enableDebugLogging = HasArg(cmdLine, L"-debug") || serviceMode;
 
     VirtuaCamLog::InitOptions logOpts;
     logOpts.logFileName = L"virtuacam-process.log";
@@ -2973,7 +3070,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
     logOpts.enabled = enableDebugLogging;
     VirtuaCamLog::Init(logOpts);
 
-    if (HasArg(cmdLine, L"--service")) {
+    if (serviceMode) {
         VirtuaCamLog::LogLine(L"Starting watcher service mode (--service)");
         SERVICE_TABLE_ENTRYW serviceTable[] = {
             { (LPWSTR)kWatcherServiceName, WatcherServiceMain },

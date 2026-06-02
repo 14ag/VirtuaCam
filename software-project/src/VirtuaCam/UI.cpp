@@ -498,12 +498,7 @@ void HandleMenuCommand(UINT id)
         RunPowerShellScript(RepoRootFromExeDir() / L"scripts" / L"hyperv-proof-chrome.ps1", L"-EnableVerifier");
     }
     else if (id == ID_ADV_RUN_SETUP_VERIFY) {
-        const std::filesystem::path setup = std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"VirtuaCamSetup.exe";
-        if (std::filesystem::exists(setup)) {
-            ShellExecuteW(nullptr, L"open", setup.c_str(), L"--verify-only --quiet", VirtuaCamLog::GetExeDir().c_str(), SW_SHOWNORMAL);
-        } else {
-            MessageBoxW(g_hMainWnd, setup.c_str(), L"VirtuaCam setup not staged", MB_OK | MB_ICONWARNING);
-        }
+        CreatePreviewWindow();
     }
     else if (id == ID_SETTINGS_PIP_TL) TogglePipTl();
     else if (id == ID_SETTINGS_PIP_TR) TogglePipTr();
@@ -816,7 +811,7 @@ void ShowContextMenu(HWND hwnd) {
             AddNativeMenuItem(advancedMenu, L"Open Logs", ID_ADV_OPEN_LOG_DIR);
             AddNativeMenuItem(advancedMenu, L"Run Host Media Proof", ID_ADV_RUN_HOST_PROOF);
             AddNativeMenuItem(advancedMenu, L"Run VM Verifier Proof", ID_ADV_RUN_VM_VERIFIER_PROOF);
-            AddNativeMenuItem(advancedMenu, L"Run Setup Verify", ID_ADV_RUN_SETUP_VERIFY);
+            AddNativeMenuItem(advancedMenu, L"Open Setup", ID_ADV_RUN_SETUP_VERIFY);
             AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(advancedMenu), L"Advanced");
         }
     }
