@@ -1561,7 +1561,7 @@ namespace BuiltInCaptureProducer
         std::wstring exePath = GetVirtuaCamExePathFromRegistryOrDefault();
         const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
         const bool enableDebugLogging = HasArg(cmdLine, L"-debug");
-        std::wstring startupArgs = enableDebugLogging ? L"/startup -debug" : L"/startup";
+        std::wstring startupArgs = enableDebugLogging ? L"/startup --driver -debug" : L"/startup --driver";
 
         wchar_t extraArgs[1024] = {};
         const DWORD extraArgsLength = GetEnvironmentVariableW(
@@ -1940,7 +1940,7 @@ static bool LaunchVirtuaCamStartupFromService()
     if (exePath.empty()) {
         return false;
     }
-    std::wstring startupArgs = L"/startup";
+    std::wstring startupArgs = L"/startup --driver";
 
     const DWORD sessionId = WTSGetActiveConsoleSessionId();
     if (sessionId == 0xFFFFFFFF) {

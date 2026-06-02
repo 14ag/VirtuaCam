@@ -23,6 +23,7 @@ static std::unique_ptr<DriverBridge> g_driverBridge;
 static bool g_disconnectAttempted = false;
 static bool g_debugLoggingEnabled = false;
 static bool g_silentStart = false;
+static bool g_driverStart = false;
 
 typedef void (*PFN_InitializeBroker)();
 typedef void (*PFN_ShutdownBroker)();
@@ -62,7 +63,7 @@ static std::wstring g_audioCaptureDeviceName = L"Stereo Mix";
 static bool g_startDebugMode = false;
 static constexpr ULONGLONG kAppFrameIntervalMs = 33;
 static constexpr ULONGLONG kDefaultFeedRefreshMs = 1000;
-static constexpr ULONGLONG kSilentDriverInactiveExitMs = 5ull * 60ull * 1000ull;
+static constexpr ULONGLONG kDriverStartInactiveExitMs = 5ull * 1000ull;
 
 const wchar_t* SourceModeToString(SourceMode mode)
 {
@@ -875,8 +876,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     }
 
     g_silentStart = HasArg(cmdLine, L"/startup") || HasArg(cmdLine, L"-startup");
+    g_driverStart = HasArg(cmdLine, L"--driver") || HasArg(cmdLine, L"/driver");
     if (g_silentStart) {
         VirtuaCamLog::LogLine(L"Startup mode: /startup (tray-silent)");
+    }
+    if (g_driverStart) {
+        VirtuaCamLog::LogLine(L"Driver-start mode: --driver (auto-exit when driver inactive)");
     }
 
     LoadSettings();
@@ -988,11 +993,11 @@ void OnIdle() {
         UpdateTelemetry(brokerState, driverActive);
         if (driverActive) {
             s_driverInactiveSinceTick = 0;
-        } else if (g_silentStart) {
+        } else if (g_driverStart) {
             if (s_driverInactiveSinceTick == 0) {
                 s_driverInactiveSinceTick = now;
-            } else if (now - s_driverInactiveSinceTick >= kSilentDriverInactiveExitMs) {
-                VirtuaCamLog::LogLine(L"Startup mode: driver inactive for 5 minutes; exiting app while watcher remains active");
+            } else if (now - s_driverInactiveSinceTick >= kDriverStartInactiveExitMs) {
+                VirtuaCamLog::LogLine(L"Driver-start mode: driver inactive for 5 seconds; exiting app while watcher remains active");
                 PostMessageW(g_hMainWnd, WM_CLOSE, 0, 0);
                 return;
             }

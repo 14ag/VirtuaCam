@@ -17,6 +17,7 @@
 #include <newdev.h>
 #include <wincrypt.h>
 #include <uxtheme.h>
+#include <tlhelp32.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -51,11 +52,12 @@ namespace
     constexpr int IDC_PREVIEW = 1000;
     constexpr int IDC_STATUS = 1001;
     constexpr int IDC_CHECKS = 1002;
-    constexpr int IDC_VERIFY = 1003;
+    constexpr int IDC_LAUNCH = 1003;
     constexpr int IDC_CLOSE = 1004;
     constexpr int IDC_INSTALL = 1005;
     constexpr int IDC_UNINSTALL = 1006;
     constexpr int IDC_DEBUG = 1007;
+    constexpr int IDC_OK = 1008;
 
     struct CheckResult
     {
@@ -176,11 +178,15 @@ namespace
     HWND g_status = nullptr;
     HWND g_checks = nullptr;
     HWND g_debug = nullptr;
+    HWND g_ok = nullptr;
     HFONT g_uiFont = nullptr;
     HBRUSH g_windowBrush = nullptr;
     HBRUSH g_panelBrush = nullptr;
     std::vector<std::wstring> g_operationLog;
     bool g_debugChecked = false;
+    bool g_logMode = false;
+    bool g_operationActive = false;
+    bool g_waitingForOk = false;
 
     ComPtr<ID3D11Device> g_previewDevice;
     ComPtr<ID3D11DeviceContext> g_previewContext;
@@ -494,7 +500,6 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
 
     void DiscardOperationLog()
     {
-        g_operationLog.clear();
         std::error_code ec;
         std::filesystem::remove(InstallLogPath(), ec);
     }
@@ -1654,9 +1659,6 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
 
     RunResult RunMode(const std::wstring& mode, const std::filesystem::path& jsonPath, const SetupOptions& options)
     {
-        if (mode == L"verify-only") {
-            return RunFirstRunChecks(mode, jsonPath);
-        }
         if (mode == L"install" || mode == L"uninstall" || mode == L"install-watcher-service" || mode == L"uninstall-watcher-service") {
             RunResult result;
             result.mode = mode;
@@ -1906,17 +1908,30 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         const int previewWidth = std::max(1, static_cast<int>(rc.right) - pad * 2);
         const int previewHeight = std::max(1, previewBottom - pad);
         MoveWindow(g_preview, pad, pad, previewWidth, previewHeight, TRUE);
-        MoveWindow(g_status, 0, 0, 0, 0, FALSE);
-        MoveWindow(g_checks, 0, 0, 0, 0, FALSE);
+        MoveWindow(g_status, pad, pad, previewWidth, 24, TRUE);
+        MoveWindow(g_checks, pad, pad + 30, previewWidth, std::max(1, previewHeight - 30), TRUE);
         MoveWindow(g_debug, pad, debugY, std::min(280, std::max(1, static_cast<int>(rc.right) - pad * 2)), debugH, TRUE);
+        ShowWindow(g_preview, g_logMode ? SW_HIDE : SW_SHOW);
+        ShowWindow(g_status, g_logMode ? SW_SHOW : SW_HIDE);
+        ShowWindow(g_checks, g_logMode ? SW_SHOW : SW_HIDE);
+        ShowWindow(g_debug, (g_operationActive || g_waitingForOk) ? SW_HIDE : SW_SHOW);
 
         constexpr int buttonGap = 8;
-        const int buttonCount = 4;
+        const bool showOkOnly = g_operationActive || g_waitingForOk;
+        const int buttonCount = showOkOnly ? 1 : 4;
         int x = std::max(pad, static_cast<int>(rc.right) - pad - (buttonW * buttonCount) - (buttonGap * (buttonCount - 1)));
-        for (int id : { IDC_INSTALL, IDC_UNINSTALL, IDC_VERIFY, IDC_CLOSE }) {
+        const int okX = x;
+        for (int id : { IDC_INSTALL, IDC_UNINSTALL, IDC_LAUNCH, IDC_CLOSE }) {
             HWND child = GetDlgItem(hwnd, id);
-            MoveWindow(child, x, buttonY, buttonW, buttonH, TRUE);
-            x += buttonW + buttonGap;
+            MoveWindow(child, showOkOnly ? okX : x, buttonY, buttonW, buttonH, TRUE);
+            ShowWindow(child, showOkOnly ? SW_HIDE : SW_SHOW);
+            if (!showOkOnly) {
+                x += buttonW + buttonGap;
+            }
+        }
+        if (g_ok) {
+            MoveWindow(g_ok, okX, buttonY, buttonW, buttonH, TRUE);
+            ShowWindow(g_ok, showOkOnly ? SW_SHOW : SW_HIDE);
         }
     }
 
@@ -1927,22 +1942,139 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         }
     }
 
+    void AddLogLine(const std::wstring& line)
+    {
+        if (!g_checks) return;
+        SendMessageW(g_checks, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
+        const int count = static_cast<int>(SendMessageW(g_checks, LB_GETCOUNT, 0, 0));
+        if (count > 0) {
+            SendMessageW(g_checks, LB_SETTOPINDEX, count - 1, 0);
+        }
+    }
+
+    void PopulateOperationLog()
+    {
+        ClearChecks();
+        for (const auto& line : g_operationLog) {
+            AddLogLine(line);
+        }
+    }
+
+    void SetLogMode(bool enabled)
+    {
+        g_logMode = enabled;
+        if (g_hwnd) {
+            ResizeControls(g_hwnd);
+        }
+    }
+
+    void SetOperationUi(bool active, bool waitingForOk)
+    {
+        g_operationActive = active;
+        g_waitingForOk = waitingForOk;
+        if (g_ok) {
+            EnableWindow(g_ok, waitingForOk ? TRUE : FALSE);
+        }
+        SetLogMode(true);
+        if (g_hwnd) {
+            UpdateWindow(g_hwnd);
+        }
+    }
+
+    bool IsVirtuaCamRunning()
+    {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == INVALID_HANDLE_VALUE) return false;
+        PROCESSENTRY32W pe = {};
+        pe.dwSize = sizeof(pe);
+        bool found = false;
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                if (_wcsicmp(pe.szExeFile, L"VirtuaCam.exe") == 0) {
+                    found = true;
+                    break;
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+        return found;
+    }
+
+    std::filesystem::path VirtuaCamExePath()
+    {
+        if (auto path = ReadRegistryString(HKEY_LOCAL_MACHINE, L"SOFTWARE\\VirtuaCam", L"VirtuaCamExe")) {
+            return *path;
+        }
+        return PackageRoot() / L"VirtuaCam.exe";
+    }
+
+    CheckResult LaunchVirtuaCamInteractive()
+    {
+        BeginOperationLog(L"Launch VirtuaCam");
+        CheckResult result{ L"Launch VirtuaCam", false, L"" };
+        const auto exe = VirtuaCamExePath();
+        LogStep(L"Restart software without --driver flag");
+        if (!std::filesystem::exists(exe)) {
+            result.detail = L"VirtuaCam.exe not found: " + exe.wstring();
+            LogInfo(result.detail);
+            return result;
+        }
+        if (IsVirtuaCamRunning()) {
+            LogInfo(L"VirtuaCam.exe already running. Restarting it.");
+            RunLoggedCommand(SystemToolPath(L"taskkill.exe"), { L"/IM", L"VirtuaCam.exe", L"/F" }, { 0, 128 }, 30000);
+            Sleep(500);
+        }
+
+        SHELLEXECUTEINFOW sei = {};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        const std::wstring file = exe.wstring();
+        const std::wstring dir = exe.parent_path().wstring();
+        sei.lpFile = file.c_str();
+        sei.lpDirectory = dir.c_str();
+        sei.nShow = SW_SHOWNORMAL;
+        if (!ShellExecuteExW(&sei)) {
+            result.detail = std::format(L"ShellExecuteExW failed: {}", GetLastError());
+            LogInfo(result.detail);
+            return result;
+        }
+        if (sei.hProcess) CloseHandle(sei.hProcess);
+        LogSuccess(L"VirtuaCam launched without --driver");
+        result.success = true;
+        result.detail = L"Started " + file;
+        return result;
+    }
+
     void RunUiAction(const std::wstring& mode)
     {
         ClearChecks();
+        SetLogMode(true);
         if ((mode == L"install" || mode == L"uninstall") && !IsAdministrator()) {
             if (!RelaunchElevated(mode == L"install" ? L"--install" : L"--uninstall")) {
                 SetStatusText(L"Elevation was cancelled or failed.");
             }
             return;
         }
+        SetOperationUi(true, false);
+        AddLogLine(mode == L"install" ? L"Install started..." : mode == L"uninstall" ? L"Uninstall started..." : L"Launch started...");
         const SetupOptions options;
-        const RunResult result = RunMode(mode, {}, options);
-        if (result.success && mode == L"install") {
-            MessageBoxW(g_hwnd, L"Successfully installed drivers", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
-        } else if (result.success && mode == L"uninstall") {
-            MessageBoxW(g_hwnd, L"Successfully uninstalled drivers", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
+        RunResult result;
+        if (mode == L"launch") {
+            result.mode = mode;
+            result.success = true;
+            CheckResult launch = LaunchVirtuaCamInteractive();
+            result.success = launch.success;
+            result.checks.push_back(launch);
+            SetStatusText(launch.success ? L"VirtuaCam launched." : L"VirtuaCam launch failed.");
+        } else {
+            result = RunMode(mode, {}, options);
         }
+        PopulateOperationLog();
+        for (const auto& check : result.checks) {
+            AddCheckLine(check);
+        }
+        AddLogLine(result.success ? L"Done. Click OK to continue." : L"Failed. Click OK to continue.");
+        SetOperationUi(false, true);
     }
 
     LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1963,7 +2095,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
                 nullptr);
             g_status = CreateWindowW(
                 L"STATIC",
-                L"Preview ready. Install, uninstall, or verify VirtuaCam.",
+                L"Preview ready. Install, uninstall, or launch VirtuaCam.",
                 WS_CHILD | SS_LEFT,
                 0, 0, 0, 0,
                 hwnd,
@@ -1981,8 +2113,9 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
                 nullptr);
             CreateWindowW(L"BUTTON", L"&Install", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_INSTALL), g_instance, nullptr);
             CreateWindowW(L"BUTTON", L"&Uninstall", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_UNINSTALL), g_instance, nullptr);
-            CreateWindowW(L"BUTTON", L"&Verify", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_VERIFY), g_instance, nullptr);
+            CreateWindowW(L"BUTTON", L"&Launch", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_LAUNCH), g_instance, nullptr);
             CreateWindowW(L"BUTTON", L"E&xit", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_CLOSE), g_instance, nullptr);
+            g_ok = CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED, 0, 0, 0, 0, hwnd, ControlId(IDC_OK), g_instance, nullptr);
             g_debug = CreateWindowW(
                 L"BUTTON",
                 L"&Debug next session",
@@ -1993,7 +2126,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
                 g_instance,
                 nullptr);
             g_debugChecked = ReadSettingsDword(L"StartDebugMode", 0);
-            for (int id : { IDC_STATUS, IDC_CHECKS, IDC_INSTALL, IDC_UNINSTALL, IDC_VERIFY, IDC_CLOSE, IDC_DEBUG }) {
+            for (int id : { IDC_STATUS, IDC_CHECKS, IDC_INSTALL, IDC_UNINSTALL, IDC_LAUNCH, IDC_CLOSE, IDC_DEBUG, IDC_OK }) {
                 HWND child = GetDlgItem(hwnd, id);
                 if (child && g_uiFont) {
                     SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
@@ -2003,6 +2136,10 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
                 }
             }
             ResizeControls(hwnd);
+            if (!CheckVirtualCameraEnumeration().success) {
+                SetLogMode(true);
+                AddLogLine(L"VirtuaCam driver is not installed. Click Install to set it up.");
+            }
             SetFocus(GetDlgItem(hwnd, IDC_INSTALL));
             return 0;
         }
@@ -2013,8 +2150,13 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             switch (LOWORD(wParam)) {
             case IDC_INSTALL: RunUiAction(L"install"); return 0;
             case IDC_UNINSTALL: RunUiAction(L"uninstall"); return 0;
-            case IDC_VERIFY: RunUiAction(L"verify-only"); return 0;
+            case IDC_LAUNCH: RunUiAction(L"launch"); return 0;
             case IDC_CLOSE: DestroyWindow(hwnd); return 0;
+            case IDC_OK:
+                g_waitingForOk = false;
+                g_operationActive = false;
+                SetLogMode(!CheckVirtualCameraEnumeration().success);
+                return 0;
             case IDC_DEBUG:
             {
                 g_debugChecked = !g_debugChecked;
@@ -2191,7 +2333,6 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     const bool quiet = HasArg(args, L"--quiet") || HasArg(args, L"/quiet");
     const SetupOptions options = GetSetupOptions(args);
     std::wstring mode;
-    if (HasArg(args, L"--verify-only") || HasArg(args, L"/verify")) mode = L"verify-only";
     if (HasArg(args, L"--install") || HasArg(args, L"/install")) mode = L"install";
     if (HasArg(args, L"--uninstall") || HasArg(args, L"/uninstall")) mode = L"uninstall";
     if (HasArg(args, L"--install-watcher-service") || HasArg(args, L"/install-watcher-service")) mode = L"install-watcher-service";
@@ -2202,11 +2343,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
         const RunResult result = RunMode(mode, GetJsonArg(args), options);
         exitCode = result.success ? 0 : 1;
         if (!quiet) {
-            if (result.success && mode == L"install") {
-                MessageBoxW(nullptr, L"Successfully installed drivers", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
-            } else if (result.success && mode == L"uninstall") {
-                MessageBoxW(nullptr, L"Successfully uninstalled drivers", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
-            } else if (result.success && mode == L"install-watcher-service") {
+            if (result.success && mode == L"install-watcher-service") {
                 MessageBoxW(nullptr, L"Successfully installed watcher service", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
             } else if (result.success && mode == L"uninstall-watcher-service") {
                 MessageBoxW(nullptr, L"Successfully uninstalled watcher service", L"VirtuaCam Setup", MB_OK | MB_ICONINFORMATION);
