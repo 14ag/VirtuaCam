@@ -173,6 +173,11 @@ private:
     ULONG m_OutputStride1;
     ULONG m_UploadFormatMask;
     ULONG m_LastSetDataFormat;
+    ULONG m_StaleUploadRejectedCount;
+    ULONG m_BusyUploadRejectedCount;
+    ULONGLONG m_LastAcceptedFrameId;
+    ULONGLONG m_LastAcceptedPerformanceCounter;
+    ULONGLONG m_LastAcceptedSystemTime100ns;
 
     //
     // The hardware sink that will be used for interrupt notifications.

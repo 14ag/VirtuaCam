@@ -670,6 +670,11 @@ CHardwareSimulation (
     m_OutputStride1 (0),
     m_UploadFormatMask (0),
     m_LastSetDataFormat (VIRTUACAM_FRAME_FORMAT_UNKNOWN),
+    m_StaleUploadRejectedCount (0),
+    m_BusyUploadRejectedCount (0),
+    m_LastAcceptedFrameId (0),
+    m_LastAcceptedPerformanceCounter (0),
+    m_LastAcceptedSystemTime100ns (0),
     m_HardwareSink (HardwareSink),
     m_ScatterGatherMappingsMax (SCATTER_GATHER_MAPPINGS_MAX),
     m_ScatterGatherLookasideInitialized (FALSE)
@@ -1014,6 +1019,11 @@ Return Value:
     m_SetDataRejectedCount = 0;
     m_LastSetDataReason = kSetDataRejectNone;
     m_LastSetDataFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+    m_StaleUploadRejectedCount = 0;
+    m_BusyUploadRejectedCount = 0;
+    m_LastAcceptedFrameId = 0;
+    m_LastAcceptedPerformanceCounter = 0;
+    m_LastAcceptedSystemTime100ns = 0;
 
     KeQuerySystemTimePrecise (&m_StartTime);
 
@@ -2535,6 +2545,9 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         KeAcquireSpinLock(&m_FrameLock, &irql);
         m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
+        if (rejectReason == kSetDataRejectBusy) {
+            m_BusyUploadRejectedCount++;
+        }
         KeReleaseSpinLock(&m_FrameLock, irql);
         return MapSetDataRejectReasonToStatus(rejectReason);
     }
@@ -2605,6 +2618,8 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         KeStallExecutionProcessor(50);
     }
 
+    LARGE_INTEGER acceptedCounter = KeQueryPerformanceCounter(NULL);
+
     KeAcquireSpinLock(&m_FrameLock, &irql);
     if (m_HardwareState == HardwareRunning &&
         m_TemporaryBuffer &&
@@ -2628,10 +2643,16 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     if (acceptedFrame) {
         m_SetDataAcceptedCount++;
         m_LastSetDataReason = kSetDataRejectNone;
+        m_LastAcceptedFrameId++;
+        m_LastAcceptedPerformanceCounter = static_cast<ULONGLONG>(acceptedCounter.QuadPart);
+        m_LastAcceptedSystemTime100ns = static_cast<ULONGLONG>(now.QuadPart);
         status = STATUS_SUCCESS;
     } else {
         m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
+        if (rejectReason == kSetDataRejectBusy) {
+            m_BusyUploadRejectedCount++;
+        }
         status = MapSetDataRejectReasonToStatus(rejectReason);
     }
     KeReleaseSpinLock(&m_FrameLock, irql);
@@ -2730,6 +2751,9 @@ NTSTATUS CHardwareSimulation::SetFrameEx(PVOID data, ULONG dataLength)
         KeAcquireSpinLock(&m_FrameLock, &irql);
         m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
+        if (rejectReason == kSetDataRejectBusy) {
+            m_BusyUploadRejectedCount++;
+        }
         KeReleaseSpinLock(&m_FrameLock, irql);
         return MapSetDataRejectReasonToStatus(rejectReason);
     }
@@ -2756,6 +2780,8 @@ NTSTATUS CHardwareSimulation::SetFrameEx(PVOID data, ULONG dataLength)
         KeStallExecutionProcessor(50);
     }
 
+    LARGE_INTEGER acceptedCounter = KeQueryPerformanceCounter(NULL);
+
     KeAcquireSpinLock(&m_FrameLock, &irql);
     if (m_HardwareState == HardwareRunning &&
         m_TemporaryBuffer &&
@@ -2779,10 +2805,16 @@ NTSTATUS CHardwareSimulation::SetFrameEx(PVOID data, ULONG dataLength)
     if (acceptedFrame) {
         m_SetDataAcceptedCount++;
         m_LastSetDataReason = kSetDataRejectNone;
+        m_LastAcceptedFrameId = header->FrameId;
+        m_LastAcceptedPerformanceCounter = static_cast<ULONGLONG>(acceptedCounter.QuadPart);
+        m_LastAcceptedSystemTime100ns = static_cast<ULONGLONG>(now.QuadPart);
         status = STATUS_SUCCESS;
     } else {
         m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
+        if (rejectReason == kSetDataRejectBusy) {
+            m_BusyUploadRejectedCount++;
+        }
         status = MapSetDataRejectReasonToStatus(rejectReason);
     }
     KeReleaseSpinLock(&m_FrameLock, irql);
@@ -2915,6 +2947,11 @@ void CHardwareSimulation::QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status)
     status->SetDataRejectedCount = m_SetDataRejectedCount;
     status->LastSetDataReason = m_LastSetDataReason;
     status->LastSetDataFormat = m_LastSetDataFormat;
+    status->StaleUploadRejectedCount = m_StaleUploadRejectedCount;
+    status->BusyUploadRejectedCount = m_BusyUploadRejectedCount;
+    status->LastAcceptedFrameId = m_LastAcceptedFrameId;
+    status->LastAcceptedPerformanceCounter = m_LastAcceptedPerformanceCounter;
+    status->LastAcceptedSystemTime100ns = m_LastAcceptedSystemTime100ns;
     KeReleaseSpinLock(&m_FrameLock, irql);
 
     KeAcquireSpinLock(&m_ListLock, &irql);

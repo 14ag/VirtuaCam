@@ -227,10 +227,17 @@ typedef struct _VIRTUACAM_DRIVER_STATUS {
     ULONG UploadFormatMask;
     ULONG LastSetDataFormat;
     ULONG ReservedStatus[3];
+    ULONG StaleUploadRejectedCount;
+    ULONG BusyUploadRejectedCount;
+    ULONGLONG LastAcceptedFrameId;
+    ULONGLONG LastAcceptedPerformanceCounter;
+    ULONGLONG LastAcceptedSystemTime100ns;
 } VIRTUACAM_DRIVER_STATUS, *PVIRTUACAM_DRIVER_STATUS;
 
 static_assert(FIELD_OFFSET(VIRTUACAM_DRIVER_STATUS, OutputFormat) == VIRTUACAM_DRIVER_STATUS_V1_SIZE,
     "VIRTUACAM_DRIVER_STATUS v1 prefix changed.");
+static_assert(FIELD_OFFSET(VIRTUACAM_DRIVER_STATUS, StaleUploadRejectedCount) > VIRTUACAM_DRIVER_STATUS_V1_SIZE,
+    "VIRTUACAM_DRIVER_STATUS append-only fields must remain after the v1 prefix.");
 
 /*************************************************
 

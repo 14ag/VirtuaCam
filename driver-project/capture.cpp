@@ -466,7 +466,11 @@ Return Value:
                         Pin -> Descriptor -> AllocatorFraming
                         );
 
-                Framing -> FramingItem [0].Frames = 2;
+                //
+                // Microsoft AVStream allocator guidance recommends at least
+                // three outstanding frames for smoother dataflow.
+                //
+                Framing -> FramingItem [0].Frames = 3;
 
                 //
                 // The physical and optimal ranges must be biSizeImage.  We only
@@ -2300,7 +2304,7 @@ DECLARE_SIMPLE_FRAMING_EX (
     CapturePinAllocatorFraming,
     STATICGUIDOF (KSMEMORY_TYPE_KERNEL_NONPAGED),
     KSALLOCATOR_REQUIREMENTF_SYSTEM_MEMORY,
-    2,
+    3,
     0,
     2 * PAGE_SIZE,
     2 * PAGE_SIZE

@@ -43,7 +43,7 @@ The staged INF uses `PnpLockdown=1`, DIRID `13`, and `ServiceBinary=%13%\avshws.
 Use the repository root install script:
 
 ```powershell
-.\scripts\install-all.ps1
+.\output\VirtuaCamSetup.exe --install --quiet --json .\output\logs\wizard\install.json
 ```
 
 If needed first:
