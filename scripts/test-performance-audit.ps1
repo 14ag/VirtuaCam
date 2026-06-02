@@ -6,7 +6,13 @@ param(
     [string]$ArtifactRoot = "",
     [string]$FrameTracePath = "",
     [string]$ReferencePpmPath = "",
-    [string]$CapturedPpmPath = ""
+    [string]$CapturedPpmPath = "",
+    [double]$MaxFreezeEventRate = -1.0,
+    [double]$MaxFreezeTimeRatio = -1.0,
+    [double]$MaxP95LatencyMs = -1.0,
+    [double]$MinPsnrDb = -1.0,
+    [double]$MinSsimY = -1.0,
+    [switch]$FailOnLimitedColorRange
 )
 
 Set-StrictMode -Version Latest
@@ -383,6 +389,14 @@ $auditMetrics = [ordered]@{
     runtimeSeconds = [int]$RuntimeSeconds
     noDebugPpmDumpCount = $null
     noDebugPpmDumpPass = $null
+    thresholds = [ordered]@{
+        maxFreezeEventRate = $MaxFreezeEventRate
+        maxFreezeTimeRatio = $MaxFreezeTimeRatio
+        maxP95LatencyMs = $MaxP95LatencyMs
+        minPsnrDb = $MinPsnrDb
+        minSsimY = $MinSsimY
+        failOnLimitedColorRange = [bool]$FailOnLimitedColorRange
+    }
     producer = [ordered]@{
         hasLatestFrameHandoff = $false
         hasDroppedSampleCounter = $false
@@ -609,6 +623,60 @@ if (-not [string]::IsNullOrWhiteSpace($ReferencePpmPath) -or -not [string]::IsNu
     $auditMetrics.quality.note = "PSNR, SSIM-Y, and captured color range measured from P6 PPM pair."
 }
 
+if ($MaxFreezeEventRate -ge 0.0) {
+    if (-not $auditMetrics.freeze.freezeEventRateMeasured) {
+        throw "[FAIL] -MaxFreezeEventRate requires -FrameTracePath."
+    }
+    if ($auditMetrics.freeze.freezeEventRate -gt $MaxFreezeEventRate) {
+        throw "[FAIL] Freeze event rate $($auditMetrics.freeze.freezeEventRate) exceeds max $MaxFreezeEventRate."
+    }
+}
+
+if ($MaxFreezeTimeRatio -ge 0.0) {
+    if (-not $auditMetrics.freeze.freezeTimeRatioMeasured) {
+        throw "[FAIL] -MaxFreezeTimeRatio requires -FrameTracePath."
+    }
+    if ($auditMetrics.freeze.freezeTimeRatio -gt $MaxFreezeTimeRatio) {
+        throw "[FAIL] Freeze time ratio $($auditMetrics.freeze.freezeTimeRatio) exceeds max $MaxFreezeTimeRatio."
+    }
+}
+
+if ($MaxP95LatencyMs -ge 0.0) {
+    if (-not $auditMetrics.latency.measured) {
+        throw "[FAIL] -MaxP95LatencyMs requires latency column in -FrameTracePath."
+    }
+    if ($auditMetrics.latency.p95Ms -gt $MaxP95LatencyMs) {
+        throw "[FAIL] P95 latency $($auditMetrics.latency.p95Ms) ms exceeds max $MaxP95LatencyMs ms."
+    }
+}
+
+if ($MinPsnrDb -ge 0.0) {
+    if (-not $auditMetrics.quality.psnrMeasured) {
+        throw "[FAIL] -MinPsnrDb requires -ReferencePpmPath and -CapturedPpmPath."
+    }
+    if ($auditMetrics.quality.psnrDb -lt $MinPsnrDb) {
+        throw "[FAIL] PSNR $($auditMetrics.quality.psnrDb) dB is below min $MinPsnrDb dB."
+    }
+}
+
+if ($MinSsimY -ge 0.0) {
+    if (-not $auditMetrics.quality.ssimYMeasured) {
+        throw "[FAIL] -MinSsimY requires -ReferencePpmPath and -CapturedPpmPath."
+    }
+    if ($auditMetrics.quality.ssimY -lt $MinSsimY) {
+        throw "[FAIL] SSIM-Y $($auditMetrics.quality.ssimY) is below min $MinSsimY."
+    }
+}
+
+if ($FailOnLimitedColorRange) {
+    if (-not $auditMetrics.quality.colorRangeMeasured) {
+        throw "[FAIL] -FailOnLimitedColorRange requires -ReferencePpmPath and -CapturedPpmPath."
+    }
+    if ($auditMetrics.quality.capturedLimitedRangeLikely) {
+        throw "[FAIL] Captured PPM appears limited-range; check NV12/BGRA color-range handling."
+    }
+}
+
 if (-not $SkipBuild) {
     $cmake = Get-Command cmake -ErrorAction SilentlyContinue
     if (-not $cmake) {
@@ -660,6 +728,12 @@ $md = @(
     "- Generated UTC: $($auditMetrics.generatedAtUtc)",
     "- Target FPS: $($auditMetrics.targetFps)",
     "- Runtime seconds: $($auditMetrics.runtimeSeconds)",
+    "- Max freeze event rate threshold: $($auditMetrics.thresholds.maxFreezeEventRate)",
+    "- Max freeze time ratio threshold: $($auditMetrics.thresholds.maxFreezeTimeRatio)",
+    "- Max P95 latency ms threshold: $($auditMetrics.thresholds.maxP95LatencyMs)",
+    "- Min PSNR dB threshold: $($auditMetrics.thresholds.minPsnrDb)",
+    "- Min SSIM-Y threshold: $($auditMetrics.thresholds.minSsimY)",
+    "- Fail on limited color range: $($auditMetrics.thresholds.failOnLimitedColorRange)",
     "- No-debug PPM dump count: $($auditMetrics.noDebugPpmDumpCount)",
     "- Producer dropped-sample counter present: $($auditMetrics.producer.hasDroppedSampleCounter)",
     "- Duplicate counter present: $($auditMetrics.freeze.duplicateFrameCounterPresent)",
