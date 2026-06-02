@@ -114,6 +114,18 @@ Assert-Contains -Path "software-project\src\VirtuaCam\DriverBridge.h" -Pattern "
 Assert-Contains -Path "software-project\src\VirtuaCam\DriverBridge.cpp" -Pattern "kDriverProbeRetryMs" -Message "DriverBridge must back off missing-driver probes."
 Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "g_driverBridge->IsDriverInUse\(\)" -Message "--driver auto-exit must track real driver use, not lazy bridge init."
 Assert-Contains -Path "software-project\src\VirtuaCam\App.cpp" -Pattern "waiting for driver availability" -Message "Driver availability wait must be quiet/throttled, not modal."
+$runtimeLogText = Get-Content -LiteralPath (Join-Path $repoRoot "software-project\src\VirtuaCam\RuntimeLog.cpp") -Raw
+if ($runtimeLogText -notmatch "EnsureConsole\(options\.attachConsole \|\| allocConsole, allocConsole\)[\s\S]{0,180}if \(!options\.enabled\)") {
+    throw "RuntimeLog must attach parent console before no-debug file logging gate."
+}
+if ($runtimeLogText -match "void LogHr\([^\)]*\)[\s\S]{0,220}LogLine\(") {
+    throw "RuntimeLog HRESULT errors must go through stderr-visible error logging, not debug-only LogLine."
+}
+if ($runtimeLogText -match "void LogWin32\([^\)]*\)[\s\S]{0,220}LogLine\(") {
+    throw "RuntimeLog Win32 errors must go through stderr-visible error logging, not debug-only LogLine."
+}
+Assert-Contains -Path "software-project\src\VirtuaCam\RuntimeLog.cpp" -Pattern "GetStdHandle\(STD_ERROR_HANDLE\)" -Message "Runtime errors must write to stderr for console/redirected test runs."
+Assert-Contains -Path "software-project\src\VirtuaCam\RuntimeLog.cpp" -Pattern "LogErrorLine" -Message "RuntimeLog must keep an error path visible when normal logging is disabled."
 Assert-Contains -Path "scripts\hyperv-proof-chrome.ps1" -Pattern 'EnvUserKey\s+"DRIVER_TEST_VM_USERNAME"' -Message "Chrome VM proof must use .env guest username in noninteractive runs."
 Assert-Contains -Path "scripts\hyperv-proof-chrome.ps1" -Pattern 'EnvPasswordKey\s+"DRIVER_TEST_VM_PASSWORD"' -Message "Chrome VM proof must use .env guest password in noninteractive runs."
 Assert-Contains -Path "scripts\playwright-vm-webcam-proof.ps1" -Pattern '\[ValidateRange\(1,\s*10\)\]\[int\]\$CdpConnectAttempts\s*=\s*3' -Message "Playwright proof must retry transient CDP attach failures by default."

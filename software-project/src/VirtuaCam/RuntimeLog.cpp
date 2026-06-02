@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <mutex>
 #include <cwctype>
+#include <string>
 
 namespace
 {
@@ -13,6 +14,7 @@ namespace
     HANDLE g_logFile = INVALID_HANDLE_VALUE;
     std::wstring g_logPath;
     bool g_initialized = false;
+    bool g_consoleReady = false;
 
     std::wstring GetEnvW(PCWSTR name)
     {
@@ -53,20 +55,37 @@ namespace
         return std::format(L"Win32 error {} (0x{:08X}): {}", error, error, msg);
     }
 
+    void BindConsoleOutputStreams()
+    {
+        FILE* dummy = nullptr;
+        _wfreopen_s(&dummy, L"CONOUT$", L"w", stdout);
+        _wfreopen_s(&dummy, L"CONOUT$", L"w", stderr);
+        SetConsoleOutputCP(CP_UTF8);
+    }
+
     bool EnsureConsole(bool attachConsole, bool allocConsoleIfMissing)
     {
         if (!attachConsole)
             return false;
 
         if (GetConsoleWindow() != nullptr)
+        {
+            BindConsoleOutputStreams();
             return true;
+        }
 
         if (AttachConsole(ATTACH_PARENT_PROCESS) != FALSE)
+        {
+            BindConsoleOutputStreams();
             return true;
+        }
 
         DWORD err = GetLastError();
         if (err == ERROR_ACCESS_DENIED)
+        {
+            BindConsoleOutputStreams();
             return true;
+        }
 
         if (!allocConsoleIfMissing)
             return false;
@@ -74,10 +93,7 @@ namespace
         if (AllocConsole() == FALSE)
             return false;
 
-        FILE* dummy = nullptr;
-        _wfreopen_s(&dummy, L"CONOUT$", L"w", stdout);
-        _wfreopen_s(&dummy, L"CONOUT$", L"w", stderr);
-        SetConsoleOutputCP(CP_UTF8);
+        BindConsoleOutputStreams();
         return true;
     }
 
@@ -96,6 +112,62 @@ namespace
         return preferred;
     }
 
+    std::string WideToUtf8(const std::wstring& text)
+    {
+        if (text.empty())
+            return {};
+
+        const int needed = WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            text.c_str(),
+            static_cast<int>(text.size()),
+            nullptr,
+            0,
+            nullptr,
+            nullptr);
+        if (needed <= 0)
+            return {};
+
+        std::string result;
+        result.resize(static_cast<size_t>(needed));
+        WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            text.c_str(),
+            static_cast<int>(text.size()),
+            result.data(),
+            needed,
+            nullptr,
+            nullptr);
+        return result;
+    }
+
+    void WriteStdErrLineLocked(const std::wstring& line)
+    {
+        HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+        if (!err || err == INVALID_HANDLE_VALUE)
+            return;
+
+        if (!g_consoleReady && GetFileType(err) == FILE_TYPE_UNKNOWN)
+            return;
+
+        std::wstring wideLine = line + L"\r\n";
+        DWORD mode = 0;
+        DWORD written = 0;
+        if (GetConsoleMode(err, &mode) != FALSE)
+        {
+            WriteConsoleW(err, wideLine.c_str(), static_cast<DWORD>(wideLine.size()), &written, nullptr);
+            return;
+        }
+
+        const std::string utf8Line = WideToUtf8(wideLine);
+        if (!utf8Line.empty())
+        {
+            WriteFile(err, utf8Line.data(), static_cast<DWORD>(utf8Line.size()), &written, nullptr);
+        }
+    }
+
     void WriteLineLocked(const std::wstring& line)
     {
         if (g_logFile != INVALID_HANDLE_VALUE)
@@ -105,11 +177,17 @@ namespace
             WriteFile(g_logFile, withNewline.data(), static_cast<DWORD>(withNewline.size() * sizeof(wchar_t)), &written, nullptr);
         }
 
-        if (GetConsoleWindow() != nullptr)
-        {
-            fwprintf(stderr, L"%s\n", line.c_str());
-            fflush(stderr);
-        }
+        WriteStdErrLineLocked(line);
+    }
+
+    void LogErrorLine(const std::wstring& message)
+    {
+        std::scoped_lock lock(g_logMutex);
+        const std::wstring line = std::format(L"[{}] {}", FormatTimestamp(), message);
+        if (g_initialized || g_logFile != INVALID_HANDLE_VALUE)
+            WriteLineLocked(line);
+        else
+            WriteStdErrLineLocked(line);
     }
 
     bool WantsConsoleAlloc()
@@ -206,14 +284,14 @@ namespace VirtuaCamLog
 
         ConfigureDllSearchPaths();
 
+        const bool allocConsole = options.allocConsoleIfMissing || WantsConsoleAlloc();
+        g_consoleReady = EnsureConsole(options.attachConsole || allocConsole, allocConsole);
+
         if (!options.enabled)
         {
             g_logPath.clear();
             return;
         }
-
-        bool allocConsole = options.allocConsoleIfMissing || WantsConsoleAlloc();
-        (void)EnsureConsole(options.attachConsole, allocConsole);
 
         auto logDir = GetLogDirFs();
         g_logPath = (logDir / options.logFileName).wstring();
@@ -257,6 +335,7 @@ namespace VirtuaCamLog
         }
         g_logPath.clear();
         g_initialized = false;
+        g_consoleReady = false;
     }
 
     void LogLine(const std::wstring& message)
@@ -269,16 +348,16 @@ namespace VirtuaCamLog
 
     void LogWin32(const std::wstring& context, DWORD error)
     {
-        LogLine(std::format(L"{} -> {}", context, FormatWin32Message(error)));
+        LogErrorLine(std::format(L"{} -> {}", context, FormatWin32Message(error)));
     }
 
     void LogHr(const std::wstring& context, HRESULT hr)
     {
-        LogLine(std::format(L"{} -> HRESULT 0x{:08X}", context, static_cast<unsigned>(hr)));
+        LogErrorLine(std::format(L"{} -> HRESULT 0x{:08X}", context, static_cast<unsigned>(hr)));
         if ((hr & 0xFFFF0000) == 0x80070000)
         {
             DWORD win32 = HRESULT_CODE(hr);
-            LogLine(std::format(L"  {}", FormatWin32Message(win32)));
+            LogErrorLine(std::format(L"  {}", FormatWin32Message(win32)));
         }
     }
 
@@ -286,7 +365,7 @@ namespace VirtuaCamLog
     {
         std::wstring msg = (message ? message : L"");
         std::wstring ttl = (title ? title : L"");
-        LogLine(std::format(L"GUI error: {} (HRESULT 0x{:08X})", msg, static_cast<unsigned>(hr)));
+        LogErrorLine(std::format(L"GUI error: {} (HRESULT 0x{:08X})", msg, static_cast<unsigned>(hr)));
         MessageBoxW(hwnd, msg.c_str(), ttl.c_str(), MB_OK | MB_ICONERROR);
     }
 }
