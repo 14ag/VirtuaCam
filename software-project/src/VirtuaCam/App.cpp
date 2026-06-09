@@ -22,7 +22,7 @@ static std::unique_ptr<VirtuaCam::Discovery> g_discovery;
 static std::unique_ptr<DriverBridge> g_driverBridge;
 static bool g_disconnectAttempted = false;
 static bool g_debugLoggingEnabled = false;
-static bool g_silentStart = false;
+static bool g_driverStart = false;
 
 typedef void (*PFN_InitializeBroker)();
 typedef void (*PFN_ShutdownBroker)();
@@ -59,9 +59,12 @@ static AspectRatioMode g_aspectRatioMode = AspectRatioMode::R16_9;
 static ULONG g_allowedAspectRatioMask = ASPECT_RATIO_MASK_ALL;
 static AudioRoutingMode g_audioRoutingMode = AudioRoutingMode::Auto;
 static std::wstring g_audioCaptureDeviceName = L"Stereo Mix";
+static bool g_startDebugMode = false;
 static constexpr ULONGLONG kAppFrameIntervalMs = 33;
 static constexpr ULONGLONG kDefaultFeedRefreshMs = 1000;
-static constexpr ULONGLONG kSilentDriverInactiveExitMs = 5ull * 60ull * 1000ull;
+static constexpr ULONGLONG kDriverStartInactiveExitMs = 5ull * 1000ull;
+static constexpr ULONGLONG kAudioDeviceRefreshMs = 2000;
+static constexpr DWORD kProducerGracefulStopMs = 3000;
 
 const wchar_t* SourceModeToString(SourceMode mode)
 {
@@ -69,7 +72,9 @@ const wchar_t* SourceModeToString(SourceMode mode)
     case SourceMode::Off: return L"Off";
     case SourceMode::Camera: return L"Camera";
     case SourceMode::Window: return L"Window";
-    case SourceMode::Consumer: return L"Consumer";
+    case SourceMode::Display: return L"Display";
+    case SourceMode::Image: return L"Image";
+    case SourceMode::Video: return L"Video";
     case SourceMode::Discovered: return L"Discovered";
     default: return L"Unknown";
     }
@@ -88,17 +93,23 @@ const wchar_t* PipPositionToString(PipPosition pos)
 
 bool IsRunningAsAdmin();
 bool GetDriverBridgeStatus();
+std::wstring GetRuntimeDriverStatusText();
+std::wstring GetRuntimeAudioStatusText();
 HRESULT LoadBroker();
 void ShutdownSystem();
 void RequestDriverDisconnect();
 void OnIdle();
 void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerState, UINT64 brokerFrameValue);
 void InformBroker();
+void ForceDefaultBrokerFrameToDriver(const wchar_t* reason);
 void LoadSettings();
 void SaveSettings();
 void InitializeAudio();
+void RefreshAudioDevicesIfChanged(ULONGLONG now);
 void SelectAudioForCameraPassthrough(int cameraIndex);
+void SetSourceFileMode(SourceMode newMode, const std::wstring& path);
 void ApplySavedAudioSelection();
+bool HasLiveProducerProcess();
 bool HasArg(const std::wstring& cmdLine, const wchar_t* arg);
 bool TryGetArgU64(const std::wstring& cmdLine, const wchar_t* arg, UINT64& outValue);
 int PrintCapturableWindowsJson();
@@ -277,7 +288,12 @@ void ApplyDriverAspectPolicy()
         return;
     }
 
-    HRESULT hr = g_driverBridge->SetAspectPolicy(g_aspectRatioMode, g_allowedAspectRatioMask);
+    ULONG driverAspectMask = AspectRatioMask(g_aspectRatioMode);
+    if ((driverAspectMask & g_allowedAspectRatioMask) == 0) {
+        driverAspectMask = g_allowedAspectRatioMask;
+    }
+
+    HRESULT hr = g_driverBridge->SetAspectPolicy(g_aspectRatioMode, driverAspectMask);
     if (FAILED(hr)) {
         VirtuaCamLog::LogHr(L"DriverBridge::SetAspectPolicy failed", hr);
         return;
@@ -312,7 +328,61 @@ void SetAspectRatioMode(AspectRatioMode mode)
 }
 
 const VirtuaCam::Discovery* GetGlobalDiscovery() { return g_discovery.get(); }
-bool GetDriverBridgeStatus() { return g_driverBridge && g_driverBridge->IsActive(); }
+bool GetDriverBridgeStatus() { return g_driverBridge && g_driverBridge->IsDriverInUse(); }
+
+std::wstring GetRuntimeDriverStatusText()
+{
+    if (!g_driverBridge) {
+        return L"not initialized";
+    }
+    std::wstring text = g_driverBridge->IsDriverInUse()
+        ? L"active camera client"
+        : (g_driverBridge->IsConnected() ? L"upload path connected, no active camera client" : L"idle, warming, or unavailable");
+    if (!g_driverBridge->GetLastError().empty()) {
+        text += L"; last error: " + g_driverBridge->GetLastError();
+    }
+    return text;
+}
+
+std::wstring GetRuntimeAudioStatusText()
+{
+    if (!g_audioCapture) {
+        return L"disabled or unavailable";
+    }
+    const auto& names = g_audioCapture->GetCaptureDeviceNames();
+    const int selectedId = UI_GetCurrentAudioDeviceId();
+    std::wstring selected = L"None";
+    if (selectedId == ID_AUDIO_DEVICE_AUTO) {
+        selected = L"Auto";
+    } else if (selectedId >= ID_AUDIO_CAPTURE_FIRST) {
+        const size_t index = static_cast<size_t>(selectedId - ID_AUDIO_CAPTURE_FIRST);
+        if (index < names.size()) {
+            selected = names[index];
+        } else {
+            selected = L"Unavailable";
+        }
+    }
+    return std::format(
+        L"{}; devices={}; saved={}",
+        selected,
+        names.size(),
+        g_audioCaptureDeviceName.empty() ? L"None" : g_audioCaptureDeviceName);
+}
+
+bool HasLiveProducerProcess()
+{
+    for (const auto& [key, pi] : g_producerProcesses) {
+        UNREFERENCED_PARAMETER(key);
+        if (!pi.hProcess) {
+            continue;
+        }
+        DWORD exitCode = 0;
+        if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode == STILL_ACTIVE) {
+            return true;
+        }
+    }
+    return false;
+}
 const SourceState& GetMainSourceState() { return g_mainSourceState; }
 const SourceState& GetPipSourceState(PipPosition pos) {
     switch (pos) {
@@ -522,6 +592,57 @@ void InitializeAudio()
     ApplySavedAudioSelection();
 }
 
+void RefreshAudioDevicesIfChanged(ULONGLONG now)
+{
+    static ULONGLONG s_nextAudioRefreshTick = 0;
+    static UINT s_audioRefreshFailureCount = 0;
+
+    if (!g_audioCapture || (s_nextAudioRefreshTick != 0 && now < s_nextAudioRefreshTick)) {
+        return;
+    }
+    s_nextAudioRefreshTick = now + kAudioDeviceRefreshMs;
+
+    const std::vector<std::wstring> previousNames = g_audioCapture->GetCaptureDeviceNames();
+    const std::wstring previousSelection = g_audioCaptureDeviceName;
+    HRESULT hr = g_audioCapture->EnumerateCaptureDevices();
+    if (FAILED(hr)) {
+        ++s_audioRefreshFailureCount;
+        if (s_audioRefreshFailureCount == 1 || (s_audioRefreshFailureCount % 30) == 0) {
+            VirtuaCamLog::LogHr(L"Audio capture device refresh failed", hr);
+        }
+        return;
+    }
+    s_audioRefreshFailureCount = 0;
+
+    const auto& names = g_audioCapture->GetCaptureDeviceNames();
+    if (names == previousNames) {
+        return;
+    }
+
+    UI_UpdateAudioDeviceLists(names);
+    VirtuaCamLog::LogLine(std::format(
+        L"Audio device list changed: previous={} current={}",
+        previousNames.size(),
+        names.size()));
+
+    if (g_audioRoutingMode == AudioRoutingMode::Manual) {
+        const int index = FindAudioCaptureDeviceByName(previousSelection);
+        if (index >= 0) {
+            SelectAudioCaptureDevice(index, false, L"audio device refresh");
+        } else {
+            g_audioCapture->StopCapture();
+            UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_NONE);
+            VirtuaCamLog::LogLine(std::format(
+                L"Selected audio source unavailable after device refresh: {}",
+                previousSelection.empty() ? L"None" : previousSelection));
+        }
+        return;
+    }
+
+    ApplySavedAudioSelection();
+    UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_AUTO);
+}
+
 void SelectAudioForCameraPassthrough(int cameraIndex)
 {
     if (!g_audioCapture) {
@@ -550,14 +671,45 @@ void SelectAudioForCameraPassthrough(int cameraIndex)
     UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_AUTO);
 }
 
+void StopProducerProcess(const std::wstring& key, PROCESS_INFORMATION& pi)
+{
+    if (pi.hProcess) {
+        DWORD exitCode = 0;
+        const bool running =
+            GetExitCodeProcess(pi.hProcess, &exitCode) &&
+            exitCode == STILL_ACTIVE;
+        if (running) {
+            if (pi.dwThreadId != 0 && PostThreadMessageW(pi.dwThreadId, WM_QUIT, 0, 0)) {
+                VirtuaCamLog::LogLine(std::format(L"Producer stop requested: key={} pid={}", key, pi.dwProcessId));
+            } else {
+                VirtuaCamLog::LogWin32(std::format(L"PostThreadMessageW producer stop failed: key={} pid={}", key, pi.dwProcessId), GetLastError());
+            }
+
+            const DWORD waitResult = WaitForSingleObject(pi.hProcess, kProducerGracefulStopMs);
+            if (waitResult == WAIT_TIMEOUT) {
+                VirtuaCamLog::LogLine(std::format(L"Producer graceful stop timed out; terminating: key={} pid={}", key, pi.dwProcessId));
+                TerminateProcess(pi.hProcess, 0);
+                WaitForSingleObject(pi.hProcess, 1000);
+            } else if (waitResult == WAIT_FAILED) {
+                VirtuaCamLog::LogWin32(std::format(L"WaitForSingleObject producer failed: key={} pid={}", key, pi.dwProcessId), GetLastError());
+            }
+        }
+        CloseHandle(pi.hProcess);
+        pi.hProcess = nullptr;
+    }
+
+    if (pi.hThread) {
+        CloseHandle(pi.hThread);
+        pi.hThread = nullptr;
+    }
+}
+
 void TerminateProducer(const std::wstring& key)
 {
-    if (g_producerProcesses.count(key))
-    {
-        TerminateProcess(g_producerProcesses[key].hProcess, 0);
-        CloseHandle(g_producerProcesses[key].hProcess);
-        CloseHandle(g_producerProcesses[key].hThread);
-        g_producerProcesses.erase(key);
+    auto it = g_producerProcesses.find(key);
+    if (it != g_producerProcesses.end()) {
+        StopProducerProcess(key, it->second);
+        g_producerProcesses.erase(it);
     }
 }
 
@@ -613,6 +765,19 @@ DWORD LaunchProducer(const std::wstring& key, const std::wstring& args)
     return 0;
 }
 
+std::wstring QuoteProcessArg(const std::wstring& value)
+{
+    std::wstring quoted = L"\"";
+    for (wchar_t ch : value) {
+        if (ch == L'\"' || ch == L'\\') {
+            quoted.push_back(L'\\');
+        }
+        quoted.push_back(ch);
+    }
+    quoted.push_back(L'\"');
+    return quoted;
+}
+
 bool TryLaunchWindowProducer(
     const std::wstring& key,
     DWORD_PTR context,
@@ -654,9 +819,16 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
 
     g_mainSourceState.pid = 0;
     g_mainSourceState.cameraIndex = -1;
+    g_mainSourceState.displayIndex = -1;
+    g_mainSourceState.filePath.clear();
     TerminateProducer(L"main_camera");
     TerminateProducer(L"main_window");
+    TerminateProducer(L"main_display");
+    TerminateProducer(L"main_media");
     g_mainSourceState.hwnd = nullptr;
+    g_mainSourceState.mode = SourceMode::Off;
+    InformBroker();
+    ForceDefaultBrokerFrameToDriver(L"source switch clear");
 
     switch (newMode) {
         case SourceMode::Camera:
@@ -697,8 +869,18 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
                 newMode = SourceMode::Off;
             }
             break;
+        case SourceMode::Display:
+            SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main display source");
+            g_mainSourceState.displayIndex = static_cast<int>(context);
+            g_mainSourceState.pid = LaunchProducer(
+                L"main_display",
+                L"--type capture --monitor " + std::to_wstring(g_mainSourceState.displayIndex));
+            if (g_mainSourceState.pid == 0) {
+                newMode = SourceMode::Off;
+                g_mainSourceState.displayIndex = -1;
+            }
+            break;
         case SourceMode::Discovered:
-        case SourceMode::Consumer:
             SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, L"main non-camera source");
             g_mainSourceState.pid = static_cast<DWORD>(context);
             break;
@@ -714,6 +896,42 @@ void SetSourceMode(SourceMode newMode, DWORD_PTR context = 0) {
         g_mainSourceState.pid,
         g_mainSourceState.cameraIndex,
         static_cast<UINT64>(reinterpret_cast<UINT_PTR>(g_mainSourceState.hwnd))));
+    InformBroker();
+    ApplyDriverAspectPolicy();
+}
+
+void SetSourceFileMode(SourceMode newMode, const std::wstring& path)
+{
+    if ((newMode != SourceMode::Image && newMode != SourceMode::Video) || path.empty()) {
+        return;
+    }
+
+    SetAllowedAspectRatioMask(ASPECT_RATIO_MASK_ALL, newMode == SourceMode::Image ? L"main image source" : L"main video source");
+    g_mainSourceState.pid = 0;
+    g_mainSourceState.cameraIndex = -1;
+    g_mainSourceState.displayIndex = -1;
+    g_mainSourceState.hwnd = nullptr;
+    g_mainSourceState.filePath = path;
+    TerminateProducer(L"main_camera");
+    TerminateProducer(L"main_window");
+    TerminateProducer(L"main_display");
+    TerminateProducer(L"main_media");
+    g_mainSourceState.mode = SourceMode::Off;
+    InformBroker();
+    ForceDefaultBrokerFrameToDriver(L"file source switch clear");
+
+    g_mainSourceState.pid = LaunchProducer(
+        L"main_media",
+        std::format(
+            L"--type media --media-kind {} --file {}",
+            newMode == SourceMode::Image ? L"image" : L"video",
+            QuoteProcessArg(path)));
+    g_mainSourceState.mode = (g_mainSourceState.pid != 0) ? newMode : SourceMode::Off;
+    VirtuaCamLog::LogLine(std::format(
+        L"Main source active: mode={} pid={} file={}",
+        SourceModeToString(g_mainSourceState.mode),
+        g_mainSourceState.pid,
+        path));
     InformBroker();
     ApplyDriverAspectPolicy();
 }
@@ -740,6 +958,8 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
 
     state.pid = 0;
     state.cameraIndex = -1;
+    state.displayIndex = -1;
+    state.filePath.clear();
     std::wstring key_prefix = L"pip_" + std::to_wstring((int)pos);
     TerminateProducer(key_prefix + L"_camera");
     TerminateProducer(key_prefix + L"_window");
@@ -764,7 +984,6 @@ void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context = 0)
             }
             break;
         case SourceMode::Discovered:
-        case SourceMode::Consumer:
             state.pid = static_cast<DWORD>(context);
             break;
         case SourceMode::Off:
@@ -797,12 +1016,19 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         return PrintCapturableWindowsJson();
     }
 
-    g_silentStart = HasArg(cmdLine, L"/startup") || HasArg(cmdLine, L"-startup");
-    if (g_silentStart) {
-        VirtuaCamLog::LogLine(L"Startup mode: /startup (tray-silent)");
+    g_driverStart = HasArg(cmdLine, L"--driver") || HasArg(cmdLine, L"/driver");
+    if (g_driverStart) {
+        VirtuaCamLog::LogLine(L"Driver-start mode: --driver (auto-exit when driver inactive)");
     }
 
     LoadSettings();
+    if (g_startDebugMode && !g_debugLoggingEnabled) {
+        g_debugLoggingEnabled = true;
+        VirtuaCamLog::Shutdown();
+        logOpts.enabled = true;
+        VirtuaCamLog::Init(logOpts);
+        VirtuaCamLog::LogLine(L"Debug mode enabled from settings");
+    }
     RETURN_IF_FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
 
     HRESULT hrBroker = LoadBroker();
@@ -817,7 +1043,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         g_discovery->Initialize(tempDevice.Get());
     }
 
-    UI_Initialize(hInstance, g_hMainWnd, g_pfnGetSharedTexture);
+    UI_Initialize(hInstance, g_hMainWnd);
     UI_SetDebugMode(g_debugLoggingEnabled);
     if (!g_hMainWnd) {
         ShutdownSystem(); CoUninitialize(); return FALSE;
@@ -827,9 +1053,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     SetTimer(g_hMainWnd, 1, 1000, nullptr);
     UINT64 startupWindowHwnd = 0;
     UINT64 startupCameraIndex = 0;
+    UINT64 startupDisplayIndex = 0;
     if (TryGetArgU64(cmdLine, L"--source-window-hwnd", startupWindowHwnd)) {
         VirtuaCamLog::LogLine(std::format(L"Startup source: window hwnd={}", startupWindowHwnd));
         SetSourceMode(SourceMode::Window, static_cast<DWORD_PTR>(startupWindowHwnd));
+    } else if (TryGetArgU64(cmdLine, L"--source-display-index", startupDisplayIndex)) {
+        VirtuaCamLog::LogLine(std::format(L"Startup source: display index={}", startupDisplayIndex));
+        SetSourceMode(SourceMode::Display, static_cast<DWORD_PTR>(startupDisplayIndex));
     } else if (TryGetArgU64(cmdLine, L"--source-camera-index", startupCameraIndex)) {
         const auto cameras = UI_RefreshCameraDeviceList();
         if (startupCameraIndex < cameras.size()) {
@@ -843,14 +1073,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                 L"Startup source camera index out of range: {} cameraCount={}",
                 startupCameraIndex,
                 cameras.size()));
-            SetSourceMode(SourceMode::Consumer, 0);
+            SetSourceMode(SourceMode::Off, 0);
         }
-    } else if (HasArg(cmdLine, L"--source-consumer")) {
-        VirtuaCamLog::LogLine(L"Startup source: consumer");
-        SetSourceMode(SourceMode::Consumer, 0);
     } else {
-        VirtuaCamLog::LogLine(L"Startup source: default auto-discovery grid");
-        SetSourceMode(SourceMode::Consumer, 0);
+        VirtuaCamLog::LogLine(L"Startup source: off");
+        SetSourceMode(SourceMode::Off, 0);
     }
     InformBroker();
 
@@ -859,14 +1086,19 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     if (FAILED(hrDriver)) {
         VirtuaCamLog::LogHr(L"DriverBridge::Initialize failed", hrDriver);
         VirtuaCamLog::LogLine(std::format(L"DriverBridge last error: {}", g_driverBridge->GetLastError()));
-        if (!g_silentStart) {
-            std::wstring message =
-                L"DriverBridge failed to connect to the avshws kernel driver.\n"
-                L"Make sure driver-project is installed.";
-            VirtuaCamLog::ShowAndLogError(g_hMainWnd, message.c_str(), L"Error", hrDriver);
-        }
     } else {
         ApplyDriverAspectPolicy();
+        const HRESULT hrAvailable = g_driverBridge->CheckDriverAvailability();
+        if (FAILED(hrAvailable)) {
+            VirtuaCamLog::LogHr(L"Virtual Camera Driver is not installed or not available", hrAvailable);
+            if (!g_driverStart) {
+                VirtuaCamLog::ShowAndLogError(
+                    g_hMainWnd,
+                    L"Virtual Camera Driver is not installed or not available.\nUse VirtuaCamSetup.exe Install, then run the camera test again.",
+                    L"VirtuaCam driver not installed",
+                    hrAvailable);
+            }
+        }
     }
 
     VirtuaCamLog::LogLine(L"Entering message loop.");
@@ -883,6 +1115,7 @@ void OnIdle() {
     static bool s_lastDriverActive = false;
     static ULONGLONG s_driverInactiveSinceTick = 0;
     const ULONGLONG now = GetTickCount64();
+    RefreshAudioDevicesIfChanged(now);
     const ULONGLONG frameIntervalMs = (s_lastDriverActive && s_lastBrokerState == BrokerState::Connected)
         ? kAppFrameIntervalMs
         : kDefaultFeedRefreshMs;
@@ -901,19 +1134,21 @@ void OnIdle() {
         brokerState = g_pfnGetBrokerState();
         const bool driverActive = GetDriverBridgeStatus();
         UpdateTelemetry(brokerState, driverActive);
-        if (driverActive) {
+        const bool sourceActive = brokerState == BrokerState::Connected || HasLiveProducerProcess();
+        const bool keepAliveActive = driverActive || sourceActive;
+        if (keepAliveActive) {
             s_driverInactiveSinceTick = 0;
-        } else if (g_silentStart) {
+        } else if (g_driverStart) {
             if (s_driverInactiveSinceTick == 0) {
                 s_driverInactiveSinceTick = now;
-            } else if (now - s_driverInactiveSinceTick >= kSilentDriverInactiveExitMs) {
-                VirtuaCamLog::LogLine(L"Startup mode: driver inactive for 5 minutes; exiting app while watcher remains active");
+            } else if (now - s_driverInactiveSinceTick >= kDriverStartInactiveExitMs) {
+                VirtuaCamLog::LogLine(L"Driver-start mode: no active driver stream or producer for 5 seconds; exiting app while watcher remains active");
                 PostMessageW(g_hMainWnd, WM_CLOSE, 0, 0);
                 return;
             }
         }
         s_lastBrokerState = brokerState;
-        s_lastDriverActive = driverActive;
+        s_lastDriverActive = keepAliveActive;
     }
     const UINT64 brokerFrameValue = g_pfnGetBrokerFrameValue ? g_pfnGetBrokerFrameValue() : 0;
     TrySendBrokerFrameToDriver(brokerFrameRendered, brokerState, brokerFrameValue);
@@ -924,6 +1159,8 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
     static bool s_loggedFirstTexture = false;
     static bool s_loggedDefaultFeed = false;
     static UINT s_driverWarmupRetryLogCount = 0;
+    static UINT s_driverReadbackRetryLogCount = 0;
+    static UINT s_driverUnavailableLogCount = 0;
     static bool s_hasSentFrame = false;
     static UINT64 s_lastSentFrameValue = 0;
     static ULONGLONG s_lastDefaultFeedSendTick = 0;
@@ -970,16 +1207,30 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
 
     HRESULT hr = g_driverBridge->SendFrame(sharedTexture.get());
     if (FAILED(hr)) {
-        if (hr == HRESULT_FROM_WIN32(ERROR_RETRY)) {
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            ++s_driverReadbackRetryLogCount;
+            if (s_driverReadbackRetryLogCount == 1 || (s_driverReadbackRetryLogCount % 120) == 0) {
+                VirtuaCamLog::LogLine(L"DriverBridge::SendFrame readback not ready");
+            }
+        } else if (hr == HRESULT_FROM_WIN32(ERROR_RETRY)) {
             ++s_driverWarmupRetryLogCount;
             if (s_driverWarmupRetryLogCount == 1 || (s_driverWarmupRetryLogCount % 120) == 0) {
                 VirtuaCamLog::LogLine(L"DriverBridge::SendFrame waiting for driver stream to start");
+            }
+        } else if (hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND) ||
+            hr == HRESULT_FROM_WIN32(ERROR_NOT_READY) ||
+            hr == HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED)) {
+            ++s_driverUnavailableLogCount;
+            if (s_driverUnavailableLogCount == 1 || (s_driverUnavailableLogCount % 120) == 0) {
+                VirtuaCamLog::LogLine(L"DriverBridge::SendFrame waiting for driver availability");
             }
         } else {
             VirtuaCamLog::LogHr(L"DriverBridge::SendFrame failed", hr);
         }
     } else {
         s_driverWarmupRetryLogCount = 0;
+        s_driverReadbackRetryLogCount = 0;
+        s_driverUnavailableLogCount = 0;
         s_hasSentFrame = true;
         s_lastSentFrameValue = brokerFrameValue;
         if (brokerState != BrokerState::Connected) {
@@ -988,32 +1239,39 @@ void TrySendBrokerFrameToDriver(bool brokerFrameRendered, BrokerState brokerStat
     }
 }
 
+void ForceDefaultBrokerFrameToDriver(const wchar_t* reason)
+{
+    if (!g_pfnSetCompositingMode || !g_pfnUpdateProducerPriorityList || !g_pfnRenderBrokerFrame || !g_pfnGetBrokerState || !g_pfnGetBrokerFrameValue) {
+        return;
+    }
+
+    DWORD pids[5] = {0};
+    g_pfnSetCompositingMode(false);
+    g_pfnUpdateProducerPriorityList(pids, 5);
+    g_pfnRenderBrokerFrame();
+    const BrokerState brokerState = g_pfnGetBrokerState();
+    const UINT64 brokerFrameValue = g_pfnGetBrokerFrameValue();
+    VirtuaCamLog::LogLine(std::format(
+        L"Forced default broker frame: reason={} brokerState={} frameValue={}",
+        reason ? reason : L"",
+        static_cast<int>(brokerState),
+        brokerFrameValue));
+    TrySendBrokerFrameToDriver(true, brokerState, brokerFrameValue);
+}
+
 void InformBroker() {
     if (!g_discovery || !g_pfnUpdateProducerPriorityList || !g_pfnSetCompositingMode) return;
 
     g_discovery->DiscoverStreams();
-    
-    bool isGridMode = (g_mainSourceState.mode == SourceMode::Consumer);
-    g_pfnSetCompositingMode(isGridMode);
+    g_pfnSetCompositingMode(false);
 
-    if (isGridMode) {
-        const auto& streams = g_discovery->GetDiscoveredStreams();
-        std::vector<DWORD> pids;
-        for (const auto& s : streams) {
-            if (s.processName != L"VirtuaCam.exe") {
-                 pids.push_back(s.processId);
-            }
-        }
-        g_pfnUpdateProducerPriorityList(pids.data(), static_cast<int>(pids.size()));
-    } else {
-        DWORD pids[5] = {0};
-        pids[0] = g_mainSourceState.pid;
-        pids[1] = g_pip_tl_state.pid;
-        pids[2] = g_pip_tr_state.pid;
-        pids[3] = g_pip_bl_state.pid;
-        pids[4] = g_pip_br_state.pid;
-        g_pfnUpdateProducerPriorityList(pids, 5);
-    }
+    DWORD pids[5] = {0};
+    pids[0] = g_mainSourceState.pid;
+    pids[1] = g_pip_tl_state.pid;
+    pids[2] = g_pip_tr_state.pid;
+    pids[3] = g_pip_bl_state.pid;
+    pids[4] = g_pip_br_state.pid;
+    g_pfnUpdateProducerPriorityList(pids, 5);
 }
 
 HRESULT LoadBroker() {
@@ -1058,6 +1316,12 @@ void ShutdownSystem() {
         g_audioCapture.reset();
     }
 
+    for (auto& [key, pi] : g_producerProcesses)
+    {
+        StopProducerProcess(key, pi);
+    }
+    g_producerProcesses.clear();
+
     if (g_driverBridge) {
         g_driverBridge->Shutdown();
         g_driverBridge.reset();
@@ -1068,19 +1332,6 @@ void ShutdownSystem() {
         FreeLibrary(g_hBrokerDll);
         g_hBrokerDll = nullptr;
     }
-
-    for (auto const& [key, pi] : g_producerProcesses)
-    {
-        if (pi.hProcess) {
-            TerminateProcess(pi.hProcess, 0);
-            WaitForSingleObject(pi.hProcess, 5000);
-            CloseHandle(pi.hProcess);
-        }
-        if (pi.hThread) {
-            CloseHandle(pi.hThread);
-        }
-    }
-    g_producerProcesses.clear();
 
     if (g_discovery) {
         g_discovery->Teardown();
@@ -1126,23 +1377,27 @@ void LoadSettings() {
     g_showPipTL = settings.showPipTopLeft;
     g_showPipTR = settings.showPipTopRight;
     g_showPipBL = settings.showPipBottomLeft;
+    g_startDebugMode = settings.startDebugMode;
     g_aspectRatioMode = settings.aspectRatio;
     g_audioRoutingMode = settings.audioRoutingMode;
     g_audioCaptureDeviceName = settings.audioCaptureDeviceName;
 
     VirtuaCamLog::LogLine(std::format(
-        L"Settings loaded: registry={} aspect={} audioMode={} audio={}",
+        L"Settings loaded: registry={} debug={} aspect={} audioMode={} audio={}",
         VirtuaCamConfig::GetSettingsRegistryPath(),
+        g_startDebugMode ? L"on" : L"off",
         VirtuaCamConfig::AspectRatioName(g_aspectRatioMode),
         VirtuaCamConfig::AudioRoutingModeName(g_audioRoutingMode),
         g_audioCaptureDeviceName.empty() ? L"None" : g_audioCaptureDeviceName));
 }
 
 void SaveSettings() {
+    const VirtuaCamConfig::AppSettings existing = VirtuaCamConfig::LoadSettings();
     VirtuaCamConfig::AppSettings settings = {};
     settings.showPipTopLeft = g_showPipTL;
     settings.showPipTopRight = g_showPipTR;
     settings.showPipBottomLeft = g_showPipBL;
+    settings.startDebugMode = existing.startDebugMode;
     settings.aspectRatio = g_aspectRatioMode;
     settings.audioRoutingMode = g_audioRoutingMode;
     settings.audioCaptureDeviceName = g_audioCaptureDeviceName;

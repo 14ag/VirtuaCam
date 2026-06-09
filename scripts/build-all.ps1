@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [switch]$Clean = $true,
     [string]$BuildConfig = "Release",
     [string]$VcpkgRoot = ""
 )
@@ -55,6 +54,91 @@ function Invoke-NativeProcess {
     & $FilePath @Arguments
     if ($LASTEXITCODE -ne 0) {
         Fail "$FilePath failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Stop-VirtuaCamBuildRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$PackageRoot
+    )
+
+    $service = Get-Service -Name "VirtuaCamWatcher" -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -ne "Stopped") {
+        Write-Info "Stopping VirtuaCamWatcher before cleaning output."
+        try {
+            Stop-Service -Name "VirtuaCamWatcher" -Force -ErrorAction Stop
+            $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(10))
+        }
+        catch {
+            Write-Info "Could not stop VirtuaCamWatcher: $($_.Exception.Message)"
+        }
+    }
+
+    $packageRootFull = [System.IO.Path]::GetFullPath($PackageRoot).TrimEnd('\')
+    $processNames = @("VirtuaCam", "VirtuaCamProcess", "VirtuaCamSetup")
+    $processes = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue)
+    foreach ($process in $processes) {
+        $path = $null
+        try {
+            $path = [string]$process.MainModule.FileName
+        }
+        catch {
+            try {
+                $path = (Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)" -ErrorAction Stop).ExecutablePath
+            }
+            catch {
+                $path = $null
+            }
+        }
+
+        $isPackageProcess = $true
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            $pathFull = [System.IO.Path]::GetFullPath($path)
+            $isPackageProcess = $pathFull.StartsWith($packageRootFull + "\", [System.StringComparison]::OrdinalIgnoreCase)
+        }
+
+        if (-not $isPackageProcess) {
+            Write-Info ("Leaving unrelated process running: {0} ({1})" -f $process.ProcessName, $process.Id)
+            continue
+        }
+
+        Write-Info ("Stopping runtime process before cleaning output: {0} ({1})" -f $process.ProcessName, $process.Id)
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+
+    foreach ($process in $processes) {
+        Wait-Process -Id $process.Id -Timeout 5 -ErrorAction SilentlyContinue
+    }
+
+    Start-Sleep -Milliseconds 500
+}
+
+function Remove-PathWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$PackageRoot,
+        [int]$Retries = 8,
+        [int]$DelayMilliseconds = 750
+    )
+
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            return
+        }
+
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        }
+        catch {
+            if ($attempt -ge $Retries) {
+                Fail "Could not remove '$Path' after stopping VirtuaCam runtime. Last error: $($_.Exception.Message)"
+            }
+
+            Write-Info ("Output cleanup blocked; retry {0}/{1}: {2}" -f $attempt, $Retries, $_.Exception.Message)
+            Stop-VirtuaCamBuildRuntime -PackageRoot $PackageRoot
+            Start-Sleep -Milliseconds $DelayMilliseconds
+        }
     }
 }
 
@@ -229,12 +313,21 @@ function Get-OrCreateTestCodeSigningCertificate {
     param([string]$SubjectCommonName)
 
     $subject = "CN=$SubjectCommonName"
-    $cert = Get-ChildItem -Path Cert:\CurrentUser\My |
-        Where-Object { $_.Subject -eq $subject -and $_.HasPrivateKey } |
-        Sort-Object NotAfter -Descending |
-        Select-Object -First 1
+    $store = [System.Security.Cryptography.X509Certificates.X509Store]::new("My", "CurrentUser")
+    $cert = $null
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+        $cert = $store.Certificates |
+            Where-Object { $_.Subject -eq $subject -and $_.HasPrivateKey } |
+            Sort-Object NotAfter -Descending |
+            Select-Object -First 1
+    }
+    finally {
+        $store.Close()
+    }
 
     if (-not $cert) {
+        Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
         $cert = New-SelfSignedCertificate `
             -Type CodeSigningCert `
             -Subject $subject `
@@ -315,8 +408,9 @@ $VcpkgRoot = [System.IO.Path]::GetFullPath($VcpkgRoot)
 $toolchainFile = Join-Path $VcpkgRoot "scripts\buildsystems\vcpkg.cmake"
 
 Write-Step "Prepare output layout"
-if ($Clean -and (Test-Path -LiteralPath $OutputRoot)) {
-    Remove-Item -LiteralPath $OutputRoot -Recurse -Force
+Stop-VirtuaCamBuildRuntime -PackageRoot $OutputRoot
+if (Test-Path -LiteralPath $OutputRoot) {
+    Remove-PathWithRetry -Path $OutputRoot -PackageRoot $OutputRoot
 }
 $null = New-Item -ItemType Directory -Force -Path $OutputRoot, $driverPackageTmp, $audioDriverPackageTmp
 Write-Info "OutputRoot: $OutputRoot"
@@ -342,16 +436,10 @@ if (-not (Test-Path -LiteralPath $toolchainFile)) {
     Fail "vcpkg toolchain file missing: $toolchainFile"
 }
 
-foreach ($processName in @("VirtuaCam", "VirtuaCamProcess", "DirectPortBroker")) {
-    Get-Process -Name $processName -ErrorAction SilentlyContinue | ForEach-Object {
-        Stop-Process -Id $_.Id -Force
-    }
-}
-
-if ($Clean -and (Test-Path -LiteralPath $softwareBuildDir)) {
+if (Test-Path -LiteralPath $softwareBuildDir) {
     Remove-Item -LiteralPath $softwareBuildDir -Recurse -Force
 }
-if ($Clean -and (Test-Path -LiteralPath $wizardBuildDir)) {
+if (Test-Path -LiteralPath $wizardBuildDir) {
     Remove-Item -LiteralPath $wizardBuildDir -Recurse -Force
 }
 $null = New-Item -ItemType Directory -Force -Path $softwareBuildDir
@@ -455,7 +543,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Step "Build driver"
 
-$targets = if ($Clean) { "Clean;Build" } else { "Build" }
+$targets = "Clean;Build"
 Invoke-NativeProcess -FilePath $msbuild -Arguments @(
     $driverSolutionPath,
     "/m",

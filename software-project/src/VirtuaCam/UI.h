@@ -2,9 +2,6 @@
 #include <vector>
 #include <string>
 #include <functional>
-#include <d3d11.h>
-
-#define PREVIEW_WINDOW_CLASS L"VirtuaCamPreviewClass"
 
 enum class BrokerState;
 
@@ -13,9 +10,14 @@ struct CapturableWindow {
     std::wstring title;
 };
 
-typedef ID3D11Texture2D* (*PFN_GetSharedTexture)();
+struct CapturableDisplay {
+    int index;
+    std::wstring name;
+    RECT bounds;
+    bool primary;
+};
 
-void UI_Initialize(HINSTANCE instance, HWND& outMainWnd, PFN_GetSharedTexture pfnGetSharedTexture);
+void UI_Initialize(HINSTANCE instance, HWND& outMainWnd);
 void UI_SetDebugMode(bool enabled);
 void UI_RunMessageLoop(std::function<void()> onIdle);
 void UI_Shutdown();
@@ -25,6 +27,7 @@ void UI_SetCurrentAudioDeviceId(int id);
 int UI_GetCurrentAudioDeviceId();
 std::vector<std::wstring> UI_RefreshCameraDeviceList();
 std::vector<CapturableWindow> EnumerateWindows();
+std::vector<CapturableDisplay> EnumerateDisplays();
 
 // Returns a cached camera DevicePath for a given camera index (menu index),
 // or nullptr if out of range / unknown. This is used to launch camera producers

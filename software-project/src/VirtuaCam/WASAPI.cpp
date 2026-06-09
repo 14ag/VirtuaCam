@@ -8,8 +8,31 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cwctype>
 #include <limits>
 #pragma comment(lib, "avrt.lib")
+
+namespace
+{
+    bool ContainsNoCase(const std::wstring& value, const wchar_t* needle)
+    {
+        if (!needle || !*needle) return true;
+        std::wstring haystack = value;
+        std::wstring target = needle;
+        std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(towlower(ch));
+        });
+        std::transform(target.begin(), target.end(), target.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(towlower(ch));
+        });
+        return haystack.find(target) != std::wstring::npos;
+    }
+
+    bool IsVirtuaCamAudioSource(const std::wstring& name)
+    {
+        return ContainsNoCase(name, L"VirtuaCam");
+    }
+}
 
 WASAPICapture::WASAPICapture() {
     m_hShutdownEvent.reset(CreateEvent(NULL, TRUE, FALSE, NULL));
@@ -73,8 +96,11 @@ HRESULT WASAPICapture::EnumerateCaptureDevices() {
                 PROPVARIANT varName;
                 PropVariantInit(&varName);
                 if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &varName))) {
-                    m_captureDevices.push_back(device);
-                    m_captureDeviceNames.push_back(varName.pwszVal);
+                    std::wstring name = varName.pwszVal ? varName.pwszVal : L"";
+                    if (!IsVirtuaCamAudioSource(name)) {
+                        m_captureDevices.push_back(device);
+                        m_captureDeviceNames.push_back(name);
+                    }
                     PropVariantClear(&varName);
                 }
             }

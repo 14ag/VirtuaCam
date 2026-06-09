@@ -670,6 +670,11 @@ CHardwareSimulation (
     m_OutputStride1 (0),
     m_UploadFormatMask (0),
     m_LastSetDataFormat (VIRTUACAM_FRAME_FORMAT_UNKNOWN),
+    m_StaleUploadRejectedCount (0),
+    m_BusyUploadRejectedCount (0),
+    m_LastAcceptedFrameId (0),
+    m_LastAcceptedPerformanceCounter (0),
+    m_LastAcceptedSystemTime100ns (0),
     m_HardwareSink (HardwareSink),
     m_ScatterGatherMappingsMax (SCATTER_GATHER_MAPPINGS_MAX),
     m_ScatterGatherLookasideInitialized (FALSE)
@@ -1014,6 +1019,11 @@ Return Value:
     m_SetDataRejectedCount = 0;
     m_LastSetDataReason = kSetDataRejectNone;
     m_LastSetDataFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+    m_StaleUploadRejectedCount = 0;
+    m_BusyUploadRejectedCount = 0;
+    m_LastAcceptedFrameId = 0;
+    m_LastAcceptedPerformanceCounter = 0;
+    m_LastAcceptedSystemTime100ns = 0;
 
     KeQuerySystemTimePrecise (&m_StartTime);
 
@@ -1740,6 +1750,238 @@ namespace
         return TRUE;
     }
 
+    void
+    ReadBgrPixel(
+        _In_reads_bytes_(ImageSize) const UCHAR* Source,
+        _In_ ULONG ImageSize,
+        _In_ ULONG Width,
+        _In_ ULONG Height,
+        _In_ ULONG Format,
+        _In_ ULONG X,
+        _In_ ULONG Y,
+        _Out_ UCHAR* Blue,
+        _Out_ UCHAR* Green,
+        _Out_ UCHAR* Red
+        )
+    {
+        *Blue = 0;
+        *Green = 0;
+        *Red = 0;
+        if (!Source || Width == 0 || Height == 0 || X >= Width || Y >= Height) {
+            return;
+        }
+
+        if (Format == VIRTUACAM_FRAME_FORMAT_BGR24) {
+            const ULONGLONG offset = ((static_cast<ULONGLONG>(Y) * Width) + X) * 3ull;
+            if (offset + 2 >= ImageSize) {
+                return;
+            }
+            *Blue = Source[offset];
+            *Green = Source[offset + 1];
+            *Red = Source[offset + 2];
+            return;
+        }
+
+        if (Format == VIRTUACAM_FRAME_FORMAT_RGB32) {
+            const ULONGLONG offset = ((static_cast<ULONGLONG>(Y) * Width) + X) * 4ull;
+            if (offset + 2 >= ImageSize) {
+                return;
+            }
+            *Blue = Source[offset];
+            *Green = Source[offset + 1];
+            *Red = Source[offset + 2];
+            return;
+        }
+
+        if (Format == VIRTUACAM_FRAME_FORMAT_NV12) {
+            const ULONGLONG yOffset = (static_cast<ULONGLONG>(Y) * Width) + X;
+            const ULONGLONG uvOffset =
+                (static_cast<ULONGLONG>(Width) * Height) +
+                (static_cast<ULONGLONG>(Y / 2) * Width) +
+                ((X / 2) * 2);
+            if (yOffset >= ImageSize || uvOffset + 1 >= ImageSize) {
+                return;
+            }
+            const LONG c = static_cast<LONG>(Source[yOffset]) - 16;
+            const LONG d = static_cast<LONG>(Source[uvOffset]) - 128;
+            const LONG e = static_cast<LONG>(Source[uvOffset + 1]) - 128;
+            *Red = ClampToByte((298 * c + 409 * e + 128) >> 8);
+            *Green = ClampToByte((298 * c - 100 * d - 208 * e + 128) >> 8);
+            *Blue = ClampToByte((298 * c + 516 * d + 128) >> 8);
+            return;
+        }
+
+        if (Format == VIRTUACAM_FRAME_FORMAT_YUY2) {
+            const ULONGLONG offset = ((static_cast<ULONGLONG>(Y) * Width) + (X & ~1ul)) * 2ull;
+            if (offset + 3 >= ImageSize) {
+                return;
+            }
+            const LONG yValue = static_cast<LONG>(Source[offset + ((X & 1) ? 2 : 0)]) - 16;
+            const LONG uValue = static_cast<LONG>(Source[offset + 1]) - 128;
+            const LONG vValue = static_cast<LONG>(Source[offset + 3]) - 128;
+            *Red = ClampToByte((298 * yValue + 409 * vValue + 128) >> 8);
+            *Green = ClampToByte((298 * yValue - 100 * uValue - 208 * vValue + 128) >> 8);
+            *Blue = ClampToByte((298 * yValue + 516 * uValue + 128) >> 8);
+        }
+    }
+
+    void
+    BgrToYuv(
+        _In_ UCHAR Blue,
+        _In_ UCHAR Green,
+        _In_ UCHAR Red,
+        _Out_ UCHAR* Y,
+        _Out_ UCHAR* U,
+        _Out_ UCHAR* V
+        )
+    {
+        const LONG r = Red;
+        const LONG g = Green;
+        const LONG b = Blue;
+        *Y = ClampToByte(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+        *U = ClampToByte(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+        *V = ClampToByte(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+    }
+
+    NTSTATUS
+    FillResampledFrame(
+        _In_ PKSSTREAM_HEADER StreamHeader,
+        _In_reads_bytes_(SourceImageSize) const UCHAR* SourceFrame,
+        _In_ ULONG SourceWidth,
+        _In_ ULONG SourceHeight,
+        _In_ ULONG SourceImageSize,
+        _In_ ULONG SourceFormat,
+        _In_ ULONG Width,
+        _In_ ULONG Height,
+        _In_ ULONG ImageSize,
+        _In_ ULONG BytesPerPixel,
+        _In_ ULONG OutputFormat,
+        _Out_ PULONG BytesWritten
+        )
+    {
+        if (!StreamHeader || !BytesWritten || !SourceFrame || SourceWidth == 0 || SourceHeight == 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        PUCHAR buffer = reinterpret_cast<PUCHAR>(StreamHeader->Data);
+        if (!buffer || StreamHeader->FrameExtent == 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        BOOLEAN bottomUp = FALSE;
+        LONG stride = static_cast<LONG>(GetTightStride0(OutputFormat, Width));
+        if (StreamHeader->Size >= sizeof(KSSTREAM_HEADER) + sizeof(KS_FRAME_INFO)) {
+            PKS_FRAME_INFO frameInfo = reinterpret_cast<PKS_FRAME_INFO>(StreamHeader + 1);
+            if (frameInfo->lSurfacePitch != 0) {
+                if (frameInfo->lSurfacePitch == LONG_MIN) {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                bottomUp = frameInfo->lSurfacePitch < 0;
+                stride = bottomUp ? -frameInfo->lSurfacePitch : frameInfo->lSurfacePitch;
+            }
+        }
+
+        if (OutputFormat == VIRTUACAM_FRAME_FORMAT_NV12) {
+            if (stride <= 0 || static_cast<ULONG>(stride) < Width) {
+                return STATUS_INVALID_PARAMETER;
+            }
+            const ULONGLONG requiredBytes =
+                (static_cast<ULONGLONG>(stride) * Height) +
+                ((static_cast<ULONGLONG>(stride) * Height) / 2ull);
+            if (requiredBytes > StreamHeader->FrameExtent) {
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            for (ULONG y = 0; y < Height; ++y) {
+                PUCHAR row = buffer + (static_cast<ULONGLONG>(stride) * y);
+                const ULONG sy = static_cast<ULONG>((static_cast<ULONGLONG>(y) * SourceHeight) / Height);
+                for (ULONG x = 0; x < Width; ++x) {
+                    const ULONG sx = static_cast<ULONG>((static_cast<ULONGLONG>(x) * SourceWidth) / Width);
+                    UCHAR b = 0, g = 0, r = 0, yy = 0, u = 0, v = 0;
+                    ReadBgrPixel(SourceFrame, SourceImageSize, SourceWidth, SourceHeight, SourceFormat, sx, sy, &b, &g, &r);
+                    BgrToYuv(b, g, r, &yy, &u, &v);
+                    row[x] = yy;
+                }
+            }
+
+            PUCHAR uvPlane = buffer + (static_cast<ULONGLONG>(stride) * Height);
+            for (ULONG y = 0; y < Height / 2; ++y) {
+                PUCHAR row = uvPlane + (static_cast<ULONGLONG>(stride) * y);
+                const ULONG sy = static_cast<ULONG>((static_cast<ULONGLONG>(y * 2) * SourceHeight) / Height);
+                for (ULONG x = 0; x + 1 < Width; x += 2) {
+                    const ULONG sx = static_cast<ULONG>((static_cast<ULONGLONG>(x) * SourceWidth) / Width);
+                    UCHAR b = 0, g = 0, r = 0, yy = 0, u = 0, v = 0;
+                    ReadBgrPixel(SourceFrame, SourceImageSize, SourceWidth, SourceHeight, SourceFormat, sx, sy, &b, &g, &r);
+                    BgrToYuv(b, g, r, &yy, &u, &v);
+                    row[x] = u;
+                    row[x + 1] = v;
+                }
+            }
+
+            *BytesWritten = ImageSize;
+            return STATUS_SUCCESS;
+        }
+
+        const ULONG widthBytes = Width * BytesPerPixel;
+        if (stride <= 0 || static_cast<ULONG>(stride) < widthBytes) {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        ULONGLONG requiredBytes = widthBytes;
+        if (Height > 0) {
+            requiredBytes += static_cast<ULONGLONG>(stride) * (Height - 1);
+        }
+        if (requiredBytes > StreamHeader->FrameExtent) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        PUCHAR destinationBase = buffer;
+        if (bottomUp && Height > 1) {
+            destinationBase += static_cast<ULONGLONG>(stride) * (Height - 1);
+        }
+
+        for (ULONG y = 0; y < Height; ++y) {
+            PUCHAR row = bottomUp ?
+                (destinationBase - (static_cast<ULONGLONG>(stride) * y)) :
+                (destinationBase + (static_cast<ULONGLONG>(stride) * y));
+            const ULONG sy = static_cast<ULONG>((static_cast<ULONGLONG>(y) * SourceHeight) / Height);
+
+            if (OutputFormat == VIRTUACAM_FRAME_FORMAT_YUY2) {
+                for (ULONG x = 0; x + 1 < Width; x += 2) {
+                    UCHAR b0 = 0, g0 = 0, r0 = 0, y0 = 0, u0 = 0, v0 = 0;
+                    UCHAR b1 = 0, g1 = 0, r1 = 0, y1 = 0, u1 = 0, v1 = 0;
+                    ULONG sx = static_cast<ULONG>((static_cast<ULONGLONG>(x) * SourceWidth) / Width);
+                    ReadBgrPixel(SourceFrame, SourceImageSize, SourceWidth, SourceHeight, SourceFormat, sx, sy, &b0, &g0, &r0);
+                    sx = static_cast<ULONG>((static_cast<ULONGLONG>(x + 1) * SourceWidth) / Width);
+                    ReadBgrPixel(SourceFrame, SourceImageSize, SourceWidth, SourceHeight, SourceFormat, sx, sy, &b1, &g1, &r1);
+                    BgrToYuv(b0, g0, r0, &y0, &u0, &v0);
+                    BgrToYuv(b1, g1, r1, &y1, &u1, &v1);
+                    PUCHAR pixel = row + (x * 2);
+                    pixel[0] = y0;
+                    pixel[1] = static_cast<UCHAR>((static_cast<ULONG>(u0) + u1) / 2);
+                    pixel[2] = y1;
+                    pixel[3] = static_cast<UCHAR>((static_cast<ULONG>(v0) + v1) / 2);
+                }
+            } else {
+                for (ULONG x = 0; x < Width; ++x) {
+                    const ULONG sx = static_cast<ULONG>((static_cast<ULONGLONG>(x) * SourceWidth) / Width);
+                    UCHAR b = 0, g = 0, r = 0;
+                    ReadBgrPixel(SourceFrame, SourceImageSize, SourceWidth, SourceHeight, SourceFormat, sx, sy, &b, &g, &r);
+                    PUCHAR pixel = row + (x * BytesPerPixel);
+                    pixel[0] = b;
+                    pixel[1] = g;
+                    pixel[2] = r;
+                    if (BytesPerPixel == 4) {
+                        pixel[3] = 0xFF;
+                    }
+                }
+            }
+        }
+
+        *BytesWritten = ImageSize;
+        return STATUS_SUCCESS;
+    }
+
     NTSTATUS
     FillDirectFrame(
         _Inout_ CHardwareSimulation* Hardware,
@@ -1882,6 +2124,9 @@ CopyImageToStreamHeader (
     ULONG currentHeight = 0;
     ULONG currentImageSize = 0;
     ULONG currentOutputFormat = VIRTUACAM_FRAME_FORMAT_UNKNOWN;
+    ULONG acceptedFrameCount = 0;
+    PUCHAR sourceFrame = NULL;
+    BOOLEAN framePinned = FALSE;
     KIRQL irql;
     KeAcquireSpinLock(&m_FrameLock, &irql);
     hardwareState = m_HardwareState;
@@ -1889,6 +2134,14 @@ CopyImageToStreamHeader (
     currentHeight = m_Height;
     currentImageSize = m_ImageSize;
     currentOutputFormat = m_OutputFormat;
+    acceptedFrameCount = m_SetDataAcceptedCount;
+    if (hardwareState == HardwareRunning &&
+        acceptedFrameCount > 0 &&
+        m_TemporaryBuffer) {
+        sourceFrame = m_TemporaryBuffer;
+        InterlockedIncrement(&m_FrameReadActive);
+        framePinned = TRUE;
+    }
     KeReleaseSpinLock(&m_FrameLock, irql);
 
     if (hardwareState != HardwareRunning) {
@@ -1899,18 +2152,47 @@ CopyImageToStreamHeader (
         currentHeight == height &&
         currentImageSize == imageSize &&
         currentOutputFormat == outputFormat) {
-        return CopyImageToStreamHeader(StreamHeader, BytesWritten);
+        NTSTATUS status = CopyImageToStreamHeader(StreamHeader, BytesWritten);
+        if (framePinned) {
+            InterlockedDecrement(&m_FrameReadActive);
+        }
+        return status;
     }
 
-    NTSTATUS status = FillDirectFrame(
-        this,
-        StreamHeader,
-        width,
-        height,
-        imageSize,
-        bytesPerPixel,
-        outputFormat,
-        BytesWritten);
+    NTSTATUS status = STATUS_DEVICE_NOT_READY;
+    if (sourceFrame &&
+        currentWidth > 0 &&
+        currentHeight > 0 &&
+        currentImageSize > 0 &&
+        currentOutputFormat != VIRTUACAM_FRAME_FORMAT_UNKNOWN) {
+        status = FillResampledFrame(
+            StreamHeader,
+            sourceFrame,
+            currentWidth,
+            currentHeight,
+            currentImageSize,
+            currentOutputFormat,
+            width,
+            height,
+            imageSize,
+            bytesPerPixel,
+            outputFormat,
+            BytesWritten);
+    } else {
+        status = FillDirectFrame(
+            this,
+            StreamHeader,
+            width,
+            height,
+            imageSize,
+            bytesPerPixel,
+            outputFormat,
+            BytesWritten);
+    }
+
+    if (framePinned) {
+        InterlockedDecrement(&m_FrameReadActive);
+    }
 
     if (NT_SUCCESS(status)) {
         InterlockedIncrement(reinterpret_cast<volatile LONG*>(&m_NumMappingsCompleted));
@@ -2263,6 +2545,9 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         KeAcquireSpinLock(&m_FrameLock, &irql);
         m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
+        if (rejectReason == kSetDataRejectBusy) {
+            m_BusyUploadRejectedCount++;
+        }
         KeReleaseSpinLock(&m_FrameLock, irql);
         return MapSetDataRejectReasonToStatus(rejectReason);
     }
@@ -2333,6 +2618,8 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
         KeStallExecutionProcessor(50);
     }
 
+    LARGE_INTEGER acceptedCounter = KeQueryPerformanceCounter(NULL);
+
     KeAcquireSpinLock(&m_FrameLock, &irql);
     if (m_HardwareState == HardwareRunning &&
         m_TemporaryBuffer &&
@@ -2356,10 +2643,16 @@ NTSTATUS CHardwareSimulation::SetData(PVOID data, ULONG dataLength)
     if (acceptedFrame) {
         m_SetDataAcceptedCount++;
         m_LastSetDataReason = kSetDataRejectNone;
+        m_LastAcceptedFrameId++;
+        m_LastAcceptedPerformanceCounter = static_cast<ULONGLONG>(acceptedCounter.QuadPart);
+        m_LastAcceptedSystemTime100ns = static_cast<ULONGLONG>(now.QuadPart);
         status = STATUS_SUCCESS;
     } else {
         m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
+        if (rejectReason == kSetDataRejectBusy) {
+            m_BusyUploadRejectedCount++;
+        }
         status = MapSetDataRejectReasonToStatus(rejectReason);
     }
     KeReleaseSpinLock(&m_FrameLock, irql);
@@ -2458,6 +2751,9 @@ NTSTATUS CHardwareSimulation::SetFrameEx(PVOID data, ULONG dataLength)
         KeAcquireSpinLock(&m_FrameLock, &irql);
         m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
+        if (rejectReason == kSetDataRejectBusy) {
+            m_BusyUploadRejectedCount++;
+        }
         KeReleaseSpinLock(&m_FrameLock, irql);
         return MapSetDataRejectReasonToStatus(rejectReason);
     }
@@ -2484,6 +2780,8 @@ NTSTATUS CHardwareSimulation::SetFrameEx(PVOID data, ULONG dataLength)
         KeStallExecutionProcessor(50);
     }
 
+    LARGE_INTEGER acceptedCounter = KeQueryPerformanceCounter(NULL);
+
     KeAcquireSpinLock(&m_FrameLock, &irql);
     if (m_HardwareState == HardwareRunning &&
         m_TemporaryBuffer &&
@@ -2507,10 +2805,16 @@ NTSTATUS CHardwareSimulation::SetFrameEx(PVOID data, ULONG dataLength)
     if (acceptedFrame) {
         m_SetDataAcceptedCount++;
         m_LastSetDataReason = kSetDataRejectNone;
+        m_LastAcceptedFrameId = header->FrameId;
+        m_LastAcceptedPerformanceCounter = static_cast<ULONGLONG>(acceptedCounter.QuadPart);
+        m_LastAcceptedSystemTime100ns = static_cast<ULONGLONG>(now.QuadPart);
         status = STATUS_SUCCESS;
     } else {
         m_SetDataRejectedCount++;
         m_LastSetDataReason = rejectReason;
+        if (rejectReason == kSetDataRejectBusy) {
+            m_BusyUploadRejectedCount++;
+        }
         status = MapSetDataRejectReasonToStatus(rejectReason);
     }
     KeReleaseSpinLock(&m_FrameLock, irql);
@@ -2569,8 +2873,6 @@ void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
 {
     PKEVENT registeredClientRequestEventObject = NULL;
     PKEVENT namedClientRequestEventObject = NULL;
-    BOOLEAN clientConnected = FALSE;
-    LONG acceptedFrameCount = 0;
     KIRQL irql;
 
     DbgPrint("[avshws] HwSim::NotifyCameraState running=%lu connected=%lu irql=%lu\n", (ULONG)isRunning, (ULONG)IsClientConnected(), (ULONG)KeGetCurrentIrql());
@@ -2584,17 +2886,14 @@ void CHardwareSimulation::NotifyCameraState(BOOLEAN isRunning)
         namedClientRequestEventObject = m_NamedClientRequestEventObject;
         ObReferenceObject(namedClientRequestEventObject);
     }
-    clientConnected = m_ClientConnected;
-    acceptedFrameCount = m_SetDataAcceptedCount;
     KeReleaseSpinLock(&m_FrameLock, irql);
 
     if (isRunning) {
-        if (!clientConnected || acceptedFrameCount == 0) {
-            if (registeredClientRequestEventObject) {
-                KeSetEvent(registeredClientRequestEventObject, IO_NO_INCREMENT, FALSE);
-            } else if (namedClientRequestEventObject) {
-                KeSetEvent(namedClientRequestEventObject, IO_NO_INCREMENT, FALSE);
-            }
+        if (registeredClientRequestEventObject) {
+            KeSetEvent(registeredClientRequestEventObject, IO_NO_INCREMENT, FALSE);
+        }
+        if (namedClientRequestEventObject) {
+            KeSetEvent(namedClientRequestEventObject, IO_NO_INCREMENT, FALSE);
         }
     } else {
         if (registeredClientRequestEventObject) {
@@ -2643,6 +2942,11 @@ void CHardwareSimulation::QueryStatus(_Out_ PVIRTUACAM_DRIVER_STATUS status)
     status->SetDataRejectedCount = m_SetDataRejectedCount;
     status->LastSetDataReason = m_LastSetDataReason;
     status->LastSetDataFormat = m_LastSetDataFormat;
+    status->StaleUploadRejectedCount = m_StaleUploadRejectedCount;
+    status->BusyUploadRejectedCount = m_BusyUploadRejectedCount;
+    status->LastAcceptedFrameId = m_LastAcceptedFrameId;
+    status->LastAcceptedPerformanceCounter = m_LastAcceptedPerformanceCounter;
+    status->LastAcceptedSystemTime100ns = m_LastAcceptedSystemTime100ns;
     KeReleaseSpinLock(&m_FrameLock, irql);
 
     KeAcquireSpinLock(&m_ListLock, &irql);

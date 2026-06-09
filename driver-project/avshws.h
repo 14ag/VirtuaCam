@@ -95,7 +95,7 @@ const ULONG DebugLevel = DEBUGLVL_TERSE;
 //
 // The number of ranges supported on the capture pin.
 //
-#define CAPTURE_PIN_DATA_RANGE_COUNT 27
+#define CAPTURE_PIN_DATA_RANGE_COUNT 33
 
 //
 // CAPTURE_FILTER_PIN_COUNT:
@@ -227,10 +227,17 @@ typedef struct _VIRTUACAM_DRIVER_STATUS {
     ULONG UploadFormatMask;
     ULONG LastSetDataFormat;
     ULONG ReservedStatus[3];
+    ULONG StaleUploadRejectedCount;
+    ULONG BusyUploadRejectedCount;
+    ULONGLONG LastAcceptedFrameId;
+    ULONGLONG LastAcceptedPerformanceCounter;
+    ULONGLONG LastAcceptedSystemTime100ns;
 } VIRTUACAM_DRIVER_STATUS, *PVIRTUACAM_DRIVER_STATUS;
 
 static_assert(FIELD_OFFSET(VIRTUACAM_DRIVER_STATUS, OutputFormat) == VIRTUACAM_DRIVER_STATUS_V1_SIZE,
     "VIRTUACAM_DRIVER_STATUS v1 prefix changed.");
+static_assert(FIELD_OFFSET(VIRTUACAM_DRIVER_STATUS, StaleUploadRejectedCount) > VIRTUACAM_DRIVER_STATUS_V1_SIZE,
+    "VIRTUACAM_DRIVER_STATUS append-only fields must remain after the v1 prefix.");
 
 /*************************************************
 

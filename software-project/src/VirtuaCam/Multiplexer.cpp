@@ -25,9 +25,21 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
 
 namespace
 {
+    constexpr UINT64 kTargetFrameIntervalMs = 33;
+
     HANDLE ProducerFenceHandleValue(UINT64 value)
     {
         return reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(value));
+    }
+
+    bool IsProducerStatusStale(const DirectPortStatusV1& status, UINT64 nowQpc)
+    {
+        if (status.qpcFrequency == 0 || status.producerFrameQpc == 0 || nowQpc <= status.producerFrameQpc) {
+            return false;
+        }
+
+        const UINT64 staleThresholdQpc = (status.qpcFrequency * kTargetFrameIntervalMs * 2ull) / 1000ull;
+        return staleThresholdQpc > 0 && (nowQpc - status.producerFrameQpc) > staleThresholdQpc;
     }
 }
 
@@ -41,6 +53,17 @@ HRESULT Multiplexer::Initialize(Microsoft::WRL::ComPtr<ID3D11Device> device)
     m_context.As(&m_context4);
     RETURN_IF_FAILED(CreateResources());
     RETURN_IF_FAILED(m_offModeShader.Initialize(m_device));
+    return S_OK;
+}
+
+HRESULT Multiplexer::SetOutputTexture(ID3D11Texture2D* outputTexture)
+{
+    RETURN_HR_IF_NULL(E_POINTER, outputTexture);
+    m_compositeRTV.Reset();
+    m_compositeTexture = outputTexture;
+    m_outputTexture = outputTexture;
+    RETURN_IF_FAILED(m_device->CreateRenderTargetView(m_compositeTexture.Get(), nullptr, &m_compositeRTV));
+    m_haveCompositeLayout = false;
     return S_OK;
 }
 
@@ -124,6 +147,14 @@ HRESULT Multiplexer::CreateResources()
 
 void Multiplexer::ReleaseProducerResource(ProducerGpuResources& res)
 {
+    if (res.statusView) {
+        UnmapViewOfFile(res.statusView);
+        res.statusView = nullptr;
+    }
+    if (res.statusHandle) {
+        CloseHandle(res.statusHandle);
+        res.statusHandle = nullptr;
+    }
     if (res.manifestView) {
         UnmapViewOfFile(res.manifestView);
         res.manifestView = nullptr;
@@ -280,6 +311,18 @@ HRESULT Multiplexer::UpdateProducerConnection(const VirtuaCam::DiscoveredSharedS
         return E_ACCESSDENIED;
     }
 
+    if (!streamInfo.statusName.empty()) {
+        newRes.statusHandle = OpenFileMappingW(FILE_MAP_READ, FALSE, streamInfo.statusName.c_str());
+        if (newRes.statusHandle) {
+            newRes.statusView = static_cast<DirectPortStatusV1*>(
+                MapViewOfFile(newRes.statusHandle, FILE_MAP_READ, 0, 0, sizeof(DirectPortStatusV1)));
+            if (!newRes.statusView) {
+                CloseHandle(newRes.statusHandle);
+                newRes.statusHandle = nullptr;
+            }
+        }
+    }
+
     newRes.connected = true;
     m_producerResources.push_back(std::move(newRes));
     VirtuaCamLog::LogLine(std::format(
@@ -325,14 +368,40 @@ bool Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
         }
     }
 
+    LARGE_INTEGER qpcNow = {};
+    const bool haveQpcNow = QueryPerformanceCounter(&qpcNow) != FALSE;
+    bool hasFreshStatusProducer = false;
+    for (auto& res : m_producerResources) {
+        res.latestStatusValid = false;
+        res.staleByStatus = false;
+        if (!res.statusView || !haveQpcNow) {
+            continue;
+        }
+
+        res.latestStatusValid = ReadDirectPortStatusStable(
+            res.statusView,
+            res.pid,
+            res.latestStatus);
+        if (res.latestStatusValid) {
+            res.staleByStatus = IsProducerStatusStale(
+                res.latestStatus,
+                static_cast<UINT64>(qpcNow.QuadPart));
+            if (!res.staleByStatus && res.latestStatus.lastPublishedFenceValue > 0) {
+                hasFreshStatusProducer = true;
+            }
+        }
+    }
+
     for (auto& res : m_producerResources) {
         if (!res.manifestView) continue;
+        if (hasFreshStatusProducer && res.staleByStatus) continue;
 
         UINT64 latestFrame = res.manifestView->frameValue;
         if (latestFrame > res.lastSeenFrame) {
             m_context4->Wait(res.sharedFence.Get(), latestFrame);
             m_context->CopyResource(res.privateTexture.Get(), res.sharedTexture.Get());
             res.lastSeenFrame = latestFrame;
+            ++res.copyCount;
             inputFrameChanged = true;
         }
     }
@@ -353,7 +422,7 @@ bool Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
 
     auto find_resource = [&](DWORD pid) -> ProducerGpuResources* {
         for (auto& res : m_producerResources) {
-            if (res.pid == pid) return &res;
+            if (res.pid == pid && !(hasFreshStatusProducer && res.staleByStatus)) return &res;
         }
         return nullptr;
     };
@@ -452,7 +521,9 @@ bool Multiplexer::CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedS
     }
 
     // 5. Finalize frame
-    m_context->CopyResource(m_outputTexture.Get(), m_compositeTexture.Get());
+    if (m_outputTexture.Get() != m_compositeTexture.Get()) {
+        m_context->CopyResource(m_outputTexture.Get(), m_compositeTexture.Get());
+    }
     m_outputFrameValue++;
     m_context4->Signal(m_outputFence.Get(), m_outputFrameValue);
     m_context->Flush();

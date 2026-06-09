@@ -1,1 +1,2 @@
 Camera Driver Test - Photo Capture - Capture an NV12 photo from each format exposed on the preferred stream for video preview
+Camera Driver Usage Indicator Manual Test

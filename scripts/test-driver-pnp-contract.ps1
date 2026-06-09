@@ -164,6 +164,16 @@ Assert-Contains `
     -Pattern "CapturePinDispatch[\s\S]*CCapturePin::DispatchClose" `
     -Message "Pin dispatch table must provide a close callback."
 
+Assert-Contains `
+    -Path "driver-project\capture.cpp" `
+    -Pattern "Framing\s*->\s*FramingItem\s*\[0\]\.Frames\s*=\s*3" `
+    -Message "Capture allocator framing must allow at least three outstanding frames."
+
+Assert-Contains `
+    -Path "driver-project\capture.cpp" `
+    -Pattern "DECLARE_SIMPLE_FRAMING_EX\s*\([\s\S]*CapturePinAllocatorFraming[\s\S]*KSALLOCATOR_REQUIREMENTF_SYSTEM_MEMORY,\s*3," `
+    -Message "Capture allocator static framing must advertise three outstanding frames."
+
 $inputPath = Join-Path $env:TEMP ("vhlk-filter-input-{0}.txt" -f ([guid]::NewGuid()))
 $skipPath = Join-Path $env:TEMP ("vhlk-filter-skip-{0}.txt" -f ([guid]::NewGuid()))
 $outputPath = Join-Path $env:TEMP ("vhlk-filter-output-{0}.txt" -f ([guid]::NewGuid()))

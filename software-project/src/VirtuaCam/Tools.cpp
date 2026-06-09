@@ -443,12 +443,117 @@ bool ValidateBroadcastManifest(
     return true;
 }
 
+bool InitializeDirectPortStatus(
+    DirectPortStatusV1* status,
+    DWORD ownerPid,
+    UINT64 qpcFrequency)
+{
+    if (!status || ownerPid == 0 || qpcFrequency == 0) {
+        return false;
+    }
+
+    ZeroMemory(status, sizeof(*status));
+    status->magic = VIRTUACAM_DIRECTPORT_STATUS_MAGIC;
+    status->version = VIRTUACAM_DIRECTPORT_STATUS_VERSION;
+    status->size = sizeof(DirectPortStatusV1);
+    status->ownerPid = ownerPid;
+    status->qpcFrequency = qpcFrequency;
+    status->publishSequence = 0;
+    return true;
+}
+
+void PublishDirectPortStatus(
+    DirectPortStatusV1* status,
+    UINT64 producerFrameQpc,
+    UINT64 lastPublishedFenceValue,
+    UINT64 frameCount,
+    UINT64 duplicateCount,
+    UINT64 staleCount,
+    HRESULT lastHRESULT,
+    UINT64 sampleAgeQpcDelta,
+    UINT64 droppedCallbackSampleCount)
+{
+    if (!status ||
+        status->magic != VIRTUACAM_DIRECTPORT_STATUS_MAGIC ||
+        status->version != VIRTUACAM_DIRECTPORT_STATUS_VERSION ||
+        status->size != sizeof(DirectPortStatusV1)) {
+        return;
+    }
+
+    auto sequence = InterlockedCompareExchange64(
+        &status->publishSequence,
+        0,
+        0);
+    if ((sequence & 1) != 0) {
+        sequence = InterlockedIncrement64(&status->publishSequence);
+    }
+
+    const LONGLONG beginWriteSequence = (sequence + 1) | 1;
+    InterlockedExchange64(&status->publishSequence, beginWriteSequence);
+    status->producerFrameQpc = producerFrameQpc;
+    status->lastPublishedFenceValue = lastPublishedFenceValue;
+    status->frameCount = frameCount;
+    status->duplicateCount = duplicateCount;
+    status->staleCount = staleCount;
+    status->lastHRESULT = lastHRESULT;
+    status->sampleAgeQpcDelta = sampleAgeQpcDelta;
+    status->droppedCallbackSampleCount = droppedCallbackSampleCount;
+    MemoryBarrier();
+    InterlockedExchange64(&status->publishSequence, beginWriteSequence + 1);
+}
+
+bool ReadDirectPortStatusStable(
+    const DirectPortStatusV1* status,
+    DWORD expectedOwnerPid,
+    DirectPortStatusV1& snapshot)
+{
+    if (!status || expectedOwnerPid == 0) {
+        return false;
+    }
+
+    __try {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const auto beginSequence = InterlockedCompareExchange64(
+                const_cast<volatile LONGLONG*>(&status->publishSequence),
+                0,
+                0);
+            if ((beginSequence & 1) != 0) {
+                YieldProcessor();
+                continue;
+            }
+
+            MemoryBarrier();
+            CopyMemory(&snapshot, status, sizeof(snapshot));
+            MemoryBarrier();
+
+            const auto endSequence = InterlockedCompareExchange64(
+                const_cast<volatile LONGLONG*>(&status->publishSequence),
+                0,
+                0);
+            if (beginSequence == endSequence &&
+                (endSequence & 1) == 0 &&
+                snapshot.magic == VIRTUACAM_DIRECTPORT_STATUS_MAGIC &&
+                snapshot.version == VIRTUACAM_DIRECTPORT_STATUS_VERSION &&
+                snapshot.size == sizeof(DirectPortStatusV1) &&
+                snapshot.ownerPid == expectedOwnerPid) {
+                return true;
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+
+    ZeroMemory(&snapshot, sizeof(snapshot));
+    return false;
+}
+
 namespace
 {
     constexpr wchar_t kLocalPrefix[] = L"Local\\";
     constexpr wchar_t kProducerManifestPrefix[] = L"DirectPort_Producer_Manifest_";
     constexpr wchar_t kProducerTexturePrefix[] = L"DirectPortTexture_";
     constexpr wchar_t kProducerFencePrefix[] = L"DirectPortFence_";
+    constexpr wchar_t kProducerStatusPrefix[] = L"DirectPort_Producer_Status_";
     constexpr wchar_t kBrokerManifestBase[] = L"DirectPort_Producer_Manifest_VirtuaCast_Broker";
     constexpr wchar_t kBrokerTextureBase[] = L"VirtuaCast_Broker_Texture";
     constexpr wchar_t kBrokerFenceBase[] = L"VirtuaCast_Broker_Fence";
@@ -467,6 +572,11 @@ std::wstring GetProducerTextureName(DWORD pid)
 std::wstring GetProducerFenceName(DWORD pid)
 {
     return std::format(L"{}{}{}", kLocalPrefix, kProducerFencePrefix, pid);
+}
+
+std::wstring GetProducerStatusName(DWORD pid)
+{
+    return std::format(L"{}{}{}", kLocalPrefix, kProducerStatusPrefix, pid);
 }
 
 std::wstring GetBrokerManifestName()

@@ -11,7 +11,7 @@ Read:
 - `https://github.com/14ag/VirtuaCam/wiki/Architecture`
 - `https://github.com/14ag/VirtuaCam/wiki/Development-Guide`
 
-Use current docs and source first when you work on startup flow, producer flow, packaging, or AVStream behavior. `implementation/` is reserved for retained WDK and AVStream audit references.
+Use current docs and source first when you work on startup flow, producer flow, packaging, or AVStream behavior. `implementation/` is ignored scratch space; merge anything useful into `wiki/`, `README.md`, or tracked docs before cleanup.
 
 ## Ways to contribute
 
@@ -60,16 +60,22 @@ Common commands:
 
 The build is clean by default and always stages the complete software and driver package.
 
-Installer command:
+Installer path:
+
+Open `.\output\VirtuaCamSetup.exe` as Administrator for normal GUI install, uninstall, launch, and repair flows.
+
+Headless automation command:
 
 ```powershell
-.\scripts\install-all.ps1
+.\output\VirtuaCamSetup.exe --install --json .\output\logs\wizard\install.json
 ```
 
-There is one build script, one install script, and one staged package path:
+Any setup action flag means headless mode. It writes progress and errors to stdout/stderr and does not use GUI popups.
+
+There is one build script, one setup executable, and one staged package path:
 
 - `scripts\build-all.ps1`
-- `scripts\install-all.ps1`
+- `output\VirtuaCamSetup.exe`
 - `output/`
 
 If you add, remove, or rename staged binaries, update `scripts/tools/artifact-manifest.ps1` so build and install stay aligned.
@@ -78,11 +84,11 @@ If you add, remove, or rename staged binaries, update `scripts/tools/artifact-ma
 
 - keep changes grounded in current repo architecture
 - update docs in same change when behavior changes
-- keep retained implementation references aligned with driver work
+- keep the wiki aligned with user-visible behavior
 - preserve user changes outside your task scope
 - test manually when you touch build, install, startup, producer selection, or driver bridge behavior
 - before changing anything under `driver-project`, check the relevant local PDF table of contents, read the relevant section, and cite the section in your work notes or PR summary
-- keep current docs in `README.md`, `software-project/README.md`, `driver-project/README.md`, and the separate GitHub wiki; do not treat implementation scratch notes as user-facing project docs
+- keep current docs in `README.md`, `software-project/README.md`, `driver-project/README.md`, and the separate GitHub wiki; do not treat ignored scratch notes as user-facing project docs
 
 ## Validation expectations
 

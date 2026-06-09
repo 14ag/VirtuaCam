@@ -27,7 +27,41 @@ Assert-HvAdministrator
 
 function Read-JsonFile {
     param([Parameter(Mandatory = $true)][string]$Path)
-    Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        try {
+            $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            try {
+                $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true)
+                try {
+                    $text = $reader.ReadToEnd()
+                }
+                finally {
+                    $reader.Dispose()
+                }
+            }
+            finally {
+                $stream.Dispose()
+            }
+
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                throw "JSON file is empty: $Path"
+            }
+
+            return ($text | ConvertFrom-Json)
+        }
+        catch [System.IO.IOException] {
+            $lastError = $_
+        }
+        catch [System.Management.Automation.PSInvalidOperationException] {
+            $lastError = $_
+        }
+
+        Start-Sleep -Milliseconds 150
+    }
+
+    throw $lastError
 }
 
 function Write-StatusFile {
@@ -213,7 +247,40 @@ try {
                 return $null
             }
 
-            Get-Content -LiteralPath $GuestStatusPath -Raw | ConvertFrom-Json
+            $lastError = $null
+            for ($attempt = 1; $attempt -le 20; $attempt++) {
+                try {
+                    $stream = [System.IO.File]::Open($GuestStatusPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    try {
+                        $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true)
+                        try {
+                            $text = $reader.ReadToEnd()
+                        }
+                        finally {
+                            $reader.Dispose()
+                        }
+                    }
+                    finally {
+                        $stream.Dispose()
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($text)) {
+                        throw "JSON file is empty: $GuestStatusPath"
+                    }
+
+                    return ($text | ConvertFrom-Json)
+                }
+                catch [System.IO.IOException] {
+                    $lastError = $_
+                }
+                catch [System.Management.Automation.PSInvalidOperationException] {
+                    $lastError = $_
+                }
+
+                Start-Sleep -Milliseconds 150
+            }
+
+            throw $lastError
         } -ArgumentList $guestLaunch.StatusPath
 
         if ($guestState) {

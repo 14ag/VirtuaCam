@@ -42,14 +42,17 @@ $paths = @(
   '.\scripts\run-vhlk-failed-only.ps1',
   '.\scripts\export-vhlk-failed-tests.ps1',
   '.\scripts\export-vhlk-remaining-tests.ps1',
+  '.\scripts\export-vhlk-all-tests.ps1',
   '.\scripts\filter-vhlk-test-list.ps1',
   '.\scripts\test-vhlk-runner-flow.ps1',
   '.\scripts\test-setup-registry-debug-mic.ps1',
   '.\scripts\test-audio-ioctl-fuzz.ps1',
+  '.\scripts\test-capture-source-menu-contract.ps1',
+  '.\scripts\host-windows-camera-display-capture-proof.ps1',
+  '.\scripts\host-windows-camera-aspect-hot-change-proof.ps1',
   '.\scripts\hyperv-common.ps1',
   '.\scripts\hyperv-proof-windows-camera.ps1',
   '.\scripts\build-all.ps1',
-  '.\scripts\install-all.ps1',
   '.\scripts\install-driver-for-vhlk.ps1'
 )
 foreach ($path in $paths) {
@@ -76,7 +79,8 @@ Run local checks:
 .\scripts\test-camera-profile-contract.ps1
 .\scripts\test-driver-pnp-contract.ps1
 .\scripts\test-ai-window-cli.ps1
-.\scripts\build-all.ps1 -Clean
+.\scripts\test-capture-source-menu-contract.ps1
+.\scripts\build-all.ps1
 ```
 
 Pass criteria:
@@ -86,6 +90,7 @@ Pass criteria:
 - `output\` contains staged camera driver, virtual microphone driver, software, catalog, and test certificate artifacts.
 - `test-driver-pnp-contract.ps1` confirms PnP query-remove handling, close callbacks, device capabilities, INF hardware removal-policy override, and vHLK blocker filtering.
 - `test-setup-registry-debug-mic.ps1` confirms registry settings, debug gating, virtual microphone ABI, capture-only INF registration, PortCls-only DriverEntry, and the compile-time user-mode feed bridge state.
+- `test-capture-source-menu-contract.ps1` confirms the normal tray source menu order: windows/games, displays, video capture devices, image, and video.
 
 ## Stage 2 - Driver-Test Gate
 
@@ -180,7 +185,7 @@ If vHLK fails:
 2. Export failed names and latest status.
 3. If driver change is needed, read PDF table of contents or first pages, then relevant PDF section.
 4. If failure count reached 2, search web for each failed test plus driver/API terms.
-5. Record sources and fix rationale under `implementation\` or `docs\` as appropriate.
+5. Record durable sources and fix rationale in the wiki or tracked docs. Use `implementation\` only as temporary ignored scratch space.
 6. Patch.
 7. Return to Stage 1 and Stage 2.
 8. Retest the failed vHLK set first.
@@ -217,7 +222,25 @@ Pass criteria:
 
 - `run-vhlk-tests.ps1` fresh-starts `vhlk` and `driver-test`, installs staged `output\` into DUT, then queues the full project.
 - Final vHLK run completes without failed status.
-- Any impossible lab/tool blocker is documented under `docs\` and skipped only on the next failed-only run.
+- Any impossible lab/tool blocker is documented in `docs\vhlk-blocked-test-names.txt` and skipped only through the blocker-filter path.
+
+For a full rerun that must skip documented blockers, export all project test names, filter `docs\vhlk-blocked-test-names.txt`, then pass the filtered list to `run-vhlk-tests.ps1`. Also pass the blocker list so stale queued/running blocked results are canceled and cleaned but not re-queued.
+
+```powershell
+.\scripts\export-vhlk-all-tests.ps1
+.\scripts\filter-vhlk-test-list.ps1 `
+  -InputPath .\test-reports\vhlk-all-export-<timestamp>\all-test-names.txt `
+  -SkipPath .\docs\vhlk-blocked-test-names.txt `
+  -OutputPath .\test-reports\vhlk-all-export-<timestamp>\all-test-names.filtered.txt
+.\scripts\run-vhlk-tests.ps1 `
+  -TestNameListPath .\test-reports\vhlk-all-export-<timestamp>\all-test-names.filtered.txt `
+  -BlockedTestNameListPath .\docs\vhlk-blocked-test-names.txt `
+  -PendingStartTimeoutSeconds 300 `
+  -TimeoutMinutes 480 `
+  -ResearchGateFailureCount 2 `
+  -StopOnFailureCount 10 `
+  -MaxControllerReconnectFailures 5
+```
 
 ## Stage 6 - Post-vHLK Documentation Assertion
 

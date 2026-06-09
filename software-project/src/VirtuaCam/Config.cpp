@@ -56,18 +56,20 @@ namespace
     {
         DWORD type = 0;
         DWORD cb = 0;
-        LSTATUS status = RegGetValueW(key, nullptr, name, RRF_RT_REG_SZ, &type, nullptr, &cb);
+        LSTATUS status = RegQueryValueExW(key, name, nullptr, &type, nullptr, &cb);
         if (status != ERROR_SUCCESS || type != REG_SZ || cb < sizeof(wchar_t)) {
             return false;
         }
 
-        std::wstring buffer(cb / sizeof(wchar_t), L'\0');
-        status = RegGetValueW(key, nullptr, name, RRF_RT_REG_SZ, &type, buffer.data(), &cb);
+        std::wstring buffer((cb + sizeof(wchar_t) - 1) / sizeof(wchar_t), L'\0');
+        type = 0;
+        status = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<LPBYTE>(buffer.data()), &cb);
         if (status != ERROR_SUCCESS || type != REG_SZ) {
             return false;
         }
 
-        if (!buffer.empty() && buffer.back() == L'\0') {
+        buffer.resize(cb / sizeof(wchar_t));
+        while (!buffer.empty() && buffer.back() == L'\0') {
             buffer.pop_back();
         }
         value = buffer;
@@ -174,6 +176,9 @@ namespace VirtuaCamConfig
         if (ReadDword(key.get(), L"ShowPipBottomLeft", value)) {
             settings.showPipBottomLeft = value != 0;
         }
+        if (ReadDword(key.get(), L"StartDebugMode", value)) {
+            settings.startDebugMode = value != 0;
+        }
 
         std::wstring text;
         if (ReadString(key.get(), L"AspectRatio", text)) {
@@ -201,6 +206,7 @@ namespace VirtuaCamConfig
             WriteDword(key.get(), L"ShowPipTopLeft", settings.showPipTopLeft ? 1u : 0u) &&
             WriteDword(key.get(), L"ShowPipTopRight", settings.showPipTopRight ? 1u : 0u) &&
             WriteDword(key.get(), L"ShowPipBottomLeft", settings.showPipBottomLeft ? 1u : 0u) &&
+            WriteDword(key.get(), L"StartDebugMode", settings.startDebugMode ? 1u : 0u) &&
             WriteString(key.get(), L"AspectRatio", AspectRatioConfigValue(settings.aspectRatio)) &&
             WriteString(key.get(), L"AudioRoutingMode", AudioRoutingModeConfigValue(settings.audioRoutingMode)) &&
             WriteString(key.get(), L"AudioCaptureDeviceName", settings.audioCaptureDeviceName);

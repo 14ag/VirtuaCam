@@ -84,7 +84,8 @@ Parse changed or key PowerShell files first. Then run:
 .\scripts\test-camera-profile-contract.ps1
 .\scripts\test-driver-pnp-contract.ps1
 .\scripts\test-ai-window-cli.ps1
-.\scripts\build-all.ps1 -Clean
+.\scripts\test-capture-source-menu-contract.ps1
+.\scripts\build-all.ps1
 ```
 
 Pass criteria:
@@ -94,6 +95,7 @@ Pass criteria:
 - `output\` contains staged camera driver, virtual microphone driver, software, catalog, and test certificate artifacts.
 - `test-driver-pnp-contract.ps1` confirms PnP query-remove handling, close callbacks, device capabilities, INF hardware removal-policy override, and vHLK blocker filtering.
 - `test-setup-registry-debug-mic.ps1` confirms registry settings, debug gating, virtual microphone ABI, capture-only INF registration, PortCls-only DriverEntry, and the compile-time user-mode feed bridge state.
+- `test-capture-source-menu-contract.ps1` confirms the normal tray source menu order: windows/games, displays, video capture devices, image, and video.
 
 ## Stage 2 - Driver-Test Gate
 
@@ -174,7 +176,7 @@ Run only after failed-only vHLK, local gate, and `driver-test` gate pass.
 Pass criteria:
 
 - Full vHLK run completes without failed status.
-- Impossible lab or tool blockers are documented under `docs\` before any skip is used in a later failed-only run.
+- Impossible lab or tool blockers are documented in `docs\vhlk-blocked-test-names.txt` before any skip is used. The current blocked manual item is `Camera Driver Usage Indicator Manual Test`.
 
 ## Stage 6 - Documentation Assertion
 

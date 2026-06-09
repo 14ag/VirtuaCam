@@ -290,10 +290,12 @@ namespace
 #define D_720P_Y 720
 #define D_480P_X 640
 #define D_480P_Y 480
+#define D_4X3_X 1440
+#define D_4X3_Y 1080
 #define D_9X16_X 1080
 #define D_9X16_Y 1920
-#define D_3X4_X 480
-#define D_3X4_Y 640
+#define D_3X4_X 1080
+#define D_3X4_Y 1440
 
 CCapturePin::
 CCapturePin (
@@ -464,7 +466,11 @@ Return Value:
                         Pin -> Descriptor -> AllocatorFraming
                         );
 
-                Framing -> FramingItem [0].Frames = 2;
+                //
+                // Microsoft AVStream allocator guidance recommends at least
+                // three outstanding frames for smoother dataflow.
+                //
+                Framing -> FramingItem [0].Frames = 3;
 
                 //
                 // The physical and optimal ranges must be biSizeImage.  We only
@@ -1884,11 +1890,32 @@ DEFINE_KSPROPERTY_SET_TABLE(CapturePinPropertySets)
     DEFINE_STD_PROPERTY_SET(KSPROPSETID_VramCapture, VramCapturePropertyTable)
 };
 
+DEFINE_KSEVENT_TABLE(CapturePinCapsChangeEventTable)
+{
+    DEFINE_KSEVENT_ITEM(
+        KSEVENT_PINCAPS_FORMATCHANGE,
+        sizeof(KSEVENTDATA),
+        0,
+        NULL,
+        NULL,
+        NULL
+    )
+};
+
+DEFINE_KSEVENT_SET_TABLE(CapturePinEventSets)
+{
+    DEFINE_KSEVENT_SET(
+        &KSEVENTSETID_PinCapsChange,
+        SIZEOF_ARRAY(CapturePinCapsChangeEventTable),
+        CapturePinCapsChangeEventTable
+    )
+};
+
 DEFINE_KSAUTOMATION_TABLE(CapturePinAutomationTable)
 {
     DEFINE_KSAUTOMATION_PROPERTIES(CapturePinPropertySets),
     DEFINE_KSAUTOMATION_METHODS_NULL,
-    DEFINE_KSAUTOMATION_EVENTS_NULL
+    DEFINE_KSAUTOMATION_EVENTS(CapturePinEventSets)
 };
 
 //
@@ -2277,7 +2304,7 @@ DECLARE_SIMPLE_FRAMING_EX (
     CapturePinAllocatorFraming,
     STATICGUIDOF (KSMEMORY_TYPE_KERNEL_NONPAGED),
     KSALLOCATOR_REQUIREMENTF_SYSTEM_MEMORY,
-    2,
+    3,
     0,
     2 * PAGE_SIZE,
     2 * PAGE_SIZE
@@ -2539,6 +2566,9 @@ const KS_DATARANGE_VIDEO2 Name = { \
 DEFINE_YUY2_CAPTURE_RANGE(FormatYUY2_9x16_Capture, D_9X16_X, D_9X16_Y);
 DEFINE_NV12_CAPTURE_RANGE(FormatNV12_9x16_Capture, D_9X16_X, D_9X16_Y);
 DEFINE_RGB32_CAPTURE_RANGE(FormatRGB32Bpp_9x16_Capture, D_9X16_X, D_9X16_Y);
+DEFINE_YUY2_CAPTURE_RANGE(FormatYUY2_4x3_Capture, D_4X3_X, D_4X3_Y);
+DEFINE_NV12_CAPTURE_RANGE(FormatNV12_4x3_Capture, D_4X3_X, D_4X3_Y);
+DEFINE_RGB32_CAPTURE_RANGE(FormatRGB32Bpp_4x3_Capture, D_4X3_X, D_4X3_Y);
 DEFINE_YUY2_CAPTURE_RANGE(FormatYUY2_3x4_Capture, D_3X4_X, D_3X4_Y);
 DEFINE_NV12_CAPTURE_RANGE(FormatNV12_3x4_Capture, D_3X4_X, D_3X4_Y);
 DEFINE_RGB32_CAPTURE_RANGE(FormatRGB32Bpp_3x4_Capture, D_3X4_X, D_3X4_Y);
@@ -2551,6 +2581,9 @@ DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_720p_Capture2, D_720P_X, D_720P_Y, 16
 DEFINE_YUY2_CAPTURE_RANGE2(FormatYUY2_480p_Capture2, D_480P_X, D_480P_Y, 4, 3);
 DEFINE_NV12_CAPTURE_RANGE2(FormatNV12_480p_Capture2, D_480P_X, D_480P_Y, 4, 3);
 DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_480p_Capture2, D_480P_X, D_480P_Y, 4, 3);
+DEFINE_YUY2_CAPTURE_RANGE2(FormatYUY2_4x3_Capture2, D_4X3_X, D_4X3_Y, 4, 3);
+DEFINE_NV12_CAPTURE_RANGE2(FormatNV12_4x3_Capture2, D_4X3_X, D_4X3_Y, 4, 3);
+DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_4x3_Capture2, D_4X3_X, D_4X3_Y, 4, 3);
 DEFINE_YUY2_CAPTURE_RANGE2(FormatYUY2_9x16_Capture2, D_9X16_X, D_9X16_Y, 9, 16);
 DEFINE_NV12_CAPTURE_RANGE2(FormatNV12_9x16_Capture2, D_9X16_X, D_9X16_Y, 9, 16);
 DEFINE_RGB32_CAPTURE_RANGE2(FormatRGB32Bpp_9x16_Capture2, D_9X16_X, D_9X16_Y, 9, 16);
@@ -2572,6 +2605,9 @@ CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
     (PKSDATARANGE) &FormatYUY2_480p_Capture,
     (PKSDATARANGE) &FormatNV12_480p_Capture,
     (PKSDATARANGE) &FormatRGB32Bpp_480p_Capture,
+    (PKSDATARANGE) &FormatYUY2_4x3_Capture,
+    (PKSDATARANGE) &FormatNV12_4x3_Capture,
+    (PKSDATARANGE) &FormatRGB32Bpp_4x3_Capture,
     (PKSDATARANGE) &FormatYUY2_9x16_Capture,
     (PKSDATARANGE) &FormatNV12_9x16_Capture,
     (PKSDATARANGE) &FormatRGB32Bpp_9x16_Capture,
@@ -2587,6 +2623,9 @@ CapturePinDataRanges [CAPTURE_PIN_DATA_RANGE_COUNT] = {
     (PKSDATARANGE) &FormatYUY2_480p_Capture2,
     (PKSDATARANGE) &FormatNV12_480p_Capture2,
     (PKSDATARANGE) &FormatRGB32Bpp_480p_Capture2,
+    (PKSDATARANGE) &FormatYUY2_4x3_Capture2,
+    (PKSDATARANGE) &FormatNV12_4x3_Capture2,
+    (PKSDATARANGE) &FormatRGB32Bpp_4x3_Capture2,
     (PKSDATARANGE) &FormatYUY2_9x16_Capture2,
     (PKSDATARANGE) &FormatNV12_9x16_Capture2,
     (PKSDATARANGE) &FormatRGB32Bpp_9x16_Capture2,
@@ -2612,7 +2651,7 @@ namespace
     typedef struct _VIRTUACAM_ASPECT_RANGES {
         ULONG AspectMode;
         ULONG AspectMask;
-        PKSDATARANGE Ranges[6];
+        PKSDATARANGE Ranges[12];
     } VIRTUACAM_ASPECT_RANGES;
 
     const VIRTUACAM_ASPECT_RANGES kAspectRanges[] = {
@@ -2623,7 +2662,9 @@ namespace
             { (PKSDATARANGE)&FormatYUY2_9x16_Capture, (PKSDATARANGE)&FormatNV12_9x16_Capture, (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture,
               (PKSDATARANGE)&FormatYUY2_9x16_Capture2, (PKSDATARANGE)&FormatNV12_9x16_Capture2, (PKSDATARANGE)&FormatRGB32Bpp_9x16_Capture2 } },
         { VIRTUACAM_ASPECT_4_3, VIRTUACAM_ASPECT_MASK_4_3,
-            { (PKSDATARANGE)&FormatYUY2_480p_Capture, (PKSDATARANGE)&FormatNV12_480p_Capture, (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture,
+            { (PKSDATARANGE)&FormatYUY2_4x3_Capture, (PKSDATARANGE)&FormatNV12_4x3_Capture, (PKSDATARANGE)&FormatRGB32Bpp_4x3_Capture,
+              (PKSDATARANGE)&FormatYUY2_4x3_Capture2, (PKSDATARANGE)&FormatNV12_4x3_Capture2, (PKSDATARANGE)&FormatRGB32Bpp_4x3_Capture2,
+              (PKSDATARANGE)&FormatYUY2_480p_Capture, (PKSDATARANGE)&FormatNV12_480p_Capture, (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture,
               (PKSDATARANGE)&FormatYUY2_480p_Capture2, (PKSDATARANGE)&FormatNV12_480p_Capture2, (PKSDATARANGE)&FormatRGB32Bpp_480p_Capture2 } },
         { VIRTUACAM_ASPECT_3_4, VIRTUACAM_ASPECT_MASK_3_4,
             { (PKSDATARANGE)&FormatYUY2_3x4_Capture, (PKSDATARANGE)&FormatNV12_3x4_Capture, (PKSDATARANGE)&FormatRGB32Bpp_3x4_Capture,
@@ -2632,11 +2673,13 @@ namespace
 
     bool AppendAspectRanges(_In_ const VIRTUACAM_ASPECT_RANGES& AspectRanges, _Inout_ PKSDATARANGE* OrderedRanges, _Inout_ ULONG& Index)
     {
-        if (Index + SIZEOF_ARRAY(AspectRanges.Ranges) > CAPTURE_PIN_DATA_RANGE_COUNT) {
-            return false;
-        }
-
         for (ULONG i = 0; i < SIZEOF_ARRAY(AspectRanges.Ranges); ++i) {
+            if (AspectRanges.Ranges[i] == NULL) {
+                continue;
+            }
+            if (Index >= CAPTURE_PIN_DATA_RANGE_COUNT) {
+                return false;
+            }
             OrderedRanges[Index++] = AspectRanges.Ranges[i];
         }
         return true;

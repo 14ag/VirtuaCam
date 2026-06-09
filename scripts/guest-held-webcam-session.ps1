@@ -206,6 +206,8 @@ $panelScript = Join-Path $PSScriptRoot "show-proof-panel.ps1"
 $panelStdOut = Join-Path $root "show-proof-panel.stdout.log"
 $panelStdErr = Join-Path $root "show-proof-panel.stderr.log"
 $serverScript = Join-Path $PSScriptRoot "serve-webcam.ps1"
+$serverStdOut = Join-Path $root "serve-webcam.stdout.log"
+$serverStdErr = Join-Path $root "serve-webcam.stderr.log"
 $browserDebugLog = Join-Path $root ("chrome_debug_{0}.log" -f $attemptId)
 $browserProfile = Join-Path $root (($browser.ToLowerInvariant()) + "-profile-" + $attemptId)
 $runtimeLog = Join-Path $packageRoot "logs\virtuacam-runtime.log"
@@ -229,10 +231,17 @@ $sourceWindowTitle = ""
 $virtuaCamProcess = $null
 $virtuaCamRuntime = $null
 $browserProc = $null
+$serverProc = $null
 $browserUrl = "file:///" + ($htmlPath -replace "\\", "/")
 $guestIp = ""
 $browserReady = $false
 $browserCommandLine = ""
+$httpServerReadyProbe = [ordered]@{
+    Url = ""
+    StatusCode = 0
+    BodyLength = 0
+    Error = ""
+}
 $browserReadyProbe = [ordered]@{
     JsonVersionUrl = "http://127.0.0.1:9222/json/version"
     StatusCode = 0
@@ -259,6 +268,36 @@ function Get-TextTail {
     return Join-TextOutput @(Get-Content -LiteralPath $Path -Encoding $EncodingName -Tail $Tail)
 }
 
+function Wait-ForLocalHttpUrl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [int]$TimeoutSeconds = 20
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if ($serverProc -and $serverProc.HasExited) {
+            $httpServerReadyProbe.Error = "HTTP server exited with code $($serverProc.ExitCode). stderr: " + (Get-TextTail -Path $serverStdErr -Tail 40)
+            return $false
+        }
+
+        try {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 3
+            $httpServerReadyProbe.StatusCode = [int]$response.StatusCode
+            $httpServerReadyProbe.BodyLength = if ($response.Content) { [int]$response.Content.Length } else { 0 }
+            $httpServerReadyProbe.Error = ""
+            return ($response.StatusCode -eq 200)
+        }
+        catch {
+            $httpServerReadyProbe.Error = $_.Exception.Message
+        }
+
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+
+    return $false
+}
+
 function Write-GuestState {
     param(
         [bool]$Ready,
@@ -283,6 +322,10 @@ function Write-GuestState {
         BrowserUrl = $browserUrl
         BrowserReady = $browserReady
         BrowserReadyProbe = $browserReadyProbe
+        HttpServerReadyProbe = $httpServerReadyProbe
+        HttpServerPid = if ($serverProc) { $serverProc.Id } else { 0 }
+        HttpServerStdOutTail = Get-TextTail -Path $serverStdOut -Tail 40
+        HttpServerStdErrTail = Get-TextTail -Path $serverStdErr -Tail 40
         BrowserCommandLine = $browserCommandLine
         BrowserProfilePath = $browserProfile
         BrowserDebugLogPath = $browserDebugLog
@@ -337,7 +380,7 @@ try {
         Where-Object { $_.CommandLine -like "*serve-webcam.ps1*" -or $_.CommandLine -like "*show-proof-panel.ps1*" } |
         Invoke-CimMethod -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null
 
-    Remove-Item -LiteralPath $sourceHwndFile, $sourcePidFile, $browserDebugLog, $guestStatusPath, $panelStdOut, $panelStdErr -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $sourceHwndFile, $sourcePidFile, $browserDebugLog, $guestStatusPath, $panelStdOut, $panelStdErr, $serverStdOut, $serverStdErr -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $browserProfile -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $sourceTextPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $sourceExplorerDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -472,7 +515,6 @@ try {
     if (-not $launchBrowser) {
         $virtuaCamRuntime = Invoke-WithAttemptEnvironment -AttemptValue $attemptId -Action {
             Start-Process -FilePath $runtimeExe -WorkingDirectory $packageRoot -ArgumentList @(
-                "/startup",
                 "-debug",
                 "--source-window-hwnd", $sourceWindowHwndText
             ) -WindowStyle Hidden -PassThru
@@ -490,14 +532,18 @@ try {
     }
 
     if ($launchBrowser -and $serveHttp) {
-        Start-Process powershell.exe -ArgumentList @(
+        $serverProc = Start-Process powershell.exe -ArgumentList @(
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
             "-File", $serverScript,
             "-Root", (Split-Path -Parent $htmlPath),
             "-Port", "$httpPort"
-        ) -WindowStyle Hidden | Out-Null
+        ) -WindowStyle Hidden -RedirectStandardOutput $serverStdOut -RedirectStandardError $serverStdErr -PassThru
         $browserUrl = "http://127.0.0.1:$httpPort/" + [System.IO.Path]::GetFileName($htmlPath)
+        $httpServerReadyProbe.Url = $browserUrl
+        if (-not (Wait-ForLocalHttpUrl -Url $browserUrl -TimeoutSeconds 20)) {
+            throw "Timed out waiting for local webcam HTTP server at $browserUrl. $($httpServerReadyProbe.Error)"
+        }
     }
 
     if ($launchBrowser) {

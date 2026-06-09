@@ -10,36 +10,37 @@ Repository goal: build and install a virtual camera that appears to Windows came
 ## What is here
 
 - `scripts\build-all.ps1`: single build entrypoint; builds software and driver and stages everything into `output/`
-- `scripts\install-all.ps1`: single install entrypoint; installs only from `output/`, registers `DirectPortClient.dll`, and configures startup
+- `output\VirtuaCamSetup.exe`: single install entrypoint; installs only from `output/`, registers `DirectPortClient.dll`, and configures the watcher service
 - `scripts\clean-output.ps1`: removes `output/` so the next build recreates a fresh staged package
 - `scripts\test-code-review-20260511.ps1`: whitebox checks for the 2026-05-11 code-review fixes
 - `scripts\test-performance-audit.ps1`: whitebox/runtime checks for the 2026-05-11 performance-audit fixes
+- `scripts\test-capture-source-menu-contract.ps1`: whitebox check for the tray capture-source menu contract
 - `scripts\run-vhlk-tests.ps1`: vHLK queue/monitor helper that reads controller credentials from `.env`
 - `scripts\run-vhlk-failed-only.ps1`: one-call failed-only vHLK entry point; exports failed names, filters documented blockers, fresh-starts VMs, installs the DUT driver, runs selected tests, and writes status artifacts
 - `shared\`: driver/user-mode ABI constants and structures shared by both projects
 - `software-project/`: CMake-based user-mode code
 - `driver-project/`: Visual Studio / WDK driver code
-- `implementation/`: retained WDK and AVStream audit references
+- `implementation/`: ignored scratch space for temporary specs and work notes; merge useful information into `wiki/` or tracked docs before cleanup
 - `wiki/`: optional local checkout of the GitHub wiki; ignored by this repository
 
 ## Clone to first camera session
 
-1. Clone the repository and enter it:
+1. Check prerequisites.
+
+Requirements:
+
+1. Windows 10
+2. Visual Studio 2022 with MSBuild and C++ workloads
+3. Windows SDK and WDK
+4. CMake 3.20
+5. Git
+
+2. Clone the repository and enter it:
 
 ```powershell
 git clone https://github.com/14ag/VirtuaCam.git
 cd VirtuaCam
 ```
-
-2. Check prerequisites.
-
-Requirements:
-
-1. Windows 10 or Windows 11
-2. Visual Studio 2022 with MSBuild and C++ workloads
-3. Windows SDK and WDK
-4. CMake 3.20 or newer
-5. Git
 
 ## Build
 
@@ -54,7 +55,7 @@ This script is the only build entrypoint. It always stages the installable packa
 Useful variants stay on the same script:
 
 ```powershell
-.\scripts\build-all.ps1 -Clean
+.\scripts\build-all.ps1
 ```
 
 Clean is the default behavior. The script always builds and stages the full package.
@@ -68,13 +69,15 @@ If the installer later reports `TESTSIGNING is OFF`, enable it once and reboot:
 bcdedit /set testsigning on
 ```
 
-Open an elevated PowerShell window in the repo root and install from the single install script:
+Open `.\output\VirtuaCamSetup.exe` as Administrator and use the setup wizard.
+
+For automation, pass an action flag. Any flag means headless mode: output goes to stdout/stderr and wizard logs, not GUI popups.
 
 ```powershell
-.\scripts\install-all.ps1
+.\output\VirtuaCamSetup.exe --install --json .\output\logs\wizard\install.json
 ```
 
-This script is the only install entrypoint. It always installs from `.\output`.
+The setup wizard is the only install entrypoint. It always installs from its own package directory.
 
 ## Run
 
@@ -84,7 +87,7 @@ Launch the tray app:
 .\output\VirtuaCam.exe
 ```
 
-Use the tray icon to choose a source.
+Use the tray icon to choose a video source, audio source, and aspect ratio.
 
 Open the target app and select `VirtuaCam` or `Virtual Camera Driver` as the camera.
 
@@ -94,15 +97,25 @@ Staged artifact names are centralized in `scripts/tools/artifact-manifest.ps1`, 
 
 The tray menu has two source modes that can look similar when no producers are active:
 
-- `Source > Off`: deliberately sends the generated off/default feed and ignores discovered producer streams.
-- `Source > Auto-Discovery Grid`: scans for available DirectPort producer streams and tiles them into a grid. If no producers are found, it falls back to the generated off/default feed.
+- `Video Source > Off`: deliberately sends the generated off/default feed and ignores discovered producer streams.
+- `Video Source > Auto-Discovery Grid`: scans for available DirectPort producer streams and tiles them into a grid. If no producers are found, it falls back to the generated off/default feed.
 
-Normal tray launch exposes Preview, Source, Audio Source, About, and Exit. Launch with `-debug` to expose PIP, aspect-ratio masks, diagnostics, logs, and proof tool launchers under `Advanced`.
+Normal tray launch exposes Show Preview, Video Source, Audio Source, Aspect Ratio, About, and Exit. Launch with `-debug` to expose PIP, aspect-ratio masks, diagnostics, logs, and proof tool launchers under `Advanced`.
+
+The `Video Source` menu is grouped in this order:
+
+```text
+windows and games
+displays
+video capture devices
+Image
+Video
+```
 
 Aspect ratio is controlled from:
 
 ```text
-Advanced > Aspect Ratio > 16:9 | 9:16 | 4:3 | 3:4
+Aspect Ratio > 16:9 | 9:16 | 4:3 | 3:4
 ```
 
 VirtuaCam stores these settings in:
@@ -113,7 +126,16 @@ HKCU\Software\VirtuaCam\Settings
 
 The registry settings include `AudioCaptureDeviceName`. The tray menu exposes `Audio Source`, with `None` and active WASAPI capture devices. Startup falls back to `Stereo Mix` when present, and camera passthrough keeps the existing matching-microphone selection behavior.
 
-The driver defaults to `1920x1080`, and also advertises `640x480`, `1080x1920`, and `480x640` capture modes. The tray aspect setting is sent to the driver as the preferred capture format, and camera passthrough can restrict the allowed driver aspect mask to formats supported by the physical camera. The next camera stream open chooses matching dimensions when the client accepts the advertised order. The producer renders into a fixed 1920x1080 canvas, so sources smaller than 1080p are upscaled with aspect-preserving black padding instead of being cropped or rejected.
+The driver defaults to `1920x1080`. The tray aspect setting is sent to the driver as the preferred capture format for the next camera stream open:
+
+| Aspect ratio | Preferred output |
+| --- | --- |
+| `16:9` | `1920x1080` |
+| `9:16` | `1080x1920` |
+| `4:3` | `1440x1080` |
+| `3:4` | `1080x1440` |
+
+The driver keeps `640x480` and `480x640` compatibility ranges. Camera passthrough can restrict the allowed driver aspect mask to formats supported by the physical camera. Sources are scaled as large as possible while preserving source proportions. Empty canvas space uses `#212121` padding.
 
 ## Validation
 
@@ -155,6 +177,8 @@ Host-side proof helpers:
 ```powershell
 .\scripts\host-preview-menu-proof.ps1
 .\scripts\host-windows-camera-proof.ps1
+.\scripts\host-windows-camera-display-capture-proof.ps1 -AspectRatio '4:3'
+.\scripts\host-windows-camera-aspect-hot-change-proof.ps1 -InitialAspectRatio '9:16' -TargetAspectRatio '4:3'
 .\scripts\host-media-capture-auto-proof.ps1
 .\scripts\host-media-capture-auto-proof.ps1 -IncludeAutoSurfaceProbe
 .\scripts\test-host-camera-passthrough-audio-config.ps1
@@ -220,7 +244,6 @@ Current staged runtime binaries:
 - `VirtuaCamProcess.exe`
 - `DirectPortBroker.dll`
 - `DirectPortClient.dll`
-- `DirectPortConsumer.dll`
 - `avshws.sys`
 - `avshws.inf`
 - `avshws.cat`
@@ -229,11 +252,11 @@ Current staged runtime binaries:
 - `vcruntime140.dll`
 - `vcruntime140_1.dll`
 
-Default packaging does not stage legacy Media Foundation producer DLLs. Camera and window producers are built into `VirtuaCamProcess.exe`; `DirectPortConsumer.dll` is the dynamic producer module kept in the default package.
+Default packaging does not stage legacy Media Foundation producer DLLs or `DirectPortConsumer.dll`. Camera, window, display, image, and video producers are built into `VirtuaCamProcess.exe`.
 
 ## Documentation
 
-Long-form current docs live in the separate GitHub wiki repo, not duplicated under `docs/`. When `wiki/` exists locally, it is an ignored wiki checkout.
+Long-form current docs live in the separate GitHub wiki repo, not duplicated under dated report files. When `wiki/` exists locally, it is an ignored wiki checkout.
 
 - [Wiki Home](https://github.com/14ag/VirtuaCam/wiki)
 - [Getting Started](https://github.com/14ag/VirtuaCam/wiki/Getting-Started)

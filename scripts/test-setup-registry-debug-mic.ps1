@@ -52,7 +52,7 @@ Assert-NotContains -Paths @((Join-Path $repoRoot "audio-driver-project\virtuacam
 Assert-NotContains -Paths @((Join-Path $repoRoot "audio-driver-project\virtuacam-mic.inf")) -Pattern "KmdfLibraryVersion" -Message "Audio INF still declares unused KMDF service"
 Assert-Contains "audio-driver-project\virtuacam-mic.inf" "PnpLockdown = 1" "Audio INF PnpLockdown missing"
 Assert-Contains "scripts\build-all.ps1" "virtuacam-mic.inf" "Build does not stage audio INF"
-Assert-Contains "scripts\install-all.ps1" "ROOT\VIRTUACAMMIC" "Install does not create mic devnode"
+Assert-Contains "wizard-project\src\VirtuaCamSetup.cpp" "ROOT\\VIRTUACAMMIC" "Setup wizard does not create mic devnode"
 Assert-Contains "software-project\src\VirtuaCam\WASAPI.cpp" "DeviceIoControl" "WASAPI bridge does not write IOCTL packets"
 Assert-Contains "software-project\src\VirtuaCam\WASAPI.cpp" "VIRTUACAM_MIC_SAMPLE_RATE" "WASAPI bridge does not resample to audio ABI"
 

@@ -80,8 +80,12 @@ $guestRoot = "C:\Temp\VirtuaCamDshowGate"
 $guestScriptsRoot = Join-Path $guestRoot "scripts"
 $guestScriptToolsRoot = Join-Path $guestScriptsRoot "tools"
 $guestProbeToolsRoot = Join-Path $guestRoot "probe-tools"
-$guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
+$guestPackageRoot = Join-Path $guestRoot "output"
+$guestSetupExe = Join-Path $guestPackageRoot "VirtuaCamSetup.exe"
+$guestInstallJson = Join-Path $guestRoot "setup-install.json"
 $guestProbeExe = Join-Path $guestProbeToolsRoot "dshow_probe.exe"
+$hostPackageStageRoot = Join-Path $artifactDir "vm-copy-stage"
+$hostPackageStageOutput = Join-Path $hostPackageStageRoot "output"
 
 try {
     Write-HvLog -Message ("Restoring checkpoint '{0}' for DirectShow probe gate." -f $CheckpointName) -LogPath $logPath -Level STEP
@@ -101,24 +105,38 @@ try {
         $null = New-Item -ItemType Directory -Force -Path $Root, $ScriptsRoot, $ScriptToolsRoot, $ProbeToolsRoot
     } -ArgumentList $guestRoot, $guestScriptsRoot, $guestScriptToolsRoot, $guestProbeToolsRoot | Out-Null
 
-    Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "output") -GuestPath $guestRoot -Recurse -LogPath $logPath
-    Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\install-all.ps1") -GuestPath $guestScriptsRoot -LogPath $logPath
-    Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "scripts\tools\artifact-manifest.ps1") -GuestPath $guestScriptToolsRoot -LogPath $logPath
+    if (Test-Path -LiteralPath $hostPackageStageRoot) {
+        Remove-Item -LiteralPath $hostPackageStageRoot -Recurse -Force
+    }
+    $null = New-Item -ItemType Directory -Force -Path $hostPackageStageOutput
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot "output") -Force |
+        Where-Object { $_.Name -ne "logs" } |
+        Copy-Item -Destination $hostPackageStageOutput -Recurse -Force
+
+    Copy-HvToGuest -Session $session -LocalPath $hostPackageStageOutput -GuestPath $guestRoot -Recurse -LogPath $logPath
     Copy-HvToGuest -Session $session -LocalPath (Join-Path $repoRoot "tools\dshow-probe\build\dshow_probe.exe") -GuestPath $guestProbeToolsRoot -LogPath $logPath
 
-    Write-HvLog -Message "Installing staged package inside guest before DirectShow probes." -LogPath $logPath -Level STEP
+    Write-HvLog -Message "Installing staged package with VirtuaCamSetup.exe before DirectShow probes." -LogPath $logPath -Level STEP
     $install = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
-        param($InstallScript)
+        param($SetupExe, $JsonPath)
 
-        $lines = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript 2>&1
+        $stdout = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.out" -f [Guid]::NewGuid().ToString("N"))
+        $stderr = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.err" -f [Guid]::NewGuid().ToString("N"))
+        $process = Start-Process -FilePath $SetupExe -ArgumentList @("--install", "--json", $JsonPath) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $lines = @()
+        if (Test-Path -LiteralPath $stdout) { $lines += Get-Content -LiteralPath $stdout }
+        if (Test-Path -LiteralPath $stderr) { $lines += Get-Content -LiteralPath $stderr }
+        $json = if (Test-Path -LiteralPath $JsonPath) { Get-Content -LiteralPath $JsonPath -Raw } else { "" }
         [pscustomobject]@{
-            ExitCode = $LASTEXITCODE
+            ExitCode = $process.ExitCode
             Output = [string]::Join([Environment]::NewLine, @($lines | ForEach-Object { [string]$_ }))
+            Json = $json
         }
-    } -ArgumentList $guestInstallAll
+    } -ArgumentList $guestSetupExe, $guestInstallJson
     $install.Output | Set-Content -LiteralPath (Join-Path $artifactDir "guest-driver-install.txt") -Encoding UTF8
+    $install.Json | Set-Content -LiteralPath (Join-Path $artifactDir "guest-driver-install.json") -Encoding UTF8
     if ($install.ExitCode -ne 0) {
-        throw "install-all failed in guest: $($install.ExitCode)"
+        throw "VirtuaCamSetup.exe install failed in guest: $($install.ExitCode)"
     }
 
     if ($install.Output -match '(?i)reboot is needed|reboot is required|pending system reboot|a reboot is required') {
@@ -146,6 +164,17 @@ try {
 
     $results = @()
     foreach ($mode in $Modes) {
+        Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
+            & "$env:WINDIR\System32\taskkill.exe" /IM VirtuaCam.exe /F 2>&1 | Out-Null
+            foreach ($service in @(Get-Service -Name "FrameServer", "CaptureService_*" -ErrorAction SilentlyContinue)) {
+                if ($service.Status -ne "Stopped") {
+                    Stop-Service -Name $service.Name -Force -ErrorAction SilentlyContinue
+                    try { $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(10)) } catch {}
+                }
+            }
+            Start-Sleep -Milliseconds 500
+        } | Out-Null
+
         $probe = Invoke-HvGuestCommand -Session $session -LogPath $logPath -ScriptBlock {
             param($ProbeExe, $Mode)
 

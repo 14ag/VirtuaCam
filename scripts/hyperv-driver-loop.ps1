@@ -52,15 +52,14 @@ if ([string]::IsNullOrWhiteSpace($GuestPasswordPlaintext) -and $envValues.Contai
 $guestCred = Get-HvGuestCredential -GuestCredential $GuestCredential -GuestUser $GuestUser -GuestPasswordPlaintext $GuestPasswordPlaintext -EnvUserKey "DRIVER_TEST_VM_USERNAME" -EnvPasswordKey "DRIVER_TEST_VM_PASSWORD"
 $repoRoot = Get-HvRepoRoot
 $driverPackageRootPath = Resolve-HvPath -Path "output" -BasePath $repoRoot
-$installAllScript = Resolve-HvPath -Path "scripts\install-all.ps1" -BasePath $repoRoot
-$artifactManifestScript = Resolve-HvPath -Path "scripts\tools\artifact-manifest.ps1" -BasePath $repoRoot
 $webcamHtml = Resolve-HvPath -Path "software-project\webcam.html" -BasePath $repoRoot
 $runId = Get-HvTimestamp
 $guestRoot = "C:\Temp\VirtuaCamHyperV\run-$runId"
 $guestPackageRoot = Join-Path $guestRoot (Split-Path -Path $driverPackageRootPath -Leaf)
 $guestScriptsRoot = Join-Path $guestRoot "scripts"
 $guestToolsRoot = Join-Path $guestScriptsRoot "tools"
-$guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
+$guestSetupExe = Join-Path $guestPackageRoot "VirtuaCamSetup.exe"
+$guestInstallJson = Join-Path $guestRoot "setup-install.json"
 $guestWebcamHtml = Join-Path $guestRoot "webcam.html"
 $debuggerLogPath = ""
 $reproFailureMessage = ""
@@ -155,22 +154,29 @@ try {
         } -ArgumentList $guestRoot, $guestScriptsRoot, $guestToolsRoot | Out-Null
 
         Copy-HvToGuest -Session $session -LocalPath $driverPackageRootPath -GuestPath $guestRoot -Recurse -LogPath $LogPath
-        Copy-HvToGuest -Session $session -LocalPath $installAllScript -GuestPath $guestScriptsRoot -LogPath $LogPath
-        Copy-HvToGuest -Session $session -LocalPath $artifactManifestScript -GuestPath $guestToolsRoot -LogPath $LogPath
         if (Test-Path -LiteralPath $webcamHtml) {
             Copy-HvToGuest -Session $session -LocalPath $webcamHtml -GuestPath $guestRoot -LogPath $LogPath
         }
 
-        Write-HvLog -Message "Installing/rebinding driver inside guest." -LogPath $LogPath -Level STEP
+        Write-HvLog -Message "Installing/rebinding driver inside guest with VirtuaCamSetup.exe." -LogPath $LogPath -Level STEP
         $installResult = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
-            param($InstallScript)
-            $output = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript 2>&1 | Out-String
+            param($SetupExe, $JsonPath)
+            $stdout = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.out" -f [Guid]::NewGuid().ToString("N"))
+            $stderr = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.err" -f [Guid]::NewGuid().ToString("N"))
+            $process = Start-Process -FilePath $SetupExe -ArgumentList @("--install", "--json", $JsonPath) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $lines = @()
+            if (Test-Path -LiteralPath $stdout) { $lines += Get-Content -LiteralPath $stdout }
+            if (Test-Path -LiteralPath $stderr) { $lines += Get-Content -LiteralPath $stderr }
+            $output = [string]::Join([Environment]::NewLine, @($lines | ForEach-Object { [string]$_ }))
+            $json = if (Test-Path -LiteralPath $JsonPath) { Get-Content -LiteralPath $JsonPath -Raw } else { "" }
             [pscustomobject]@{
                 Output   = $output
-                ExitCode = $LASTEXITCODE
+                ExitCode = $process.ExitCode
+                Json = $json
             }
-        } -ArgumentList $guestInstallAll
+        } -ArgumentList $guestSetupExe, $guestInstallJson
         Set-Content -LiteralPath (Join-Path $artifactDir "guest-driver-install.txt") -Value $installResult.Output
+        Set-Content -LiteralPath (Join-Path $artifactDir "guest-driver-install.json") -Value $installResult.Json
         if ($installResult.ExitCode -ne 0) {
             Fail-Hv -Message ("Guest driver install failed with exit code {0}. See {1}" -f $installResult.ExitCode, (Join-Path $artifactDir "guest-driver-install.txt")) -LogPath $LogPath
         }
@@ -246,7 +252,7 @@ try {
                 }
 
                 if (Test-Path -LiteralPath $exe) {
-                    Start-Process -FilePath $exe -ArgumentList "/startup -debug" | Out-Null
+                    Start-Process -FilePath $exe -ArgumentList "-debug" | Out-Null
                 }
 
                 switch ($Mode) {

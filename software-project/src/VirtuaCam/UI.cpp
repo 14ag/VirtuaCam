@@ -6,16 +6,14 @@
 #include "Discovery.h"
 #include "RuntimeLog.h"
 #include <dshow.h>
-#include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
+#include <commdlg.h>
+#include <cwctype>
 #include <filesystem>
 #include <map>
 
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "dwmapi.lib")
 
 using namespace Microsoft::WRL;
@@ -27,9 +25,13 @@ extern void RequestDriverDisconnect();
 
 extern const SourceState& GetMainSourceState();
 extern void SetSourceMode(SourceMode newMode, DWORD_PTR context);
+extern void SetSourceFileMode(SourceMode newMode, const std::wstring& path);
 
 extern const SourceState& GetPipSourceState(PipPosition pos);
 extern void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context);
+extern const wchar_t* SourceModeToString(SourceMode mode);
+extern std::wstring GetRuntimeDriverStatusText();
+extern std::wstring GetRuntimeAudioStatusText();
 
 extern bool GetPipTlEnabled();
 extern bool GetPipTrEnabled();
@@ -45,6 +47,28 @@ namespace
 {
     const GUID kDriverPropertySet = { 0xcb043957, 0x7b35, 0x456e, { 0x9b, 0x61, 0x55, 0x13, 0x93, 0x0f, 0x4d, 0x8e } };
     constexpr ULONG kDriverPropertyId = 0;
+
+    bool ContainsNoCase(const std::wstring& value, const wchar_t* needle)
+    {
+        if (!needle || !*needle) return true;
+        std::wstring haystack = value;
+        std::wstring target = needle;
+        std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(towlower(ch));
+        });
+        std::transform(target.begin(), target.end(), target.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(towlower(ch));
+        });
+        return haystack.find(target) != std::wstring::npos;
+    }
+
+    bool IsVirtuaCamVideoSource(const std::wstring& name, const std::wstring& link)
+    {
+        return ContainsNoCase(name, L"VirtuaCam") ||
+            ContainsNoCase(name, L"Virtual Camera Driver") ||
+            ContainsNoCase(link, L"VirtuaCam") ||
+            ContainsNoCase(link, L"avshws");
+    }
 
     std::filesystem::path RepoRootFromExeDir()
     {
@@ -123,6 +147,41 @@ std::vector<CapturableWindow> EnumerateWindows() {
     return result;
 }
 
+BOOL CALLBACK EnumDisplayProc(HMONITOR monitor, HDC, LPRECT rect, LPARAM lParam)
+{
+    auto* displays = reinterpret_cast<std::vector<CapturableDisplay>*>(lParam);
+    if (!displays || !rect) {
+        return TRUE;
+    }
+
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+        return TRUE;
+    }
+
+    const int index = static_cast<int>(displays->size());
+    std::wstring name = L"Display " + std::to_wstring(index + 1);
+    if (info.szDevice[0] != L'\0') {
+        name += L" (";
+        name += info.szDevice;
+        name += L")";
+    }
+    if ((info.dwFlags & MONITORINFOF_PRIMARY) != 0) {
+        name += L" Primary";
+    }
+
+    displays->push_back({ index, name, *rect, (info.dwFlags & MONITORINFOF_PRIMARY) != 0 });
+    return TRUE;
+}
+
+std::vector<CapturableDisplay> EnumerateDisplays()
+{
+    std::vector<CapturableDisplay> displays;
+    EnumDisplayMonitors(nullptr, nullptr, EnumDisplayProc, reinterpret_cast<LPARAM>(&displays));
+    return displays;
+}
+
 std::vector<std::wstring> EnumerateCameras() {
     std::vector<std::wstring> cameraNames;
     // Keep a parallel list of device paths so the app can launch camera producers
@@ -132,65 +191,55 @@ std::vector<std::wstring> EnumerateCameras() {
     g_cameraDevicePaths.clear();
     g_cameraDeviceNamesCache.clear();
 
-    ComPtr<ICreateDevEnum> devEnum;
-    if (FAILED(CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&devEnum)))) {
+    ComPtr<IMFAttributes> attributes;
+    if (FAILED(MFCreateAttributes(&attributes, 1))) {
+        return cameraNames;
+    }
+    if (FAILED(attributes->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID))) {
         return cameraNames;
     }
 
-    ComPtr<IEnumMoniker> enumMoniker;
-    HRESULT hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &enumMoniker, 0);
-    if (hr != S_OK || !enumMoniker) {
+    UINT32 count = 0;
+    IMFActivate** devices = nullptr;
+    HRESULT hr = MFEnumDeviceSources(attributes.Get(), &devices, &count);
+    if (FAILED(hr) || !devices || count == 0) {
+        if (devices) CoTaskMemFree(devices);
         return cameraNames;
     }
 
-    while (true) {
-        ComPtr<IMoniker> moniker;
-        ULONG fetched = 0;
-        if (enumMoniker->Next(1, &moniker, &fetched) != S_OK) {
-            break;
-        }
-
-        if (IsDriverOutputCamera(moniker.Get())) {
+    for (UINT32 i = 0; i < count; ++i) {
+        wil::unique_cotaskmem_string friendlyName;
+        wil::unique_cotaskmem_string symbolicLink;
+        if (!devices[i]) {
             continue;
         }
 
-        ComPtr<IPropertyBag> propertyBag;
-        if (FAILED(moniker->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&propertyBag))) || !propertyBag) {
+        (void)devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &friendlyName, nullptr);
+        (void)devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &symbolicLink, nullptr);
+
+        std::wstring name = friendlyName.get() ? friendlyName.get() : L"Video Capture Device";
+        std::wstring link = symbolicLink.get() ? symbolicLink.get() : L"";
+        if (IsVirtuaCamVideoSource(name, link)) {
             continue;
         }
 
-        std::wstring devicePathStr;
-        VARIANT devicePath;
-        VariantInit(&devicePath);
-        if (SUCCEEDED(propertyBag->Read(L"DevicePath", &devicePath, nullptr)) &&
-            devicePath.vt == VT_BSTR &&
-            devicePath.bstrVal) {
-            devicePathStr = devicePath.bstrVal;
-        }
-        VariantClear(&devicePath);
-
-        VARIANT friendlyName;
-        VariantInit(&friendlyName);
-        if (SUCCEEDED(propertyBag->Read(L"FriendlyName", &friendlyName, nullptr)) &&
-            friendlyName.vt == VT_BSTR &&
-            friendlyName.bstrVal) {
-            std::wstring name(friendlyName.bstrVal);
-            if (name.find(L"VirtuaCam") == std::wstring::npos) {
-                cameraNames.push_back(name);
-                g_cameraDeviceNamesCache.push_back(name);
-                g_cameraDevicePaths.push_back(devicePathStr);
-            }
-        }
-        VariantClear(&friendlyName);
+        cameraNames.push_back(name);
+        g_cameraDeviceNamesCache.push_back(name);
+        g_cameraDevicePaths.push_back(link);
     }
+
+    for (UINT32 i = 0; i < count; ++i) {
+        if (devices[i]) {
+            devices[i]->Release();
+        }
+    }
+    CoTaskMemFree(devices);
 
     return cameraNames;
 }
 
 static HINSTANCE g_instance;
 static HWND g_hMainWnd = NULL;
-static HWND g_hPreviewWnd = NULL;
-static HWND g_hTelemetryLabel = NULL;
 static WCHAR g_windowClass[MAX_LOADSTRING];
 static std::function<void(int)> g_audioSelectionCallback;
 static std::vector<std::wstring> g_captureDeviceNames;
@@ -198,18 +247,9 @@ std::vector<std::wstring> g_cameraDevicePaths;
 std::vector<std::wstring> g_cameraDeviceNamesCache;
 static int g_currentAudioDevice = ID_AUDIO_DEVICE_NONE;
 static bool g_debugUiEnabled = false;
-static PFN_GetSharedTexture g_pfnGetSharedTexture = nullptr;
 static std::function<void()> g_onIdle;
-
-static ComPtr<ID3D11Device> g_device;
-static ComPtr<ID3D11DeviceContext> g_context;
-static ComPtr<IDXGISwapChain> g_swapChain;
-static ComPtr<ID3D11RenderTargetView> g_rtv;
-static ComPtr<ID3D11VertexShader> g_vs;
-static ComPtr<ID3D11PixelShader> g_ps;
-static ComPtr<ID3D11SamplerState> g_sampler;
-static ComPtr<ID3D11ShaderResourceView> g_previewSRV;
-static ComPtr<ID3D11Texture2D> g_uiSideTexture;
+static BrokerState g_lastBrokerState = (BrokerState)-1;
+static bool g_lastDriverConnected = false;
 
 static std::map<UINT, HWND> g_mainSourceWindowMap;
 static std::map<UINT, HWND> g_pipTlWindowMap;
@@ -265,35 +305,19 @@ void EnableNativeDarkMenus(HWND hwnd)
 }
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-LRESULT CALLBACK PreviewWndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 void AddTrayIcon(HWND hwnd, bool add);
 void UpdateTrayTooltip(BrokerState brokerState, bool driverConnected);
+std::wstring BrokerStateText(BrokerState brokerState);
+std::wstring SourceSummaryText(const SourceState& state, BrokerState brokerState);
+std::wstring BuildSupportStatusText(BrokerState brokerState, bool driverConnected);
 void ShowContextMenu(HWND hwnd);
 void HandleMenuCommand(UINT id);
 ATOM MyRegisterClass(HINSTANCE instance);
-HRESULT InitD3D(HWND hwnd);
-void CleanupD3D();
-void RenderPreviewFrame(HWND hwnd);
-HRESULT LoadAssets();
+bool SelectSourceFile(HWND owner, bool video, std::wstring& outPath);
 
-const char* g_vertexShaderHLSL = R"(
-struct VOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
-VOut main(uint vid : SV_VertexID) {
-    float2 uv = float2((vid << 1) & 2, vid & 2);
-    VOut o; o.pos = float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0, 1);
-    o.uv = uv; return o;
-})";
-
-const char* g_pixelShaderHLSL = R"(
-Texture2D    tex : register(t0); SamplerState smp : register(s0);
-float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
-    return tex.Sample(smp, uv);
-})";
-
-void UI_Initialize(HINSTANCE instance, HWND& outMainWnd, PFN_GetSharedTexture pfnGetSharedTexture) {
+void UI_Initialize(HINSTANCE instance, HWND& outMainWnd) {
     g_instance = instance;
-    g_pfnGetSharedTexture = pfnGetSharedTexture;
     LoadStringW(instance, IDC_VIRTUACAM, g_windowClass, MAX_LOADSTRING);
     MyRegisterClass(instance);
 
@@ -328,18 +352,13 @@ void UI_RunMessageLoop(std::function<void()> onIdle) {
             DispatchMessage(&msg);
         } else {
             if (g_onIdle) g_onIdle();
-            if (g_hPreviewWnd && IsWindow(g_hPreviewWnd)) {
-                RenderPreviewFrame(g_hPreviewWnd);
-            } else {
-                Sleep(10);
-            }
+            Sleep(10);
         }
     }
 }
 
 void UI_Shutdown() {
     AddTrayIcon(g_hMainWnd, false);
-    CleanupD3D();
 }
 
 void UI_UpdateAudioDeviceLists(const std::vector<std::wstring>& captureDevices) {
@@ -390,17 +409,7 @@ ATOM MyRegisterClass(HINSTANCE instance) {
     wcex.hInstance = instance; wcex.lpszClassName = g_windowClass;
     wcex.hIcon = LoadIcon(instance, MAKEINTRESOURCE(IDI_VIRTUACAM));
     wcex.hIconSm = LoadIcon(instance, MAKEINTRESOURCE(IDI_SMALL));
-    RegisterClassExW(&wcex);
-
-    WNDCLASSEXW wcexPreview = {};
-    wcexPreview.cbSize = sizeof(WNDCLASSEX); wcexPreview.style = CS_HREDRAW | CS_VREDRAW;
-    wcexPreview.lpfnWndProc = PreviewWndProc; wcexPreview.hInstance = instance;
-    wcexPreview.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wcexPreview.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wcexPreview.lpszClassName = PREVIEW_WINDOW_CLASS;
-    wcexPreview.hIcon = LoadIcon(instance, MAKEINTRESOURCE(IDI_VIRTUACAM));
-    wcexPreview.hIconSm = LoadIcon(instance, MAKEINTRESOURCE(IDI_SMALL));
-    return RegisterClassExW(&wcexPreview);
+    return RegisterClassExW(&wcex);
 }
 
 void HandlePipCommand(PipPosition pos, UINT id) {
@@ -417,8 +426,6 @@ void HandlePipCommand(PipPosition pos, UINT id) {
             if (g_pipTlWindowMap.count(id)) SetPipSource(pos, SourceMode::Window, reinterpret_cast<DWORD_PTR>(g_pipTlWindowMap[id]));
         } else if (id >= ID_PIP_TL_CAMERA_FIRST) {
             SetPipSource(pos, SourceMode::Camera, id - ID_PIP_TL_CAMERA_FIRST);
-        } else if (id == ID_PIP_TL_CONSUMER) {
-            SetPipSource(pos, SourceMode::Consumer, 0);
         } else if (id == ID_PIP_TL_OFF) {
             SetPipSource(pos, SourceMode::Off, 0);
         }
@@ -432,8 +439,6 @@ void HandlePipCommand(PipPosition pos, UINT id) {
             if (g_pipTrWindowMap.count(id)) SetPipSource(pos, SourceMode::Window, reinterpret_cast<DWORD_PTR>(g_pipTrWindowMap[id]));
         } else if (id >= ID_PIP_TR_CAMERA_FIRST) {
             SetPipSource(pos, SourceMode::Camera, id - ID_PIP_TR_CAMERA_FIRST);
-        } else if (id == ID_PIP_TR_CONSUMER) {
-            SetPipSource(pos, SourceMode::Consumer, 0);
         } else if (id == ID_PIP_TR_OFF) {
             SetPipSource(pos, SourceMode::Off, 0);
         }
@@ -447,8 +452,6 @@ void HandlePipCommand(PipPosition pos, UINT id) {
             if (g_pipBlWindowMap.count(id)) SetPipSource(pos, SourceMode::Window, reinterpret_cast<DWORD_PTR>(g_pipBlWindowMap[id]));
         } else if (id >= ID_PIP_BL_CAMERA_FIRST) {
             SetPipSource(pos, SourceMode::Camera, id - ID_PIP_BL_CAMERA_FIRST);
-        } else if (id == ID_PIP_BL_CONSUMER) {
-            SetPipSource(pos, SourceMode::Consumer, 0);
         } else if (id == ID_PIP_BL_OFF) {
             SetPipSource(pos, SourceMode::Off, 0);
         }
@@ -462,8 +465,6 @@ void HandlePipCommand(PipPosition pos, UINT id) {
             if (g_pipWindowMap.count(id)) SetPipSource(pos, SourceMode::Window, reinterpret_cast<DWORD_PTR>(g_pipWindowMap[id]));
         } else if (id >= ID_PIP_CAMERA_FIRST) {
             SetPipSource(pos, SourceMode::Camera, id - ID_PIP_CAMERA_FIRST);
-        } else if (id == ID_PIP_CONSUMER) {
-            SetPipSource(pos, SourceMode::Consumer, 0);
         } else if (id == ID_PIP_OFF) {
             SetPipSource(pos, SourceMode::Off, 0);
         }
@@ -477,8 +478,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if (wParam == 1) InformBroker();
         break;
     case WM_APP_TRAY_MSG:
-        if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) ShowContextMenu(hwnd);
-        else if (lParam == WM_LBUTTONDBLCLK) CreatePreviewWindow();
+        if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU ||
+            lParam == WM_LBUTTONUP || lParam == NIN_SELECT || lParam == WM_LBUTTONDBLCLK) {
+            ShowContextMenu(hwnd);
+        }
         break;
     case WM_APP_MENU_COMMAND:
     {
@@ -510,7 +513,13 @@ void HandleMenuCommand(UINT id)
     }
 
     if (id == ID_TRAY_PREVIEW_WINDOW) CreatePreviewWindow();
-    else if (id == ID_TRAY_ABOUT) DialogBox(g_instance, MAKEINTRESOURCE(IDD_ABOUTBOX), nullptr, About);
+    else if (id == ID_TRAY_ABOUT) {
+        MessageBoxW(g_hMainWnd, BuildSupportStatusText(g_lastBrokerState, g_lastDriverConnected).c_str(), L"About VirtuaCam", MB_OK | MB_ICONINFORMATION);
+    }
+    else if (id == ID_TRAY_OPEN_LOGS) {
+        const std::filesystem::path logPath = VirtuaCamLog::GetLogPath();
+        ShellOpenPath(logPath.empty() ? std::filesystem::path(VirtuaCamLog::GetExeDir()) : logPath.parent_path());
+    }
     else if (id == ID_TRAY_EXIT) {
         RequestDriverDisconnect();
         DestroyWindow(g_hMainWnd);
@@ -526,12 +535,7 @@ void HandleMenuCommand(UINT id)
         RunPowerShellScript(RepoRootFromExeDir() / L"scripts" / L"hyperv-proof-chrome.ps1", L"-EnableVerifier");
     }
     else if (id == ID_ADV_RUN_SETUP_VERIFY) {
-        const std::filesystem::path setup = std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"VirtuaCamSetup.exe";
-        if (std::filesystem::exists(setup)) {
-            ShellExecuteW(nullptr, L"open", setup.c_str(), L"--verify-only --quiet", VirtuaCamLog::GetExeDir().c_str(), SW_SHOWNORMAL);
-        } else {
-            MessageBoxW(g_hMainWnd, setup.c_str(), L"VirtuaCam setup not staged", MB_OK | MB_ICONWARNING);
-        }
+        CreatePreviewWindow();
     }
     else if (id == ID_SETTINGS_PIP_TL) TogglePipTl();
     else if (id == ID_SETTINGS_PIP_TR) TogglePipTr();
@@ -540,15 +544,24 @@ void HandleMenuCommand(UINT id)
     else if (id == ID_ASPECT_RATIO_9_16) SetAspectRatioMode(AspectRatioMode::R9_16);
     else if (id == ID_ASPECT_RATIO_4_3) SetAspectRatioMode(AspectRatioMode::R4_3);
     else if (id == ID_ASPECT_RATIO_3_4) SetAspectRatioMode(AspectRatioMode::R3_4);
+    else if (id == ID_SOURCE_IMAGE_FILE || id == ID_SOURCE_VIDEO_FILE) {
+        std::wstring path;
+        const bool video = id == ID_SOURCE_VIDEO_FILE;
+        if (SelectSourceFile(g_hMainWnd, video, path)) {
+            SetSourceFileMode(video ? SourceMode::Video : SourceMode::Image, path);
+        }
+    }
     else if (id >= ID_PIP_OFF) HandlePipCommand(PipPosition::BR, id);
     else if (id >= ID_PIP_BL_OFF) HandlePipCommand(PipPosition::BL, id);
     else if (id >= ID_PIP_TR_OFF) HandlePipCommand(PipPosition::TR, id);
     else if (id >= ID_PIP_TL_OFF) HandlePipCommand(PipPosition::TL, id);
     else if (id >= ID_SOURCE_OFF) {
         if (id == ID_SOURCE_OFF) SetSourceMode(SourceMode::Off, 0);
-        else if (id == ID_SOURCE_CONSUMER) SetSourceMode(SourceMode::Consumer, 0);
-        else if (id >= ID_SOURCE_CAMERA_FIRST && id < ID_SOURCE_WINDOW_FIRST) {
+        else if (id >= ID_SOURCE_CAMERA_FIRST && id < ID_SOURCE_DISPLAY_FIRST) {
             SetSourceMode(SourceMode::Camera, id - ID_SOURCE_CAMERA_FIRST);
+        }
+        else if (id >= ID_SOURCE_DISPLAY_FIRST && id < ID_SOURCE_WINDOW_FIRST) {
+            SetSourceMode(SourceMode::Display, id - ID_SOURCE_DISPLAY_FIRST);
         }
         else if (id >= ID_SOURCE_WINDOW_FIRST && id < ID_SOURCE_DISCOVERED_FIRST) {
             if (g_mainSourceWindowMap.count(id)) {
@@ -585,6 +598,90 @@ void AddNativeSeparator(HMENU menu)
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 }
 
+bool SelectSourceFile(HWND owner, bool video, std::wstring& outPath)
+{
+    outPath.clear();
+    wchar_t fileName[MAX_PATH] = {};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = ARRAYSIZE(fileName);
+    ofn.lpstrTitle = video ? L"Select video source" : L"Select image source";
+    ofn.lpstrFilter = video
+        ? L"Video Files\0*.mp4;*.mov;*.mkv;*.avi;*.wmv;*.webm\0All Files\0*.*\0"
+        : L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff\0All Files\0*.*\0";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) {
+        return false;
+    }
+    outPath = fileName;
+    return !outPath.empty();
+}
+
+HMENU BuildMainVideoSourceSubMenu(
+    const std::vector<std::wstring>& cameras,
+    const std::vector<CapturableWindow>& windows,
+    const std::vector<CapturableDisplay>& displays)
+{
+    HMENU subMenu = CreatePopupMenu();
+    if (!subMenu) return nullptr;
+
+    const SourceState& state = GetMainSourceState();
+    g_mainSourceWindowMap.clear();
+
+    AddNativeMenuItem(subMenu, L"Off", ID_SOURCE_OFF, state.mode == SourceMode::Off);
+    AddNativeSeparator(subMenu);
+
+    AddNativeMenuItem(subMenu, L"Windows and Games", 0, false, false);
+    for (size_t i = 0; i < windows.size() && i < (ID_SOURCE_DISCOVERED_FIRST - ID_SOURCE_WINDOW_FIRST); ++i) {
+        UINT menuId = ID_SOURCE_WINDOW_FIRST + (UINT)i;
+        g_mainSourceWindowMap[menuId] = windows[i].hwnd;
+        std::wstring title = windows[i].title;
+        if (title.length() > 48) title = title.substr(0, 45) + L"...";
+        AddNativeMenuItem(subMenu, title, menuId, state.mode == SourceMode::Window && state.hwnd == windows[i].hwnd);
+    }
+
+    AddNativeSeparator(subMenu);
+    AddNativeMenuItem(subMenu, L"Displays", 0, false, false);
+    for (size_t i = 0; i < displays.size() && i < 100; ++i) {
+        std::wstring name = displays[i].name;
+        if (name.length() > 48) name = name.substr(0, 45) + L"...";
+        AddNativeMenuItem(subMenu, name, ID_SOURCE_DISPLAY_FIRST + (UINT)i, state.mode == SourceMode::Display && state.displayIndex == (int)i);
+    }
+
+    AddNativeSeparator(subMenu);
+    AddNativeMenuItem(subMenu, L"Video Capture Devices", 0, false, false);
+    for (size_t i = 0; i < cameras.size() && i < (ID_SOURCE_DISPLAY_FIRST - ID_SOURCE_CAMERA_FIRST); ++i) {
+        std::wstring name = cameras[i];
+        if (name.length() > 48) name = name.substr(0, 45) + L"...";
+        AddNativeMenuItem(subMenu, name, ID_SOURCE_CAMERA_FIRST + (UINT)i, state.mode == SourceMode::Camera && state.cameraIndex == (int)i);
+    }
+
+    AddNativeSeparator(subMenu);
+    AddNativeMenuItem(subMenu, L"Files", 0, false, false);
+    AddNativeMenuItem(subMenu, L"Image...", ID_SOURCE_IMAGE_FILE, state.mode == SourceMode::Image);
+    AddNativeMenuItem(subMenu, L"Video...", ID_SOURCE_VIDEO_FILE, state.mode == SourceMode::Video);
+
+    const auto* discovery = GetGlobalDiscovery();
+    if (discovery && !discovery->GetDiscoveredStreams().empty()) {
+        AddNativeSeparator(subMenu);
+        AddNativeMenuItem(subMenu, L"DirectPort Streams", 0, false, false);
+        size_t count = 0;
+        for (size_t i = 0; i < discovery->GetDiscoveredStreams().size() && i < (ID_SOURCE_IMAGE_FILE - ID_SOURCE_DISCOVERED_FIRST); ++i) {
+            const auto& stream = discovery->GetDiscoveredStreams()[i];
+            if (stream.processName == L"VirtuaCamProcess.exe") {
+                continue;
+            }
+            std::wstring label = stream.processName + L" (PID: " + std::to_wstring(stream.processId) + L")";
+            if (label.length() > 48) label = label.substr(0, 45) + L"...";
+            AddNativeMenuItem(subMenu, label, ID_SOURCE_DISCOVERED_FIRST + (UINT)i, state.mode == SourceMode::Discovered && state.pid == stream.processId);
+            ++count;
+        }
+    }
+    return subMenu;
+}
+
 HMENU BuildSourceSubMenu(
     const std::vector<std::wstring>& cameras,
     const std::vector<CapturableWindow>& windows,
@@ -593,34 +690,34 @@ HMENU BuildSourceSubMenu(
     HMENU subMenu = CreatePopupMenu();
     if (!subMenu) return nullptr;
 
-    UINT id_off, id_consumer, id_camera_first, id_window_first, id_discovered_first;
+    UINT id_off, id_camera_first, id_window_first, id_discovered_first;
     std::map<UINT, HWND>* windowMap = nullptr;
     const SourceState* state = nullptr;
 
     if (!isPip) {
-        id_off = ID_SOURCE_OFF; id_consumer = ID_SOURCE_CONSUMER; id_camera_first = ID_SOURCE_CAMERA_FIRST;
+        id_off = ID_SOURCE_OFF; id_camera_first = ID_SOURCE_CAMERA_FIRST;
         id_window_first = ID_SOURCE_WINDOW_FIRST; id_discovered_first = ID_SOURCE_DISCOVERED_FIRST;
         windowMap = &g_mainSourceWindowMap; state = &GetMainSourceState();
     }
     else {
         switch (pos) {
         case PipPosition::TL:
-            id_off = ID_PIP_TL_OFF; id_consumer = ID_PIP_TL_CONSUMER; id_camera_first = ID_PIP_TL_CAMERA_FIRST;
+            id_off = ID_PIP_TL_OFF; id_camera_first = ID_PIP_TL_CAMERA_FIRST;
             id_window_first = ID_PIP_TL_WINDOW_FIRST; id_discovered_first = ID_PIP_TL_DISCOVERED_FIRST;
             windowMap = &g_pipTlWindowMap; state = &GetPipSourceState(PipPosition::TL);
             break;
         case PipPosition::TR:
-            id_off = ID_PIP_TR_OFF; id_consumer = ID_PIP_TR_CONSUMER; id_camera_first = ID_PIP_TR_CAMERA_FIRST;
+            id_off = ID_PIP_TR_OFF; id_camera_first = ID_PIP_TR_CAMERA_FIRST;
             id_window_first = ID_PIP_TR_WINDOW_FIRST; id_discovered_first = ID_PIP_TR_DISCOVERED_FIRST;
             windowMap = &g_pipTrWindowMap; state = &GetPipSourceState(PipPosition::TR);
             break;
         case PipPosition::BL:
-            id_off = ID_PIP_BL_OFF; id_consumer = ID_PIP_BL_CONSUMER; id_camera_first = ID_PIP_BL_CAMERA_FIRST;
+            id_off = ID_PIP_BL_OFF; id_camera_first = ID_PIP_BL_CAMERA_FIRST;
             id_window_first = ID_PIP_BL_WINDOW_FIRST; id_discovered_first = ID_PIP_BL_DISCOVERED_FIRST;
             windowMap = &g_pipBlWindowMap; state = &GetPipSourceState(PipPosition::BL);
             break;
         case PipPosition::BR:
-            id_off = ID_PIP_OFF; id_consumer = ID_PIP_CONSUMER; id_camera_first = ID_PIP_CAMERA_FIRST;
+            id_off = ID_PIP_OFF; id_camera_first = ID_PIP_CAMERA_FIRST;
             id_window_first = ID_PIP_WINDOW_FIRST; id_discovered_first = ID_PIP_DISCOVERED_FIRST;
             windowMap = &g_pipWindowMap; state = &GetPipSourceState(PipPosition::BR);
             break;
@@ -630,10 +727,10 @@ HMENU BuildSourceSubMenu(
     windowMap->clear();
 
     AddNativeMenuItem(subMenu, L"Off", id_off, state->mode == SourceMode::Off);
-    AddNativeMenuItem(subMenu, isPip ? L"Discovery" : L"Auto-Discovery Grid", id_consumer, state->mode == SourceMode::Consumer);
     AddNativeSeparator(subMenu);
 
     if (!cameras.empty()) {
+        AddNativeMenuItem(subMenu, L"Video Capture Devices", 0, false, false);
         for (size_t i = 0; i < cameras.size(); ++i) {
             std::wstring name = cameras[i];
             if (name.length() > 32) name = name.substr(0, 29) + L"...";
@@ -643,6 +740,7 @@ HMENU BuildSourceSubMenu(
     }
 
     if (!windows.empty()) {
+        AddNativeMenuItem(subMenu, L"Windows and Games", 0, false, false);
         for (size_t i = 0; i < windows.size() && i < (ID_SOURCE_DISCOVERED_FIRST - ID_SOURCE_WINDOW_FIRST); ++i) {
             UINT menuId = id_window_first + (UINT)i;
             (*windowMap)[menuId] = windows[i].hwnd;
@@ -656,11 +754,15 @@ HMENU BuildSourceSubMenu(
     if (discovery && !discovery->GetDiscoveredStreams().empty()) {
         bool separatorAdded = false;
         int discoveredCount = 0;
-        for (size_t i = 0; i < discovery->GetDiscoveredStreams().size(); ++i) {
+        constexpr size_t discoveredLimit = 500;
+        for (size_t i = 0; i < discovery->GetDiscoveredStreams().size() && i < discoveredLimit; ++i) {
             const auto& stream = discovery->GetDiscoveredStreams()[i];
             if (stream.processName != L"VirtuaCamProcess.exe") {
-                if (!separatorAdded && (!windows.empty() || discoveredCount > 0)) {
-                    AddNativeSeparator(subMenu);
+                if (!separatorAdded) {
+                    if (!windows.empty()) {
+                        AddNativeSeparator(subMenu);
+                    }
+                    AddNativeMenuItem(subMenu, L"DirectPort Streams", 0, false, false);
                     separatorAdded = true;
                 }
                 std::wstring label = stream.processName + L" (PID: " + std::to_wstring(stream.processId) + L")";
@@ -681,15 +783,15 @@ void ShowContextMenu(HWND hwnd) {
 
     const auto cameras = UI_RefreshCameraDeviceList();
     const auto windows = EnumerateWindows();
+    const auto displays = EnumerateDisplays();
 
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
 
     AddNativeMenuItem(menu, L"Show Preview", ID_TRAY_PREVIEW_WINDOW);
-    AddNativeSeparator(menu);
 
-    HMENU sourceMenu = BuildSourceSubMenu(cameras, windows, false);
-    if (sourceMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sourceMenu), L"Source");
+    HMENU sourceMenu = BuildMainVideoSourceSubMenu(cameras, windows, displays);
+    if (sourceMenu) AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sourceMenu), L"Video Source");
 
     HMENU audioSubMenu = CreatePopupMenu();
     if (audioSubMenu) {
@@ -705,7 +807,16 @@ void ShowContextMenu(HWND hwnd) {
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(audioSubMenu), L"Audio Source");
     }
 
-    AddNativeSeparator(menu);
+    HMENU aspectMenuTop = CreatePopupMenu();
+    if (aspectMenuTop) {
+        const AspectRatioMode currentAspect = GetAspectRatioMode();
+        const ULONG allowedAspectMask = GetAllowedAspectRatioMask();
+        AddNativeMenuItem(aspectMenuTop, L"16:9", ID_ASPECT_RATIO_16_9, currentAspect == AspectRatioMode::R16_9, (allowedAspectMask & ASPECT_RATIO_MASK_16_9) != 0);
+        AddNativeMenuItem(aspectMenuTop, L"9:16", ID_ASPECT_RATIO_9_16, currentAspect == AspectRatioMode::R9_16, (allowedAspectMask & ASPECT_RATIO_MASK_9_16) != 0);
+        AddNativeMenuItem(aspectMenuTop, L"4:3", ID_ASPECT_RATIO_4_3, currentAspect == AspectRatioMode::R4_3, (allowedAspectMask & ASPECT_RATIO_MASK_4_3) != 0);
+        AddNativeMenuItem(aspectMenuTop, L"3:4", ID_ASPECT_RATIO_3_4, currentAspect == AspectRatioMode::R3_4, (allowedAspectMask & ASPECT_RATIO_MASK_3_4) != 0);
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(aspectMenuTop), L"Aspect Ratio");
+    }
 
     if (g_debugUiEnabled) {
         HMENU advancedMenu = CreatePopupMenu();
@@ -744,14 +855,15 @@ void ShowContextMenu(HWND hwnd) {
             }
 
             AddNativeSeparator(advancedMenu);
-            AddNativeMenuItem(advancedMenu, L"Open Logs", ID_ADV_OPEN_LOG_DIR);
             AddNativeMenuItem(advancedMenu, L"Run Host Media Proof", ID_ADV_RUN_HOST_PROOF);
             AddNativeMenuItem(advancedMenu, L"Run VM Verifier Proof", ID_ADV_RUN_VM_VERIFIER_PROOF);
-            AddNativeMenuItem(advancedMenu, L"Run Setup Verify", ID_ADV_RUN_SETUP_VERIFY);
+            AddNativeMenuItem(advancedMenu, L"Open Setup", ID_ADV_RUN_SETUP_VERIFY);
             AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(advancedMenu), L"Advanced");
         }
     }
 
+    AddNativeSeparator(menu);
+    AddNativeMenuItem(menu, L"Open Logs", ID_TRAY_OPEN_LOGS);
     AddNativeMenuItem(menu, L"About", ID_TRAY_ABOUT);
     AddNativeMenuItem(menu, L"Exit", ID_TRAY_EXIT);
 
@@ -768,50 +880,6 @@ void ShowContextMenu(HWND hwnd) {
     }
     PostMessage(hwnd, WM_NULL, 0, 0);
     DestroyMenu(menu);
-}
-
-LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    switch (message) {
-    case WM_CREATE:
-    {
-        BOOL useDarkMode = TRUE;
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDarkMode, sizeof(useDarkMode));
-        if (FAILED(InitD3D(hwnd)) || FAILED(LoadAssets())) {
-            MessageBox(hwnd, L"Failed to initialize D3D for preview.", L"Error", MB_OK | MB_ICONERROR);
-            return -1;
-        }
-        g_hTelemetryLabel = CreateWindowW(L"STATIC", L"Status: Initializing...", WS_CHILD | WS_VISIBLE | SS_CENTER, 0, 0, 640, 20, hwnd, (HMENU)IDC_TELEMETRY_LABEL, g_instance, NULL);
-        if (!g_pfnGetSharedTexture) {
-            MessageBox(hwnd, L"Broker's GetSharedTexture function not available.", L"Error", MB_OK | MB_ICONERROR);
-            return -1;
-        }
-        break;
-    }
-    case WM_SIZE:
-        if (g_swapChain) {
-            UINT width = LOWORD(lParam); UINT height = HIWORD(lParam);
-            if (width == 0 || height == 0) break;
-            if (g_context) g_context->OMSetRenderTargets(0, 0, 0);
-            g_rtv.Reset();
-            HRESULT hr = g_swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
-            if (FAILED(hr)) return 0;
-            ComPtr<ID3D11Texture2D> pBuffer;
-            if (FAILED(g_swapChain->GetBuffer(0, IID_PPV_ARGS(&pBuffer)))) return 0;
-            if (FAILED(g_device->CreateRenderTargetView(pBuffer.Get(), NULL, &g_rtv))) return 0;
-            if (g_hTelemetryLabel) SetWindowPos(g_hTelemetryLabel, NULL, 0, 0, width, 20, SWP_NOZORDER);
-        }
-        break;
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) {
-            DestroyWindow(hwnd);
-            return 0;
-        }
-        break;
-    case WM_CLOSE: DestroyWindow(hwnd); break;
-    case WM_DESTROY: CleanupD3D(); g_hPreviewWnd = NULL; g_hTelemetryLabel = NULL; break;
-    default: return DefWindowProc(hwnd, message, wParam, lParam);
-    }
-    return 0;
 }
 
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -845,86 +913,86 @@ void AddTrayIcon(HWND hwnd, bool add) {
 }
 
 void CreatePreviewWindow() {
-    if (g_hPreviewWnd && IsWindow(g_hPreviewWnd)) {
-        ShowWindow(g_hPreviewWnd, IsIconic(g_hPreviewWnd) ? SW_RESTORE : SW_SHOWNORMAL);
-        SetForegroundWindow(g_hPreviewWnd);
+    const std::filesystem::path setup = std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"VirtuaCamSetup.exe";
+    if (!std::filesystem::exists(setup)) {
+        VirtuaCamLog::LogLine(std::format(L"Setup preview missing: {}", setup.wstring()));
+        MessageBoxW(g_hMainWnd, setup.c_str(), L"VirtuaCam setup not staged", MB_OK | MB_ICONWARNING);
         return;
     }
-    RECT rc = { 0, 0, 640, 360 };
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-    AdjustWindowRectEx(&rc, style, FALSE, WS_EX_APPWINDOW);
-    g_hPreviewWnd = CreateWindowExW(
-        WS_EX_APPWINDOW,
-        PREVIEW_WINDOW_CLASS,
-        L"VirtuaCam Preview",
-        style,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        rc.right - rc.left,
-        rc.bottom - rc.top,
+
+    HINSTANCE launched = ShellExecuteW(
         nullptr,
+        L"open",
+        setup.c_str(),
         nullptr,
-        g_instance,
-        nullptr);
-    if (!g_hPreviewWnd) {
-        DWORD error = GetLastError();
-        VirtuaCamLog::LogWin32(L"CreatePreviewWindow failed", error);
-        MessageBoxW(g_hMainWnd, L"Failed to open VirtuaCam preview window.", L"VirtuaCam", MB_OK | MB_ICONERROR);
-        return;
+        VirtuaCamLog::GetExeDir().c_str(),
+        SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(launched) <= 32) {
+        VirtuaCamLog::LogLine(std::format(L"Setup preview launch failed: {}", reinterpret_cast<INT_PTR>(launched)));
+        MessageBoxW(g_hMainWnd, L"Failed to open VirtuaCam setup window.", L"VirtuaCam", MB_OK | MB_ICONERROR);
     }
-    CenterWindow(g_hPreviewWnd, true);
-    ShowWindow(g_hPreviewWnd, SW_SHOWNORMAL);
-    ShowWindow(g_hPreviewWnd, SW_SHOW);
-    SetForegroundWindow(g_hPreviewWnd);
-    UpdateWindow(g_hPreviewWnd);
 }
 
 void UpdateTelemetry(BrokerState currentState, bool driverConnected) {
-    static BrokerState lastBrokerState = (BrokerState)-1;
-    static bool lastDriverConnected = false;
+    static std::wstring lastSourceText;
     static bool hasState = false;
+    const std::wstring sourceText = SourceSummaryText(GetMainSourceState(), currentState);
 
-    if (!hasState || currentState != lastBrokerState || driverConnected != lastDriverConnected) {
+    if (!hasState ||
+        currentState != g_lastBrokerState ||
+        driverConnected != g_lastDriverConnected ||
+        sourceText != lastSourceText) {
         hasState = true;
-        lastBrokerState = currentState;
-        lastDriverConnected = driverConnected;
-
-        if (g_hTelemetryLabel) {
-            std::wstring brokerText;
-            switch (currentState) {
-            case BrokerState::Searching: brokerText = L"Searching"; break;
-            case BrokerState::Connected: brokerText = L"Connected"; break;
-            case BrokerState::Failed: brokerText = L"Disconnected"; break;
-            }
-
-            std::wstring label = std::format(
-                L"Broker: {} | Driver: {}",
-                brokerText,
-                driverConnected ? L"Connected" : L"Disconnected");
-            SetWindowText(g_hTelemetryLabel, label.c_str());
-            NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, g_hTelemetryLabel, OBJID_CLIENT, CHILDID_SELF);
-        }
+        g_lastBrokerState = currentState;
+        g_lastDriverConnected = driverConnected;
+        lastSourceText = sourceText;
 
         UpdateTrayTooltip(currentState, driverConnected);
     }
 }
 
+std::wstring BrokerStateText(BrokerState brokerState)
+{
+    switch (brokerState) {
+    case BrokerState::Searching: return L"Searching";
+    case BrokerState::Connected: return L"Connected";
+    case BrokerState::Failed: return L"Disconnected";
+    default: return L"Unknown";
+    }
+}
+
+std::wstring SourceSummaryText(const SourceState& state, BrokerState brokerState)
+{
+    if (state.mode == SourceMode::Off) {
+        return L"Off (default feed)";
+    }
+    std::wstring text = SourceModeToString(state.mode);
+    if (state.mode == SourceMode::Camera && state.cameraIndex >= 0) {
+        text += L" #" + std::to_wstring(state.cameraIndex);
+    } else if (state.mode == SourceMode::Display && state.displayIndex >= 0) {
+        text += L" #" + std::to_wstring(state.displayIndex + 1);
+    } else if ((state.mode == SourceMode::Window || state.mode == SourceMode::Discovered) && state.pid != 0) {
+        text += L" PID " + std::to_wstring(state.pid);
+    } else if ((state.mode == SourceMode::Image || state.mode == SourceMode::Video) && !state.filePath.empty()) {
+        text += L" " + std::filesystem::path(state.filePath).filename().wstring();
+    }
+    if (brokerState != BrokerState::Connected) {
+        text += L" (default feed fallback)";
+    }
+    return text;
+}
+
 void UpdateTrayTooltip(BrokerState brokerState, bool driverConnected) {
     if (!g_hMainWnd) return;
 
-    const wchar_t* brokerText = L"Searching";
-    switch (brokerState) {
-    case BrokerState::Searching: brokerText = L"Searching"; break;
-    case BrokerState::Connected: brokerText = L"Connected"; break;
-    case BrokerState::Failed: brokerText = L"Disconnected"; break;
-    }
-
     std::wstring tip = std::format(
-        L"VirtuaCam | Broker: {} | Driver: {}",
-        brokerText,
-        driverConnected ? L"OK" : L"FAIL");
-
+        L"VirtuaCam | Driver: {} | Source: {}",
+        driverConnected ? L"active" : L"idle/offline",
+        SourceSummaryText(GetMainSourceState(), brokerState));
     NOTIFYICONDATA nid = { sizeof(nid) };
+    if (tip.size() >= ARRAYSIZE(nid.szTip)) {
+        tip.resize(ARRAYSIZE(nid.szTip) - 1);
+    }
     nid.hWnd = g_hMainWnd;
     nid.uID = 1;
     nid.uFlags = NIF_TIP;
@@ -932,87 +1000,28 @@ void UpdateTrayTooltip(BrokerState brokerState, bool driverConnected) {
     Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
 
-HRESULT InitD3D(HWND hwnd) {
-    DXGI_SWAP_CHAIN_DESC scd = {};
-    scd.BufferCount = 2; scd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; scd.OutputWindow = hwnd;
-    scd.SampleDesc.Count = 1; scd.Windowed = TRUE; scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &scd, &g_swapChain, &g_device, nullptr, &g_context);
-    if (FAILED(hr)) {
-        VirtuaCamLog::LogHr(L"Preview D3D hardware init failed; retrying WARP", hr);
-        hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, nullptr, 0, D3D11_SDK_VERSION, &scd, &g_swapChain, &g_device, nullptr, &g_context);
-    }
-    if (SUCCEEDED(hr)) {
-        ComPtr<ID3D11Texture2D> pBuffer; g_swapChain->GetBuffer(0, IID_PPV_ARGS(&pBuffer));
-        g_device->CreateRenderTargetView(pBuffer.Get(), NULL, &g_rtv);
-    }
-    return hr;
+std::wstring BuildSupportStatusText(BrokerState brokerState, bool driverConnected)
+{
+    UNREFERENCED_PARAMETER(driverConnected);
+    const std::filesystem::path logPath = VirtuaCamLog::GetLogPath();
+    const std::filesystem::path logDir = logPath.empty()
+        ? std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"logs"
+        : logPath.parent_path();
+    const SourceState& source = GetMainSourceState();
+    return std::format(
+        L"VirtuaCam\n\n"
+        L"Driver: {}\n"
+        L"Broker: {}\n"
+        L"Source: {}\n"
+        L"Audio: {}\n"
+        L"Aspect ratio: {}\n"
+        L"Logs: {}\n\n"
+        L"Use -debug to show advanced proof tools. Open Logs is available from the tray menu.",
+        GetRuntimeDriverStatusText(),
+        BrokerStateText(brokerState),
+        SourceSummaryText(source, brokerState),
+        GetRuntimeAudioStatusText(),
+        VirtuaCamConfig::AspectRatioName(GetAspectRatioMode()),
+        logDir.wstring());
 }
 
-void CleanupD3D() {
-    if (g_context) g_context->ClearState();
-    g_rtv.Reset(); g_swapChain.Reset(); g_context.Reset(); g_device.Reset();
-    g_vs.Reset(); g_ps.Reset(); g_sampler.Reset(); g_previewSRV.Reset();
-    g_uiSideTexture.Reset();
-}
-
-HRESULT LoadAssets() {
-    ComPtr<ID3DBlob> vsBlob, psBlob;
-    RETURN_IF_FAILED(D3DCompile(g_vertexShaderHLSL, strlen(g_vertexShaderHLSL), nullptr, nullptr, nullptr, "main", "vs_5_0", 0, 0, &vsBlob, nullptr));
-    RETURN_IF_FAILED(D3DCompile(g_pixelShaderHLSL, strlen(g_pixelShaderHLSL), nullptr, nullptr, nullptr, "main", "ps_5_0", 0, 0, &psBlob, nullptr));
-    RETURN_IF_FAILED(g_device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &g_vs));
-    RETURN_IF_FAILED(g_device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &g_ps));
-    D3D11_SAMPLER_DESC sd = {}; sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP; sd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP; sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    RETURN_IF_FAILED(g_device->CreateSamplerState(&sd, &g_sampler));
-    return S_OK;
-}
-
-void RenderPreviewFrame(HWND hwnd) {
-    if (!g_rtv || !g_device || !g_context) return;
-
-    if (!g_previewSRV && g_device)
-    {
-        ComPtr<ID3D11Device1> device1;
-        if (SUCCEEDED(g_device.As(&device1)))
-        {
-            const HRESULT openHr = device1->OpenSharedResourceByName(
-                GetBrokerTextureName().c_str(),
-                DXGI_SHARED_RESOURCE_READ,
-                __uuidof(ID3D11Texture2D),
-                reinterpret_cast<void**>(g_uiSideTexture.GetAddressOf()));
-            if (SUCCEEDED(openHr) && g_uiSideTexture)
-            {
-                const HRESULT srvHr = g_device->CreateShaderResourceView(g_uiSideTexture.Get(), nullptr, &g_previewSRV);
-                if (FAILED(srvHr))
-                {
-                    VirtuaCamLog::LogHr(L"Preview CreateShaderResourceView failed", srvHr);
-                }
-            }
-        }
-    }
-
-    const float clearColor[] = { 0.1f, 0.1f, 0.1f, 1.0f };
-    g_context->ClearRenderTargetView(g_rtv.Get(), clearColor);
-
-    if (g_previewSRV) {
-        RECT rc; GetClientRect(hwnd, &rc);
-        D3D11_VIEWPORT vp = { 0, 0, (float)rc.right, (float)rc.bottom, 0, 1 };
-        if (vp.Width <= 0 || vp.Height <= 0)
-        {
-            if (g_swapChain) g_swapChain->Present(1, 0);
-            return;
-        }
-        g_context->RSSetViewports(1, &vp);
-        g_context->OMSetRenderTargets(1, g_rtv.GetAddressOf(), nullptr);
-        g_context->VSSetShader(g_vs.Get(), nullptr, 0); g_context->PSSetShader(g_ps.Get(), nullptr, 0);
-        g_context->PSSetShaderResources(0, 1, g_previewSRV.GetAddressOf());
-        g_context->PSSetSamplers(0, 1, g_sampler.GetAddressOf());
-        g_context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        g_context->Draw(3, 0);
-    }
-
-    if(g_swapChain) g_swapChain->Present(1, 0);
-}

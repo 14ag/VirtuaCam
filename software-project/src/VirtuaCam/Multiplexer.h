@@ -13,6 +13,7 @@ public:
     ~Multiplexer();
 
     HRESULT Initialize(Microsoft::WRL::ComPtr<ID3D11Device> device);
+    HRESULT SetOutputTexture(ID3D11Texture2D* outputTexture);
     void Shutdown();
     bool CompositeFrames(const std::vector<VirtuaCam::DiscoveredSharedStream>& producers, bool isGridMode, bool forceComposite);
     ID3D11Texture2D* GetOutputTexture();
@@ -34,7 +35,13 @@ private:
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> privateSRV;
         HANDLE manifestHandle = nullptr;
         BroadcastManifest* manifestView = nullptr;
+        HANDLE statusHandle = nullptr;
+        DirectPortStatusV1* statusView = nullptr;
+        DirectPortStatusV1 latestStatus = {};
+        bool latestStatusValid = false;
+        bool staleByStatus = false;
         UINT64 lastSeenFrame = 0;
+        UINT64 copyCount = 0;
     };
 
     void ReleaseProducerResource(ProducerGpuResources& res);

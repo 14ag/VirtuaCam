@@ -27,7 +27,39 @@ function Read-JsonFile {
     if (-not (Test-Path -LiteralPath $Path)) {
         return $null
     }
-    Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        try {
+            $stream = [System.IO.File]::Open(
+                $Path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite)
+            try {
+                $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true)
+                try {
+                    $text = $reader.ReadToEnd()
+                } finally {
+                    $reader.Dispose()
+                }
+            } finally {
+                $stream.Dispose()
+            }
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                return $null
+            }
+            return $text | ConvertFrom-Json
+        } catch [System.IO.IOException] {
+            $lastError = $_
+            Start-Sleep -Milliseconds 150
+        } catch [System.Management.Automation.PSInvalidOperationException] {
+            $lastError = $_
+            Start-Sleep -Milliseconds 150
+        }
+    }
+
+    throw $lastError
 }
 
 function Write-JsonFile {
@@ -618,8 +650,6 @@ $priorAttemptState = Read-JsonFile -Path $attemptStatePath
 $nextAttemptId = if ($priorAttemptState) { [int]$priorAttemptState.attempt + 1 } else { 1 }
 
 $driverPackageRootPath = Resolve-HvPath -Path "output" -BasePath $repoRoot
-$installAllScript = Resolve-HvPath -Path "scripts\install-all.ps1" -BasePath $repoRoot
-$artifactManifestScript = Resolve-HvPath -Path "scripts\tools\artifact-manifest.ps1" -BasePath $repoRoot
 $webcamHtml = Resolve-HvPath -Path "software-project\webcam.html" -BasePath $repoRoot
 $holdScript = Resolve-HvPath -Path "scripts\hyperv-hold-webcam-session.ps1" -BasePath $repoRoot
 $proofScript = Resolve-HvPath -Path "scripts\playwright-vm-webcam-proof.ps1" -BasePath $repoRoot
@@ -627,7 +657,8 @@ $guestRoot = "C:\Temp\VirtuaCamHyperV\proof-$nextAttemptId"
 $guestPackageRoot = Join-Path $guestRoot (Split-Path -Path $driverPackageRootPath -Leaf)
 $guestScriptsRoot = Join-Path $guestRoot "scripts"
 $guestToolsRoot = Join-Path $guestScriptsRoot "tools"
-$guestInstallAll = Join-Path $guestScriptsRoot "install-all.ps1"
+$guestSetupExe = Join-Path $guestPackageRoot "VirtuaCamSetup.exe"
+$guestInstallJson = Join-Path $guestRoot "setup-install.json"
 $guestWebcamHtml = Join-Path $guestRoot "webcam.html"
 $session = $null
 $holdProc = $null
@@ -763,13 +794,11 @@ try {
 
     $driverPackageStage = New-DriverPackageStage -SourceRoot $driverPackageRootPath -ArtifactDirectory $artifactDir -AttemptId "$nextAttemptId" -LogFile $LogPath
     Copy-HvToGuest -Session $session -LocalPath $driverPackageStage.StagedSourceRoot -GuestPath $guestRoot -Recurse -LogPath $LogPath
-    Copy-HvToGuest -Session $session -LocalPath $installAllScript -GuestPath $guestScriptsRoot -LogPath $LogPath
-    Copy-HvToGuest -Session $session -LocalPath $artifactManifestScript -GuestPath $guestToolsRoot -LogPath $LogPath
     Copy-HvToGuest -Session $session -LocalPath $webcamHtml -GuestPath $guestRoot -LogPath $LogPath
 
-    Write-HvLog -Message "Installing driver inside guest." -LogPath $LogPath -Level STEP
+    Write-HvLog -Message "Installing driver inside guest with VirtuaCamSetup.exe." -LogPath $LogPath -Level STEP
     $installResult = Invoke-HvGuestCommand -Session $session -LogPath $LogPath -ScriptBlock {
-        param($InstallScript)
+        param($SetupExe, $JsonPath)
 
         function Join-GuestTextOutput {
             param([object[]]$InputObject)
@@ -785,14 +814,22 @@ try {
             return [string]::Join([System.Environment]::NewLine, $lines.ToArray())
         }
 
-        $outputLines = & powershell.exe -ExecutionPolicy Bypass -File $InstallScript 2>&1
+        $stdout = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.out" -f [Guid]::NewGuid().ToString("N"))
+        $stderr = Join-Path $env:TEMP ("VirtuaCamSetup-{0}.err" -f [Guid]::NewGuid().ToString("N"))
+        $process = Start-Process -FilePath $SetupExe -ArgumentList @("--install", "--json", $JsonPath) -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $outputLines = @()
+        if (Test-Path -LiteralPath $stdout) { $outputLines += Get-Content -LiteralPath $stdout }
+        if (Test-Path -LiteralPath $stderr) { $outputLines += Get-Content -LiteralPath $stderr }
         $output = Join-GuestTextOutput @($outputLines)
+        $json = if (Test-Path -LiteralPath $JsonPath) { Get-Content -LiteralPath $JsonPath -Raw } else { "" }
         [pscustomobject]@{
             Output = $output
-            ExitCode = $LASTEXITCODE
+            ExitCode = $process.ExitCode
+            Json = $json
         }
-    } -ArgumentList $guestInstallAll
+    } -ArgumentList $guestSetupExe, $guestInstallJson
     Set-Content -LiteralPath (Join-Path $artifactDir "guest-driver-install.txt") -Value $installResult.Output
+    Set-Content -LiteralPath (Join-Path $artifactDir "guest-driver-install.json") -Value $installResult.Json
     if ($installResult.ExitCode -ne 0) {
         throw "driver.InstallFailed"
     }

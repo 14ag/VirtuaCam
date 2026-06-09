@@ -172,7 +172,9 @@ extern "C" {
             g_multiplexer = std::make_unique<Multiplexer>();
             g_multiplexer->Initialize(g_device);
 
-            CreateSharingResources(1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM);
+            if (SUCCEEDED(CreateSharingResources(1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM))) {
+                (void)g_multiplexer->SetOutputTexture(g_sharedTex_Out.Get());
+            }
             VirtuaCamLog::LogLine(L"Broker initialize complete");
         }
     }
@@ -227,7 +229,12 @@ extern "C" {
         
         const ULONGLONG now = GetTickCount64();
         if (g_forceDiscovery || !g_haveDiscoverySnapshot || now >= g_nextDiscoveryTickMs) {
-            g_discovery->DiscoverStreams();
+            std::map<DWORD, UINT64> expectedProducers;
+            {
+                std::lock_guard<std::mutex> lock(g_producerListMutex);
+                expectedProducers = g_expectedProducers;
+            }
+            g_discovery->DiscoverStreams(expectedProducers);
             g_cachedStreams = g_discovery->GetDiscoveredStreams();
             g_haveDiscoverySnapshot = true;
             g_forceDiscovery = false;
@@ -304,8 +311,7 @@ extern "C" {
 
         ComPtr<ID3D11DeviceContext> context;
         g_device->GetImmediateContext(&context);
-        context->CopyResource(g_sharedTex_Out.Get(), g_multiplexer->GetOutputTexture());
-        
+
         ComPtr<ID3D11DeviceContext4> context4;
         context.As(&context4);
         UINT64 frameValue = g_multiplexer->GetOutputFrameValue();

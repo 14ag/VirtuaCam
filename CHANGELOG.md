@@ -16,6 +16,8 @@ Format follows Keep a Changelog and this repository currently tracks changes fro
 - broker manifest magic/version/size/owner PID/nonce validation and bounded shared-object names
 - vHLK queue/monitor helper in `scripts/run-vhlk-tests.ps1`
 - whitebox validation scripts for the 2026-05-11 code review, FrameEx ABI, performance audit, invalid-buffer fuzzing, and camera-passthrough audio config
+- capture-source menu contract check plus host Windows Camera display-capture and aspect hot-change proof scripts
+- tray video-source groups for windows/games, displays, video capture devices, image files, and video files
 - root repository documentation and policy files
 - GitHub wiki documentation references and ignored local `wiki/` checkout guidance
 - issue templates and pull request template
@@ -27,7 +29,8 @@ Format follows Keep a Changelog and this repository currently tracks changes fro
 - driver frame presentation timestamps now use `KeQueryPerformanceCounter` when no stream clock is available, while preserving monotonic frame time
 - driver warm-up retry logging now reports the first wait and then periodic waits instead of logging every retry
 - MediaCapture proof defaults to the CPU frame-reader path; `-IncludeAutoSurfaceProbe` opt-in also checks the WinRT `Auto` memory preference path
-- producer canvas fitting now respects selected aspect ratio and adds black padding instead of stretching
+- producer canvas fitting now respects selected aspect ratio and adds `#212121` padding instead of stretching
+- `4:3` output now prefers `1440x1080`; `3:4` output now prefers `1080x1440`; compatibility ranges keep `640x480` and `480x640`
 - app frame upload is paced, skips unchanged broker frame values, and separates default-feed refresh from live producer refresh
 - broker discovery is throttled, producer manifests are cached after validation, and shared D3D publish paths flush before frame values are published
 - producer processing uses frame cadence with adaptive idle backoff instead of 1 ms polling

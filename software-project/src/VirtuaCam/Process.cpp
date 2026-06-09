@@ -24,6 +24,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
+#include <mutex>
+#include <new>
 
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
@@ -385,6 +387,112 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
     return !type.empty();
 }
 
+struct DirectPortStatusMapping
+{
+    HANDLE handle = nullptr;
+    DirectPortStatusV1* view = nullptr;
+    UINT64 frameCount = 0;
+    UINT64 duplicateCount = 0;
+    UINT64 staleCount = 0;
+    UINT64 lastPublishedFenceValue = 0;
+
+    void Reset()
+    {
+        if (view) {
+            UnmapViewOfFile(view);
+            view = nullptr;
+        }
+        if (handle) {
+            CloseHandle(handle);
+            handle = nullptr;
+        }
+        frameCount = 0;
+        duplicateCount = 0;
+        staleCount = 0;
+        lastPublishedFenceValue = 0;
+    }
+};
+
+HRESULT InitializeDirectPortStatusMapping(
+    DirectPortStatusMapping& mapping,
+    SECURITY_ATTRIBUTES& securityAttributes,
+    DWORD pid)
+{
+    mapping.Reset();
+
+    LARGE_INTEGER qpcFrequency = {};
+    RETURN_LAST_ERROR_IF(!QueryPerformanceFrequency(&qpcFrequency));
+
+    const std::wstring statusName = GetProducerStatusName(pid);
+    mapping.handle = CreateFileMappingW(
+        INVALID_HANDLE_VALUE,
+        &securityAttributes,
+        PAGE_READWRITE,
+        0,
+        sizeof(DirectPortStatusV1),
+        statusName.c_str());
+    if (!mapping.handle) {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    mapping.view = static_cast<DirectPortStatusV1*>(
+        MapViewOfFile(mapping.handle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DirectPortStatusV1)));
+    if (!mapping.view) {
+        const DWORD err = GetLastError();
+        mapping.Reset();
+        return HRESULT_FROM_WIN32(err);
+    }
+
+    RETURN_HR_IF(E_FAIL, !InitializeDirectPortStatus(
+        mapping.view,
+        pid,
+        static_cast<UINT64>(qpcFrequency.QuadPart)));
+    return S_OK;
+}
+
+void PublishDirectPortProducerStatus(
+    DirectPortStatusMapping& mapping,
+    UINT64 fenceValue,
+    HRESULT lastHRESULT,
+    UINT64 staleCount = 0,
+    UINT64 sourceCallbackQpc = 0,
+    UINT64 droppedCallbackSampleCount = 0,
+    bool contentDuplicate = false)
+{
+    if (!mapping.view) {
+        return;
+    }
+
+    LARGE_INTEGER now = {};
+    if (!QueryPerformanceCounter(&now)) {
+        return;
+    }
+
+    const UINT64 nowQpc = static_cast<UINT64>(now.QuadPart);
+    const UINT64 sampleAgeQpcDelta =
+        (sourceCallbackQpc != 0 && nowQpc >= sourceCallbackQpc) ? (nowQpc - sourceCallbackQpc) : 0;
+
+    if (((fenceValue == mapping.lastPublishedFenceValue) || contentDuplicate) && mapping.frameCount > 0) {
+        ++mapping.duplicateCount;
+    }
+    if (staleCount > mapping.staleCount) {
+        mapping.staleCount = staleCount;
+    }
+    mapping.lastPublishedFenceValue = fenceValue;
+    ++mapping.frameCount;
+
+    PublishDirectPortStatus(
+        mapping.view,
+        nowQpc,
+        fenceValue,
+        mapping.frameCount,
+        mapping.duplicateCount,
+        mapping.staleCount,
+        lastHRESULT,
+        sampleAgeQpcDelta,
+        droppedCallbackSampleCount);
+}
+
 namespace BuiltInCaptureProducer
 {
     enum class CaptureBackend
@@ -413,6 +521,7 @@ namespace BuiltInCaptureProducer
     static HANDLE g_hSharedFenceHandle = nullptr;
     static HANDLE g_hManifest = nullptr;
     static BroadcastManifest* g_pManifestView = nullptr;
+    static DirectPortStatusMapping g_statusMapping;
     static std::atomic<UINT64> g_fenceValue = 0;
     static UINT64 g_brokerNonce = 0;
 
@@ -423,6 +532,7 @@ namespace BuiltInCaptureProducer
     static std::atomic<bool> g_isCapturing = false;
     static bool g_loggedFirstFrame = false;
     static HWND g_captureTargetHwnd = nullptr;
+    static HMONITOR g_captureTargetMonitor = nullptr;
     static CaptureBackend g_captureBackend = CaptureBackend::None;
     static UINT g_captureWidth = 0;
     static UINT g_captureHeight = 0;
@@ -574,6 +684,38 @@ namespace BuiltInCaptureProducer
         return selectedHwnd;
     }
 
+    struct MonitorLookup
+    {
+        int targetIndex = -1;
+        int currentIndex = 0;
+        HMONITOR monitor = nullptr;
+    };
+
+    static BOOL CALLBACK FindMonitorByIndexProc(HMONITOR monitor, HDC, LPRECT, LPARAM lParam)
+    {
+        auto* lookup = reinterpret_cast<MonitorLookup*>(lParam);
+        if (!lookup) {
+            return FALSE;
+        }
+        if (lookup->currentIndex == lookup->targetIndex) {
+            lookup->monitor = monitor;
+            return FALSE;
+        }
+        ++lookup->currentIndex;
+        return TRUE;
+    }
+
+    static HMONITOR FindMonitorByIndex(int index)
+    {
+        if (index < 0) {
+            return nullptr;
+        }
+        MonitorLookup lookup{};
+        lookup.targetIndex = index;
+        EnumDisplayMonitors(nullptr, nullptr, FindMonitorByIndexProc, reinterpret_cast<LPARAM>(&lookup));
+        return lookup.monitor;
+    }
+
     static bool IsProbablyAllBlackBgrx(const BYTE* bits, UINT width, UINT height)
     {
         if (!bits || width == 0 || height == 0) {
@@ -603,6 +745,7 @@ namespace BuiltInCaptureProducer
         if (g_hManifest) CloseHandle(g_hManifest);
         g_pManifestView = nullptr;
         g_hManifest = nullptr;
+        g_statusMapping.Reset();
 
         if (g_hSharedTextureHandle) CloseHandle(g_hSharedTextureHandle);
         if (g_hSharedFenceHandle) CloseHandle(g_hSharedFenceHandle);
@@ -710,7 +853,7 @@ namespace BuiltInCaptureProducer
             RETURN_IF_FAILED(g_d3d11Device->CreateShaderResourceView(sourceTexture, nullptr, &sourceSRV));
         }
 
-        const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        const float clearColor[] = { 33.0f / 255.0f, 33.0f / 255.0f, 33.0f / 255.0f, 1.0f };
         const CanvasBlitConstants constants = GetFullSourceUvConstants();
         D3D11_VIEWPORT viewport = GetContainCanvasViewport(sourceWidth, sourceHeight);
         ID3D11RenderTargetView* rtvs[] = { g_canvasRTV.Get() };
@@ -777,6 +920,77 @@ namespace BuiltInCaptureProducer
         RETURN_IF_FAILED(g_captureItem->get_Size(&size));
 
         // Prefer the free-threaded frame pool when available (avoids DispatcherQueue requirements).
+#if defined(WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION) && WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION >= 0x70000
+        ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2> framePoolStatics2;
+        if (SUCCEEDED(framePoolStatics.As(&framePoolStatics2)) && framePoolStatics2) {
+            RETURN_IF_FAILED(framePoolStatics2->CreateFreeThreaded(
+                g_winrtD3dDevice.Get(),
+                ABI::Windows::Graphics::DirectX::DirectXPixelFormat::DirectXPixelFormat_B8G8R8A8UIntNormalized,
+                2,
+                size,
+                g_framePool.ReleaseAndGetAddressOf()));
+        } else
+#endif
+        {
+            RETURN_IF_FAILED(framePoolStatics->Create(
+                g_winrtD3dDevice.Get(),
+                ABI::Windows::Graphics::DirectX::DirectXPixelFormat::DirectXPixelFormat_B8G8R8A8UIntNormalized,
+                2,
+                size,
+                g_framePool.ReleaseAndGetAddressOf()));
+        }
+        RETURN_HR_IF_NULL(E_FAIL, g_framePool.Get());
+
+        RETURN_IF_FAILED(g_framePool->CreateCaptureSession(g_captureItem.Get(), g_session.ReleaseAndGetAddressOf()));
+        RETURN_HR_IF_NULL(E_FAIL, g_session.Get());
+
+        RETURN_IF_FAILED(g_session->StartCapture());
+        return S_OK;
+    }
+
+    static HRESULT InitWgcMonitor(HMONITOR monitorToCapture)
+    {
+        RETURN_HR_IF_NULL(E_INVALIDARG, monitorToCapture);
+
+        HRESULT hrInit = RoInitialize(RO_INIT_MULTITHREADED);
+        if (FAILED(hrInit) && hrInit != RPC_E_CHANGED_MODE) {
+            return hrInit;
+        }
+        if (SUCCEEDED(hrInit)) {
+            g_roInitialized = true;
+        }
+
+        HString itemClass;
+        RETURN_IF_FAILED(MakeHString(L"Windows.Graphics.Capture.GraphicsCaptureItem", itemClass));
+
+        ComPtr<IActivationFactory> itemFactory;
+        RETURN_IF_FAILED(RoGetActivationFactory(itemClass.value, IID_PPV_ARGS(&itemFactory)));
+
+        ComPtr<IGraphicsCaptureItemInterop> interop;
+        RETURN_IF_FAILED(itemFactory.As(&interop));
+
+        RETURN_IF_FAILED(interop->CreateForMonitor(
+            monitorToCapture,
+            __uuidof(ABI::Windows::Graphics::Capture::IGraphicsCaptureItem),
+            (void**)g_captureItem.ReleaseAndGetAddressOf()));
+        RETURN_HR_IF_NULL(E_FAIL, g_captureItem.Get());
+
+        ComPtr<IDXGIDevice> dxgiDevice;
+        RETURN_IF_FAILED(g_d3d11Device.As(&dxgiDevice));
+
+        ComPtr<IInspectable> inspectableDevice;
+        RETURN_IF_FAILED(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.Get(), inspectableDevice.ReleaseAndGetAddressOf()));
+        RETURN_IF_FAILED(inspectableDevice.As(&g_winrtD3dDevice));
+
+        HString framePoolClass;
+        RETURN_IF_FAILED(MakeHString(L"Windows.Graphics.Capture.Direct3D11CaptureFramePool", framePoolClass));
+
+        ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics> framePoolStatics;
+        RETURN_IF_FAILED(RoGetActivationFactory(framePoolClass.value, IID_PPV_ARGS(&framePoolStatics)));
+
+        ABI::Windows::Graphics::SizeInt32 size{};
+        RETURN_IF_FAILED(g_captureItem->get_Size(&size));
+
 #if defined(WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION) && WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION >= 0x70000
         ComPtr<ABI::Windows::Graphics::Capture::IDirect3D11CaptureFramePoolStatics2> framePoolStatics2;
         if (SUCCEEDED(framePoolStatics.As(&framePoolStatics2)) && framePoolStatics2) {
@@ -915,6 +1129,7 @@ namespace BuiltInCaptureProducer
         RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_hSharedFenceHandle));
         g_pManifestView->sharedFenceHandleValue = static_cast<UINT64>(
             reinterpret_cast<UINT_PTR>(g_hSharedFenceHandle));
+        RETURN_IF_FAILED(InitializeDirectPortStatusMapping(g_statusMapping, sa, pid));
 
         return S_OK;
     }
@@ -1005,16 +1220,22 @@ namespace BuiltInCaptureProducer
     HRESULT InitializeProducer(const wchar_t* args)
     {
         UINT64 hwndVal = 0;
+        int monitorIndex = -1;
         std::wstring argsStr = args ? args : L"";
         UINT64 brokerNonceValue = 0;
         g_brokerNonce = 0;
         if (TryGetArgU64(argsStr, L"--broker-nonce", brokerNonceValue)) {
             g_brokerNonce = brokerNonceValue;
         }
-        RETURN_HR_IF(E_INVALIDARG, !TryGetArgU64(argsStr, L"--hwnd", hwndVal));
+        const bool hasMonitor = TryGetArgI32(argsStr, L"--monitor", monitorIndex);
+        const bool hasWindow = TryGetArgU64(argsStr, L"--hwnd", hwndVal);
+        RETURN_HR_IF(E_INVALIDARG, !hasMonitor && !hasWindow);
         HWND hwndToCapture = reinterpret_cast<HWND>(hwndVal);
-        RETURN_HR_IF_NULL(E_INVALIDARG, hwndToCapture);
+        if (!hasMonitor) {
+            RETURN_HR_IF_NULL(E_INVALIDARG, hwndToCapture);
+        }
         g_captureTargetHwnd = hwndToCapture;
+        g_captureTargetMonitor = nullptr;
         g_captureBackend = CaptureBackend::None;
         g_captureWidth = 0;
         g_captureHeight = 0;
@@ -1024,6 +1245,27 @@ namespace BuiltInCaptureProducer
 
         const CaptureBackend backendOverride = GetCaptureBackendOverride();
         HRESULT hr = S_OK;
+
+        if (hasMonitor) {
+            HMONITOR monitor = FindMonitorByIndex(monitorIndex);
+            RETURN_HR_IF_NULL(HRESULT_FROM_WIN32(ERROR_NOT_FOUND), monitor);
+            g_captureTargetMonitor = monitor;
+            RETURN_IF_FAILED(InitWgcMonitor(monitor));
+            ABI::Windows::Graphics::SizeInt32 size{};
+            RETURN_IF_FAILED(g_captureItem->get_Size(&size));
+            RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
+            g_captureWidth = static_cast<UINT>(size.Width);
+            g_captureHeight = static_cast<UINT>(size.Height);
+            g_captureBackend = CaptureBackend::Wgc;
+            g_isCapturing = true;
+            g_loggedFirstFrame = false;
+            VirtuaCamLog::LogLine(std::format(
+                L"Capture init: using WGC display monitor={} size={}x{}",
+                monitorIndex,
+                g_captureWidth,
+                g_captureHeight));
+            return S_OK;
+        }
 
         if (backendOverride == CaptureBackend::PrintWindow) {
             RETURN_IF_FAILED(InitPrintWindowCapture(hwndToCapture));
@@ -1052,25 +1294,6 @@ namespace BuiltInCaptureProducer
         }
 
         if (g_captureBackend == CaptureBackend::None) {
-            // Method 2: PrintWindow(PW_RENDERFULLCONTENT|PW_CLIENTONLY) -> if non-black use it.
-            hr = InitPrintWindowCapture(hwndToCapture);
-            if (SUCCEEDED(hr)) {
-                const HRESULT testHr = CapturePrintWindowFrame();
-                if (SUCCEEDED(testHr)) {
-                    VirtuaCamLog::LogLine(L"Capture init: using PrintWindow(PW_RENDERFULLCONTENT|PW_CLIENTONLY)");
-                    g_captureBackend = CaptureBackend::PrintWindow;
-                } else {
-                    VirtuaCamLog::LogHr(L"PrintWindow test frame black/failed; falling through to WGC", testHr);
-                    ResetSharedOutputs();
-                }
-            } else {
-                VirtuaCamLog::LogHr(L"InitPrintWindowCapture failed; falling through to WGC", hr);
-                ResetSharedOutputs();
-            }
-        }
-
-        if (g_captureBackend == CaptureBackend::None) {
-            // Method 3: Windows Graphics Capture (WGC) -> best for GPU/UWP.
             const HWND wgcHwnd = GetWgcTargetHwnd(hwndToCapture);
             hr = InitWgc(wgcHwnd);
             if (SUCCEEDED(hr)) {
@@ -1087,7 +1310,24 @@ namespace BuiltInCaptureProducer
                     g_captureHeight));
                 g_captureBackend = CaptureBackend::Wgc;
             } else {
-                VirtuaCamLog::LogHr(L"InitWgc failed; falling back to BitBlt", hr);
+                VirtuaCamLog::LogHr(L"InitWgc failed; falling through to PrintWindow", hr);
+                ResetSharedOutputs();
+            }
+        }
+
+        if (g_captureBackend == CaptureBackend::None) {
+            hr = InitPrintWindowCapture(hwndToCapture);
+            if (SUCCEEDED(hr)) {
+                const HRESULT testHr = CapturePrintWindowFrame();
+                if (SUCCEEDED(testHr)) {
+                    VirtuaCamLog::LogLine(L"Capture init: using PrintWindow(PW_RENDERFULLCONTENT|PW_CLIENTONLY)");
+                    g_captureBackend = CaptureBackend::PrintWindow;
+                } else {
+                    VirtuaCamLog::LogHr(L"PrintWindow test frame black/failed; falling through to BitBlt", testHr);
+                    ResetSharedOutputs();
+                }
+            } else {
+                VirtuaCamLog::LogHr(L"InitPrintWindowCapture failed; falling through to BitBlt", hr);
                 ResetSharedOutputs();
             }
         }
@@ -1155,6 +1395,7 @@ namespace BuiltInCaptureProducer
         if (g_pManifestView) {
             InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
         }
+        PublishDirectPortProducerStatus(g_statusMapping, newFenceValue, S_OK);
 
         if (!g_loggedFirstFrame) {
             VirtuaCamLog::LogLine(std::format(
@@ -1181,6 +1422,7 @@ namespace BuiltInCaptureProducer
         g_winrtD3dDevice.Reset();
         ResetSharedOutputs();
         g_captureTargetHwnd = nullptr;
+        g_captureTargetMonitor = nullptr;
         g_captureBackend = CaptureBackend::None;
 
         if (g_d3d11Context) g_d3d11Context->ClearState();
@@ -1254,7 +1496,7 @@ namespace BuiltInCaptureProducer
         return GetDefaultVirtuaCamExePath();
     }
 
-    bool LaunchVirtuaCamStartupInActiveSession(const std::wstring& exePath, const std::wstring& startupArgs)
+    bool LaunchVirtuaCamForDriverAccessInActiveSession(const std::wstring& exePath, const std::wstring& launchArgs)
     {
         const DWORD sessionId = WTSGetActiveConsoleSessionId();
         if (sessionId == 0xFFFFFFFF) {
@@ -1291,7 +1533,7 @@ namespace BuiltInCaptureProducer
         si.lpDesktop = (LPWSTR)L"winsta0\\default";
 
         PROCESS_INFORMATION pi{};
-        const std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, startupArgs);
+        const std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, launchArgs);
         std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
         cmdLineMutable.push_back(L'\0');
 
@@ -1323,12 +1565,12 @@ namespace BuiltInCaptureProducer
         return true;
     }
 
-    bool LaunchVirtuaCamStartup()
+    bool LaunchVirtuaCamForDriverAccess()
     {
         std::wstring exePath = GetVirtuaCamExePathFromRegistryOrDefault();
         const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
         const bool enableDebugLogging = HasArg(cmdLine, L"-debug");
-        std::wstring startupArgs = enableDebugLogging ? L"/startup -debug" : L"/startup";
+        std::wstring launchArgs = enableDebugLogging ? L"--driver -debug" : L"--driver";
 
         wchar_t extraArgs[1024] = {};
         const DWORD extraArgsLength = GetEnvironmentVariableW(
@@ -1336,8 +1578,8 @@ namespace BuiltInCaptureProducer
             extraArgs,
             ARRAYSIZE(extraArgs));
         if (extraArgsLength > 0 && extraArgsLength < ARRAYSIZE(extraArgs)) {
-            startupArgs += L" ";
-            startupArgs += extraArgs;
+            launchArgs += L" ";
+            launchArgs += extraArgs;
         }
 
         // Prefer ShellExecuteExW for normal user-session watcher; fall back to CreateProcessAsUser for service/session-0.
@@ -1345,8 +1587,8 @@ namespace BuiltInCaptureProducer
         sei.cbSize = sizeof(sei);
         sei.fMask = SEE_MASK_NOCLOSEPROCESS;
         sei.lpFile = exePath.c_str();
-        sei.lpParameters = startupArgs.c_str();
-        sei.nShow = SW_HIDE;
+        sei.lpParameters = launchArgs.c_str();
+        sei.nShow = SW_SHOWNORMAL;
         if (ShellExecuteExW(&sei)) {
             if (sei.hProcess) {
                 CloseHandle(sei.hProcess);
@@ -1356,24 +1598,75 @@ namespace BuiltInCaptureProducer
 
         const DWORD err = GetLastError();
         VirtuaCamLog::LogWin32(std::format(L"ShellExecuteExW failed for {}; falling back to CreateProcessAsUser", exePath), err);
-        return LaunchVirtuaCamStartupInActiveSession(exePath, startupArgs);
+        return LaunchVirtuaCamForDriverAccessInActiveSession(exePath, launchArgs);
     }
 
-    HANDLE OpenClientRequestEventHandle()
+    HANDLE CreateNamedClientRequestEventHandle(const wchar_t* logPrefix)
     {
-        HANDLE eventHandle = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kGlobalClientRequestEventName);
+        wil::unique_hlocal_security_descriptor eventDescriptor;
+        SECURITY_ATTRIBUTES eventAttributes = {};
+        PSECURITY_DESCRIPTOR rawDescriptor = nullptr;
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100002;;;AU)(A;;0x100002;;;IU)",
+                SDDL_REVISION_1,
+                &rawDescriptor,
+                nullptr)) {
+            eventDescriptor.reset(rawDescriptor);
+            eventAttributes.nLength = sizeof(eventAttributes);
+            eventAttributes.lpSecurityDescriptor = eventDescriptor.get();
+        }
+
+        HANDLE eventHandle = CreateEventW(
+            eventAttributes.lpSecurityDescriptor ? &eventAttributes : nullptr,
+            TRUE,
+            FALSE,
+            kGlobalClientRequestEventName);
         if (eventHandle) {
+            VirtuaCamLog::LogLine(std::format(
+                L"{} using named client request event {}",
+                logPrefix ? logPrefix : L"Watcher",
+                kGlobalClientRequestEventName));
             return eventHandle;
         }
 
-        return OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kClientRequestEventName);
+        const DWORD globalCreateError = GetLastError();
+        eventHandle = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kGlobalClientRequestEventName);
+        if (eventHandle) {
+            VirtuaCamLog::LogLine(std::format(
+                L"{} opened existing named client request event {}",
+                logPrefix ? logPrefix : L"Watcher",
+                kGlobalClientRequestEventName));
+            return eventHandle;
+        }
+
+        VirtuaCamLog::LogWin32(
+            std::format(
+                L"{} CreateEventW failed for {}; falling back to session-local event",
+                logPrefix ? logPrefix : L"Watcher",
+                kGlobalClientRequestEventName),
+            globalCreateError);
+
+        eventHandle = CreateEventW(nullptr, TRUE, FALSE, kClientRequestEventName);
+        if (eventHandle) {
+            VirtuaCamLog::LogLine(std::format(
+                L"{} using fallback client request event {}",
+                logPrefix ? logPrefix : L"Watcher",
+                kClientRequestEventName));
+            return eventHandle;
+        }
+
+        VirtuaCamLog::LogWin32(
+            std::format(
+                L"{} CreateEventW failed for fallback client request event",
+                logPrefix ? logPrefix : L"Watcher"),
+            GetLastError());
+        return nullptr;
     }
 
     HANDLE CreateRegisteredClientRequestEventHandle()
     {
-        HANDLE eventHandle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        HANDLE eventHandle = CreateNamedClientRequestEventHandle(L"Watcher");
         if (!eventHandle) {
-            VirtuaCamLog::LogWin32(L"CreateEventW failed for watcher request event", GetLastError());
             return nullptr;
         }
 
@@ -1381,19 +1674,18 @@ namespace BuiltInCaptureProducer
         HRESULT hr = driverBridge.Initialize();
         if (FAILED(hr)) {
             VirtuaCamLog::LogHr(L"Watcher DriverBridge::Initialize failed", hr);
-            CloseHandle(eventHandle);
-            return nullptr;
+            return eventHandle;
         }
 
         hr = driverBridge.RegisterClientRequestEvent(eventHandle);
         if (FAILED(hr)) {
             VirtuaCamLog::LogHr(L"Watcher DriverBridge::RegisterClientRequestEvent failed", hr);
-            CloseHandle(eventHandle);
-            return nullptr;
+            VirtuaCamLog::LogLine(L"Watcher continuing with named client request event fallback");
+            return eventHandle;
         }
 
         VirtuaCamLog::LogLine(std::format(
-            L"Watcher registered session-local client request event handle=0x{:X}",
+            L"Watcher registered client request event handle=0x{:X}",
             static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(eventHandle))));
         return eventHandle;
     }
@@ -1433,7 +1725,7 @@ namespace BuiltInCaptureProducer
 
                 if (!IsProcessRunning(L"VirtuaCam.exe")) {
                     if (launchFailCount < 3) {
-                        if (LaunchVirtuaCamStartup()) {
+                        if (LaunchVirtuaCamForDriverAccess()) {
                             launchFailCount = 0;
                         } else {
                             launchFailCount++;
@@ -1701,13 +1993,13 @@ static std::wstring GetTrustedVirtuaCamExePathForService()
     return canonicalExePath;
 }
 
-static bool LaunchVirtuaCamStartupFromService()
+static bool LaunchVirtuaCamForDriverAccessFromService()
 {
     std::wstring exePath = GetTrustedVirtuaCamExePathForService();
     if (exePath.empty()) {
         return false;
     }
-    std::wstring startupArgs = L"/startup";
+    std::wstring launchArgs = L"--driver";
 
     const DWORD sessionId = WTSGetActiveConsoleSessionId();
     if (sessionId == 0xFFFFFFFF) {
@@ -1744,9 +2036,11 @@ static bool LaunchVirtuaCamStartupFromService()
     si.lpDesktop = (LPWSTR)L"winsta0\\default";
 
     PROCESS_INFORMATION pi{};
-    const std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, startupArgs);
+    const std::wstring cmdLine = std::format(L"\"{}\" {}", exePath, launchArgs);
     std::vector<wchar_t> cmdLineMutable(cmdLine.begin(), cmdLine.end());
     cmdLineMutable.push_back(L'\0');
+
+    VirtuaCamLog::LogLine(std::format(L"Watcher service: launching {}", cmdLine));
 
     const DWORD createFlags = CREATE_UNICODE_ENVIRONMENT;
     const BOOL ok = CreateProcessAsUserW(
@@ -1771,16 +2065,58 @@ static bool LaunchVirtuaCamStartupFromService()
         return false;
     }
 
+    VirtuaCamLog::LogLine(std::format(L"Watcher service: launched VirtuaCam.exe pid={}", pi.dwProcessId));
     if (pi.hThread) CloseHandle(pi.hThread);
     if (pi.hProcess) CloseHandle(pi.hProcess);
     return true;
 }
 
+static HANDLE CreateNamedClientRequestEventHandleForService()
+{
+    wil::unique_hlocal_security_descriptor eventDescriptor;
+    SECURITY_ATTRIBUTES eventAttributes = {};
+    PSECURITY_DESCRIPTOR rawDescriptor = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100002;;;AU)(A;;0x100002;;;IU)",
+            SDDL_REVISION_1,
+            &rawDescriptor,
+            nullptr)) {
+        eventDescriptor.reset(rawDescriptor);
+        eventAttributes.nLength = sizeof(eventAttributes);
+        eventAttributes.lpSecurityDescriptor = eventDescriptor.get();
+    }
+
+    HANDLE eventHandle = CreateEventW(
+        eventAttributes.lpSecurityDescriptor ? &eventAttributes : nullptr,
+        TRUE,
+        FALSE,
+        kGlobalClientRequestEventName);
+    if (eventHandle) {
+        VirtuaCamLog::LogLine(std::format(
+            L"Watcher service: using named client request event {}",
+            kGlobalClientRequestEventName));
+        return eventHandle;
+    }
+
+    const DWORD globalCreateError = GetLastError();
+    eventHandle = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, kGlobalClientRequestEventName);
+    if (eventHandle) {
+        VirtuaCamLog::LogLine(std::format(
+            L"Watcher service: opened existing named client request event {}",
+            kGlobalClientRequestEventName));
+        return eventHandle;
+    }
+
+    VirtuaCamLog::LogWin32(
+        std::format(L"Watcher service: CreateEventW failed for {}", kGlobalClientRequestEventName),
+        globalCreateError);
+    return nullptr;
+}
+
 static HANDLE CreateRegisteredClientRequestEventHandleForService()
 {
-    HANDLE eventHandle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE eventHandle = CreateNamedClientRequestEventHandleForService();
     if (!eventHandle) {
-        VirtuaCamLog::LogWin32(L"Watcher service: CreateEventW failed", GetLastError());
         return nullptr;
     }
 
@@ -1788,15 +2124,14 @@ static HANDLE CreateRegisteredClientRequestEventHandleForService()
     HRESULT hr = driverBridge.Initialize();
     if (FAILED(hr)) {
         VirtuaCamLog::LogHr(L"Watcher service: DriverBridge::Initialize failed", hr);
-        CloseHandle(eventHandle);
-        return nullptr;
+        return eventHandle;
     }
 
     hr = driverBridge.RegisterClientRequestEvent(eventHandle);
     if (FAILED(hr)) {
         VirtuaCamLog::LogHr(L"Watcher service: DriverBridge::RegisterClientRequestEvent failed", hr);
-        CloseHandle(eventHandle);
-        return nullptr;
+        VirtuaCamLog::LogLine(L"Watcher service: continuing with named client request event fallback");
+        return eventHandle;
     }
 
     VirtuaCamLog::LogLine(std::format(
@@ -1830,14 +2165,17 @@ static DWORD RunWatcherLoopForService(HANDLE stopEvent)
                 break;
             }
 
+            VirtuaCamLog::LogLine(L"Watcher service: client request event signaled");
             if (!IsProcessRunningForService(L"VirtuaCam.exe")) {
                 if (launchFailCount < 3) {
-                    if (LaunchVirtuaCamStartupFromService()) {
+                    if (LaunchVirtuaCamForDriverAccessFromService()) {
                         launchFailCount = 0;
                     } else {
                         launchFailCount++;
                     }
                 }
+            } else {
+                VirtuaCamLog::LogLine(L"Watcher service: VirtuaCam.exe already running; launch skipped");
             }
             ResetEvent(requestEvent);
         }
@@ -1931,6 +2269,189 @@ void WINAPI WatcherServiceMain(DWORD, LPWSTR*)
 
 namespace BuiltInCameraProducer
 {
+    class AsyncSourceReaderCallback final : public IMFSourceReaderCallback
+    {
+    public:
+        IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+        {
+            if (!ppv) {
+                return E_POINTER;
+            }
+            *ppv = nullptr;
+            if (riid == __uuidof(IUnknown) || riid == __uuidof(IMFSourceReaderCallback)) {
+                *ppv = static_cast<IMFSourceReaderCallback*>(this);
+                AddRef();
+                return S_OK;
+            }
+            return E_NOINTERFACE;
+        }
+
+        IFACEMETHODIMP_(ULONG) AddRef() override
+        {
+            return m_refCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        }
+
+        IFACEMETHODIMP_(ULONG) Release() override
+        {
+            const ULONG ref = m_refCount.fetch_sub(1, std::memory_order_acq_rel) - 1;
+            if (ref == 0) {
+                delete this;
+            }
+            return ref;
+        }
+
+        IFACEMETHODIMP OnReadSample(
+            HRESULT status,
+            DWORD,
+            DWORD streamFlags,
+            LONGLONG timestamp,
+            IMFSample* sample) override
+        {
+            bool shouldRequestNext = false;
+            LARGE_INTEGER callbackQpc = {};
+            (void)QueryPerformanceCounter(&callbackQpc);
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_requestPending = false;
+                if (m_shuttingDown) {
+                    return S_OK;
+                }
+
+                m_latestStatus = status;
+                m_latestStreamFlags = streamFlags;
+                m_latestTimestamp = timestamp;
+                m_latestCallbackQpc = static_cast<UINT64>(callbackQpc.QuadPart);
+                m_latestSample.Reset();
+                if (SUCCEEDED(status) && sample) {
+                    m_latestSample = sample;
+                }
+                if (m_hasLatest && m_latestSample) {
+                    ++m_droppedSamples;
+                }
+                m_hasLatest = true;
+                shouldRequestNext =
+                    SUCCEEDED(status) &&
+                    (streamFlags & MF_SOURCE_READERF_ENDOFSTREAM) == 0;
+            }
+
+            if (shouldRequestNext) {
+                (void)BeginRead();
+            }
+            return S_OK;
+        }
+
+        IFACEMETHODIMP OnFlush(DWORD) override
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_requestPending = false;
+            m_hasLatest = false;
+            m_latestCallbackQpc = 0;
+            m_latestSample.Reset();
+            return S_OK;
+        }
+
+        IFACEMETHODIMP OnEvent(DWORD, IMFMediaEvent*) override
+        {
+            return S_OK;
+        }
+
+        void SetReader(IMFSourceReader* reader)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_reader = reader;
+            m_requestPending = false;
+            m_shuttingDown = false;
+            m_hasLatest = false;
+            m_latestCallbackQpc = 0;
+            m_latestSample.Reset();
+        }
+
+        HRESULT BeginRead()
+        {
+            ComPtr<IMFSourceReader> reader;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_shuttingDown || m_requestPending || !m_reader) {
+                    return S_OK;
+                }
+                reader = m_reader;
+                m_requestPending = true;
+            }
+
+            HRESULT hr = reader->ReadSample(
+                static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
+                0,
+                nullptr,
+                nullptr,
+                nullptr,
+                nullptr);
+            if (FAILED(hr)) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_requestPending = false;
+                m_latestStatus = hr;
+                m_latestStreamFlags = 0;
+                m_latestTimestamp = 0;
+                m_latestCallbackQpc = 0;
+                m_latestSample.Reset();
+                m_hasLatest = true;
+            }
+            return hr;
+        }
+
+        bool TryTakeLatest(
+            ComPtr<IMFSample>& sample,
+            DWORD& streamFlags,
+            LONGLONG& timestamp,
+            UINT64& callbackQpc,
+            HRESULT& status)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!m_hasLatest) {
+                return false;
+            }
+
+            sample = m_latestSample;
+            streamFlags = m_latestStreamFlags;
+            timestamp = m_latestTimestamp;
+            callbackQpc = m_latestCallbackQpc;
+            status = m_latestStatus;
+            m_latestSample.Reset();
+            m_hasLatest = false;
+            return true;
+        }
+
+        UINT64 DroppedSamples()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_droppedSamples;
+        }
+
+        void Shutdown()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_shuttingDown = true;
+            m_requestPending = false;
+            m_hasLatest = false;
+            m_latestCallbackQpc = 0;
+            m_latestSample.Reset();
+            m_reader.Reset();
+        }
+
+    private:
+        std::atomic<ULONG> m_refCount{ 1 };
+        std::mutex m_mutex;
+        ComPtr<IMFSourceReader> m_reader;
+        ComPtr<IMFSample> m_latestSample;
+        DWORD m_latestStreamFlags = 0;
+        LONGLONG m_latestTimestamp = 0;
+        UINT64 m_latestCallbackQpc = 0;
+        HRESULT m_latestStatus = S_OK;
+        bool m_requestPending = false;
+        bool m_hasLatest = false;
+        bool m_shuttingDown = false;
+        UINT64 m_droppedSamples = 0;
+    };
+
     static ComPtr<ID3D11Device> g_d3d11Device;
     static ComPtr<ID3D11Device5> g_d3d11Device5;
     static ComPtr<ID3D11DeviceContext> g_d3d11Context;
@@ -1948,15 +2469,19 @@ namespace BuiltInCameraProducer
     static HANDLE g_hSharedFenceHandle = nullptr;
     static HANDLE g_hManifest = nullptr;
     static BroadcastManifest* g_pManifestView = nullptr;
+    static DirectPortStatusMapping g_statusMapping;
     static std::atomic<UINT64> g_fenceValue = 0;
     static UINT64 g_brokerNonce = 0;
 
     static ComPtr<IMFSourceReader> g_sourceReader;
+    static ComPtr<AsyncSourceReaderCallback> g_sourceReaderCallback;
     static long g_videoWidth = 0;
     static long g_videoHeight = 0;
     static std::atomic<bool> g_isCapturing = false;
     static bool g_mfStarted = false;
     static bool g_loggedFirstFrame = false;
+    static bool g_staticImageMode = false;
+    static bool g_loopOnEndOfStream = false;
 
     static HRESULT InitD3D11()
     {
@@ -2012,7 +2537,7 @@ namespace BuiltInCameraProducer
             RETURN_IF_FAILED(g_d3d11Device->CreateShaderResourceView(sourceTexture, nullptr, &sourceSRV));
         }
 
-        const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        const float clearColor[] = { 33.0f / 255.0f, 33.0f / 255.0f, 33.0f / 255.0f, 1.0f };
         const CanvasBlitConstants constants = GetFullSourceUvConstants();
         D3D11_VIEWPORT viewport = GetContainCanvasViewport(sourceWidth, sourceHeight);
         ID3D11RenderTargetView* rtvs[] = { g_canvasRTV.Get() };
@@ -2099,6 +2624,7 @@ namespace BuiltInCameraProducer
         RETURN_IF_FAILED(g_sharedD3D11Fence->CreateSharedHandle(&sa, GENERIC_READ | GENERIC_WRITE, fenceName.c_str(), &g_hSharedFenceHandle));
         g_pManifestView->sharedFenceHandleValue = static_cast<UINT64>(
             reinterpret_cast<UINT_PTR>(g_hSharedFenceHandle));
+        RETURN_IF_FAILED(InitializeDirectPortStatusMapping(g_statusMapping, sa, pid));
 
         return S_OK;
     }
@@ -2157,6 +2683,41 @@ namespace BuiltInCameraProducer
         return hr;
     }
 
+    HRESULT SelectRgb32MediaType(IMFSourceReader* reader, IMFMediaType** currentTypeOut)
+    {
+        RETURN_HR_IF_NULL(E_POINTER, reader);
+        RETURN_HR_IF_NULL(E_POINTER, currentTypeOut);
+        *currentTypeOut = nullptr;
+
+        ComPtr<IMFMediaType> outputType;
+        RETURN_IF_FAILED(MFCreateMediaType(&outputType));
+        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
+        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32));
+
+        bool rgb32Selected = false;
+        for (DWORD i = 0;; ++i) {
+            ComPtr<IMFMediaType> nativeType;
+            HRESULT hr = reader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, i, &nativeType);
+            if (hr == MF_E_NO_MORE_TYPES) break;
+            RETURN_IF_FAILED(hr);
+
+            if (SUCCEEDED(reader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, nativeType.Get())) &&
+                SUCCEEDED(reader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, outputType.Get()))) {
+                rgb32Selected = true;
+                break;
+            }
+        }
+        RETURN_HR_IF(MF_E_INVALIDMEDIATYPE, !rgb32Selected);
+
+        ComPtr<IMFMediaType> currentType;
+        RETURN_IF_FAILED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &currentType));
+        GUID subtype = GUID_NULL;
+        RETURN_IF_FAILED(currentType->GetGUID(MF_MT_SUBTYPE, &subtype));
+        RETURN_HR_IF(MF_E_INVALIDMEDIATYPE, subtype != MFVideoFormat_RGB32);
+
+        return currentType.CopyTo(currentTypeOut);
+    }
+
     HRESULT InitializeProducer(const wchar_t* args)
     {
         std::wstring argsStr = args ? args : L"";
@@ -2176,54 +2737,201 @@ namespace BuiltInCameraProducer
         ComPtr<IMFMediaSource> source;
         RETURN_IF_FAILED(SelectMediaSource(argsStr, source));
 
+        ComPtr<AsyncSourceReaderCallback> callback;
+        callback.Attach(new (std::nothrow) AsyncSourceReaderCallback());
+        RETURN_HR_IF(E_OUTOFMEMORY, !callback);
+
         ComPtr<IMFAttributes> readerAttributes;
-        RETURN_IF_FAILED(MFCreateAttributes(&readerAttributes, 2));
+        RETURN_IF_FAILED(MFCreateAttributes(&readerAttributes, 3));
         RETURN_IF_FAILED(readerAttributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, FALSE));
         RETURN_IF_FAILED(readerAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE));
+        RETURN_IF_FAILED(readerAttributes->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback.Get()));
 
         RETURN_IF_FAILED(MFCreateSourceReaderFromMediaSource(source.Get(), readerAttributes.Get(), &g_sourceReader));
-
-        ComPtr<IMFMediaType> outputType;
-        RETURN_IF_FAILED(MFCreateMediaType(&outputType));
-        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
-        RETURN_IF_FAILED(outputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32));
-
-        // Pick a native type that the source reader can accept, then request RGB32.
-        for (DWORD i = 0;; ++i) {
-            ComPtr<IMFMediaType> nativeType;
-            HRESULT hr = g_sourceReader->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, i, &nativeType);
-            if (hr == MF_E_NO_MORE_TYPES) break;
-            RETURN_IF_FAILED(hr);
-
-            if (SUCCEEDED(g_sourceReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, nativeType.Get()))) {
-                if (SUCCEEDED(g_sourceReader->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, outputType.Get()))) {
-                    break;
-                }
-            }
-        }
+        callback->SetReader(g_sourceReader.Get());
+        g_sourceReaderCallback = callback;
 
         ComPtr<IMFMediaType> currentType;
-        RETURN_IF_FAILED(g_sourceReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &currentType));
+        RETURN_IF_FAILED(SelectRgb32MediaType(g_sourceReader.Get(), &currentType));
         MFGetAttributeSize(currentType.Get(), MF_MT_FRAME_SIZE, (UINT32*)&g_videoWidth, (UINT32*)&g_videoHeight);
         RETURN_HR_IF(E_FAIL, g_videoWidth <= 0 || g_videoHeight <= 0);
 
         RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
         RETURN_IF_FAILED(EnsureCameraSourceTexture(static_cast<UINT>(g_videoWidth), static_cast<UINT>(g_videoHeight)));
 
+        g_loopOnEndOfStream = false;
         g_isCapturing = true;
         g_loggedFirstFrame = false;
+        RETURN_IF_FAILED(g_sourceReaderCallback->BeginRead());
+        return S_OK;
+    }
+
+    HRESULT InitializeFileProducer(const wchar_t* args)
+    {
+        std::wstring argsStr = args ? args : L"";
+        UINT64 brokerNonceValue = 0;
+        g_brokerNonce = 0;
+        if (TryGetArgU64(argsStr, L"--broker-nonce", brokerNonceValue)) {
+            g_brokerNonce = brokerNonceValue;
+        }
+
+        std::wstring filePath;
+        RETURN_HR_IF(E_INVALIDARG, !TryGetArgValue(argsStr, L"--file", filePath) || filePath.empty());
+        std::wstring mediaKind;
+        (void)TryGetArgValue(argsStr, L"--media-kind", mediaKind);
+
+        if (_wcsicmp(mediaKind.c_str(), L"image") == 0) {
+            RETURN_IF_FAILED(InitD3D11());
+
+            ComPtr<IWICImagingFactory> wicFactory;
+            RETURN_IF_FAILED(CoCreateInstance(
+                CLSID_WICImagingFactory,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(&wicFactory)));
+
+            ComPtr<IWICBitmapDecoder> decoder;
+            RETURN_IF_FAILED(wicFactory->CreateDecoderFromFilename(
+                filePath.c_str(),
+                nullptr,
+                GENERIC_READ,
+                WICDecodeMetadataCacheOnLoad,
+                &decoder));
+
+            ComPtr<IWICBitmapFrameDecode> frame;
+            RETURN_IF_FAILED(decoder->GetFrame(0, &frame));
+
+            UINT width = 0;
+            UINT height = 0;
+            RETURN_IF_FAILED(frame->GetSize(&width, &height));
+            RETURN_HR_IF(E_FAIL, width == 0 || height == 0);
+
+            ComPtr<IWICFormatConverter> converter;
+            RETURN_IF_FAILED(wicFactory->CreateFormatConverter(&converter));
+            RETURN_IF_FAILED(converter->Initialize(
+                frame.Get(),
+                GUID_WICPixelFormat32bppBGRA,
+                WICBitmapDitherTypeNone,
+                nullptr,
+                0.0,
+                WICBitmapPaletteTypeCustom));
+
+            std::vector<BYTE> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+            RETURN_IF_FAILED(converter->CopyPixels(
+                nullptr,
+                width * 4,
+                static_cast<UINT>(pixels.size()),
+                pixels.data()));
+
+            g_videoWidth = static_cast<long>(width);
+            g_videoHeight = static_cast<long>(height);
+            RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
+            RETURN_IF_FAILED(EnsureCameraSourceTexture(width, height));
+            g_d3d11Context->UpdateSubresource(g_sourceD3D11Texture.Get(), 0, NULL, pixels.data(), width * 4, 0);
+            RETURN_IF_FAILED(RenderCameraTextureToCanvas(g_sourceD3D11Texture.Get(), width, height));
+
+            g_staticImageMode = true;
+            g_loopOnEndOfStream = false;
+            g_isCapturing = true;
+            g_loggedFirstFrame = false;
+            VirtuaCamLog::LogLine(std::format(L"BuiltInMediaProducer: image={} size={}x{}", filePath, g_videoWidth, g_videoHeight));
+            return S_OK;
+        }
+
+        if (!g_mfStarted) {
+            RETURN_IF_FAILED(MFStartup(MF_VERSION));
+            g_mfStarted = true;
+        }
+        g_staticImageMode = false;
+
+        RETURN_IF_FAILED(InitD3D11());
+
+        ComPtr<AsyncSourceReaderCallback> callback;
+        callback.Attach(new (std::nothrow) AsyncSourceReaderCallback());
+        RETURN_HR_IF(E_OUTOFMEMORY, !callback);
+
+        ComPtr<IMFAttributes> readerAttributes;
+        RETURN_IF_FAILED(MFCreateAttributes(&readerAttributes, 3));
+        RETURN_IF_FAILED(readerAttributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, FALSE));
+        RETURN_IF_FAILED(readerAttributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE));
+        RETURN_IF_FAILED(readerAttributes->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback.Get()));
+
+        RETURN_IF_FAILED(MFCreateSourceReaderFromURL(filePath.c_str(), readerAttributes.Get(), &g_sourceReader));
+        callback->SetReader(g_sourceReader.Get());
+        g_sourceReaderCallback = callback;
+
+        ComPtr<IMFMediaType> currentType;
+        RETURN_IF_FAILED(SelectRgb32MediaType(g_sourceReader.Get(), &currentType));
+        MFGetAttributeSize(currentType.Get(), MF_MT_FRAME_SIZE, (UINT32*)&g_videoWidth, (UINT32*)&g_videoHeight);
+        RETURN_HR_IF(E_FAIL, g_videoWidth <= 0 || g_videoHeight <= 0);
+
+        RETURN_IF_FAILED(InitSharedOutputs(kProducerCanvasWidth, kProducerCanvasHeight));
+        RETURN_IF_FAILED(EnsureCameraSourceTexture(static_cast<UINT>(g_videoWidth), static_cast<UINT>(g_videoHeight)));
+
+        g_loopOnEndOfStream = true;
+        g_isCapturing = true;
+        g_loggedFirstFrame = false;
+        RETURN_IF_FAILED(g_sourceReaderCallback->BeginRead());
+        VirtuaCamLog::LogLine(std::format(L"BuiltInMediaProducer: file={} size={}x{}", filePath, g_videoWidth, g_videoHeight));
         return S_OK;
     }
 
     bool ProcessFrame()
     {
-        if (!g_isCapturing || !g_sourceReader) return false;
+        if (!g_isCapturing) return false;
+
+        if (g_staticImageMode) {
+            UINT64 newFenceValue = g_fenceValue.fetch_add(1) + 1;
+            g_d3d11Context4->Signal(g_sharedD3D11Fence.Get(), newFenceValue);
+            g_d3d11Context->Flush();
+            if (g_pManifestView) {
+                InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
+            }
+            PublishDirectPortProducerStatus(
+                g_statusMapping,
+                newFenceValue,
+                S_OK,
+                0,
+                0,
+                0,
+                true);
+            if (!g_loggedFirstFrame) {
+                VirtuaCamLog::LogLine(std::format(
+                    L"First producer frame: type=image size={}x{} frameValue={}",
+                    g_videoWidth,
+                    g_videoHeight,
+                    newFenceValue));
+                g_loggedFirstFrame = true;
+            }
+            return true;
+        }
+
+        if (!g_sourceReader || !g_sourceReaderCallback) return false;
 
         ComPtr<IMFSample> sample;
         DWORD streamFlags = 0;
         LONGLONG timestamp = 0;
-        HRESULT hr = g_sourceReader->ReadSample((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, NULL, &streamFlags, &timestamp, &sample);
-        if (FAILED(hr) || !sample) return false;
+        UINT64 callbackQpc = 0;
+        HRESULT hr = S_OK;
+        if (!g_sourceReaderCallback->TryTakeLatest(sample, streamFlags, timestamp, callbackQpc, hr)) {
+            return false;
+        }
+        (void)timestamp;
+        if (FAILED(hr)) return false;
+        if ((streamFlags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
+            if (g_loopOnEndOfStream) {
+                PROPVARIANT pos{};
+                PropVariantInit(&pos);
+                pos.vt = VT_I8;
+                pos.hVal.QuadPart = 0;
+                if (SUCCEEDED(g_sourceReader->SetCurrentPosition(GUID_NULL, pos))) {
+                    (void)g_sourceReaderCallback->BeginRead();
+                }
+                PropVariantClear(&pos);
+            }
+            return false;
+        }
+        if (!sample) return false;
 
         ComPtr<IMFMediaBuffer> buffer;
         if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer) return false;
@@ -2231,6 +2939,11 @@ namespace BuiltInCameraProducer
         BYTE* data = nullptr;
         DWORD length = 0;
         if (FAILED(buffer->Lock(&data, NULL, &length)) || !data) return false;
+        const UINT64 requiredBytes = static_cast<UINT64>(g_videoWidth) * static_cast<UINT64>(g_videoHeight) * 4ull;
+        if (static_cast<UINT64>(length) < requiredBytes) {
+            (void)buffer->Unlock();
+            return false;
+        }
         if (FAILED(EnsureCameraSourceTexture(static_cast<UINT>(g_videoWidth), static_cast<UINT>(g_videoHeight)))) {
             (void)buffer->Unlock();
             return false;
@@ -2250,6 +2963,13 @@ namespace BuiltInCameraProducer
         if (g_pManifestView) {
             InterlockedExchange64(reinterpret_cast<volatile LONGLONG*>(&g_pManifestView->frameValue), newFenceValue);
         }
+        PublishDirectPortProducerStatus(
+            g_statusMapping,
+            newFenceValue,
+            S_OK,
+            0,
+            callbackQpc,
+            g_sourceReaderCallback ? g_sourceReaderCallback->DroppedSamples() : 0);
 
         if (!g_loggedFirstFrame) {
             VirtuaCamLog::LogLine(std::format(
@@ -2265,16 +2985,23 @@ namespace BuiltInCameraProducer
     void ShutdownProducer()
     {
         if (!g_isCapturing.exchange(false)) return;
+        g_staticImageMode = false;
+        g_loopOnEndOfStream = false;
 
+        if (g_sourceReaderCallback) {
+            g_sourceReaderCallback->Shutdown();
+        }
         if (g_sourceReader) {
             (void)g_sourceReader->Flush(MF_SOURCE_READER_ALL_STREAMS);
         }
         g_sourceReader.Reset();
+        g_sourceReaderCallback.Reset();
 
         if (g_pManifestView) UnmapViewOfFile(g_pManifestView);
         if (g_hManifest) CloseHandle(g_hManifest);
         g_pManifestView = nullptr;
         g_hManifest = nullptr;
+        g_statusMapping.Reset();
 
         if (g_hSharedTextureHandle) CloseHandle(g_hSharedTextureHandle);
         if (g_hSharedFenceHandle) CloseHandle(g_hSharedFenceHandle);
@@ -2307,10 +3034,16 @@ namespace BuiltInCameraProducer
 
 void LoadProducerModule(const std::wstring& type, ProducerModule& module)
 {
-    std::wstring dllName;
     if (type == L"camera") {
         module.hModule = nullptr;
         module.Initialize = &BuiltInCameraProducer::InitializeProducer;
+        module.Process = &BuiltInCameraProducer::ProcessFrame;
+        module.Shutdown = &BuiltInCameraProducer::ShutdownProducer;
+        return;
+    }
+    if (type == L"media") {
+        module.hModule = nullptr;
+        module.Initialize = &BuiltInCameraProducer::InitializeFileProducer;
         module.Process = &BuiltInCameraProducer::ProcessFrame;
         module.Shutdown = &BuiltInCameraProducer::ShutdownProducer;
         return;
@@ -2322,30 +3055,13 @@ void LoadProducerModule(const std::wstring& type, ProducerModule& module)
         module.Shutdown = &BuiltInCaptureProducer::ShutdownProducer;
         return;
     }
-
-    if (type == L"consumer") {
-        dllName = L"DirectPortConsumer.dll";
-    } else {
-        return;
-    }
-
-    module.hModule = LoadLibraryExW(dllName.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    if (module.hModule)
-    {
-        module.Initialize = (PFN_InitializeProducer)GetProcAddress(module.hModule, "InitializeProducer");
-        module.Process = (PFN_ProcessFrame)GetProcAddress(module.hModule, "ProcessFrame");
-        module.Shutdown = (PFN_ShutdownProducer)GetProcAddress(module.hModule, "ShutdownProducer");
-    }
-    else
-    {
-        VirtuaCamLog::LogWin32(std::format(L"LoadLibraryExW failed: {}", dllName), GetLastError());
-    }
 }
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR lpCmdLine, _In_ int)
 {
     const std::wstring cmdLine = GetCommandLineW() ? GetCommandLineW() : L"";
-    const bool enableDebugLogging = HasArg(cmdLine, L"-debug");
+    const bool serviceMode = HasArg(cmdLine, L"--service");
+    const bool enableDebugLogging = HasArg(cmdLine, L"-debug") || serviceMode;
 
     VirtuaCamLog::InitOptions logOpts;
     logOpts.logFileName = L"virtuacam-process.log";
@@ -2354,7 +3070,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR 
     logOpts.enabled = enableDebugLogging;
     VirtuaCamLog::Init(logOpts);
 
-    if (HasArg(cmdLine, L"--service")) {
+    if (serviceMode) {
         VirtuaCamLog::LogLine(L"Starting watcher service mode (--service)");
         SERVICE_TABLE_ENTRYW serviceTable[] = {
             { (LPWSTR)kWatcherServiceName, WatcherServiceMain },
