@@ -10,7 +10,7 @@ Repository goal: build and install a virtual camera that appears to Windows came
 ## What is here
 
 - `scripts\build-all.ps1`: single build entrypoint; builds software and driver and stages everything into `output/`
-- `output\VirtuaCamSetup.exe`: single install entrypoint; installs only from `output/`, registers `DirectPortClient.dll`, and configures startup
+- `output\VirtuaCamSetup.exe`: single install entrypoint; installs only from `output/`, registers `DirectPortClient.dll`, and configures the watcher service
 - `scripts\clean-output.ps1`: removes `output/` so the next build recreates a fresh staged package
 - `scripts\test-code-review-20260511.ps1`: whitebox checks for the 2026-05-11 code-review fixes
 - `scripts\test-performance-audit.ps1`: whitebox/runtime checks for the 2026-05-11 performance-audit fixes
@@ -20,27 +20,27 @@ Repository goal: build and install a virtual camera that appears to Windows came
 - `shared\`: driver/user-mode ABI constants and structures shared by both projects
 - `software-project/`: CMake-based user-mode code
 - `driver-project/`: Visual Studio / WDK driver code
-- `implementation/`: retained WDK and AVStream audit references
+- `implementation/`: ignored scratch space for temporary specs and work notes; merge useful information into `wiki/` or tracked docs before cleanup
 - `wiki/`: optional local checkout of the GitHub wiki; ignored by this repository
 
 ## Clone to first camera session
 
-1. Clone the repository and enter it:
+1. Check prerequisites.
+
+Requirements:
+
+1. Windows 10
+2. Visual Studio 2022 with MSBuild and C++ workloads
+3. Windows SDK and WDK
+4. CMake 3.20
+5. Git
+
+2. Clone the repository and enter it:
 
 ```powershell
 git clone https://github.com/14ag/VirtuaCam.git
 cd VirtuaCam
 ```
-
-2. Check prerequisites.
-
-Requirements:
-
-1. Windows 10 or Windows 11
-2. Visual Studio 2022 with MSBuild and C++ workloads
-3. Windows SDK and WDK
-4. CMake 3.20 or newer
-5. Git
 
 ## Build
 
@@ -69,7 +69,9 @@ If the installer later reports `TESTSIGNING is OFF`, enable it once and reboot:
 bcdedit /set testsigning on
 ```
 
-Open an elevated PowerShell window in the repo root and install from the setup wizard:
+Open `.\output\VirtuaCamSetup.exe` as Administrator and use the setup wizard.
+
+For automation, pass an action flag. Any flag means headless mode: output goes to stdout/stderr and wizard logs, not GUI popups.
 
 ```powershell
 .\output\VirtuaCamSetup.exe --install --json .\output\logs\wizard\install.json
@@ -242,7 +244,6 @@ Current staged runtime binaries:
 - `VirtuaCamProcess.exe`
 - `DirectPortBroker.dll`
 - `DirectPortClient.dll`
-- `DirectPortConsumer.dll`
 - `avshws.sys`
 - `avshws.inf`
 - `avshws.cat`
@@ -251,11 +252,11 @@ Current staged runtime binaries:
 - `vcruntime140.dll`
 - `vcruntime140_1.dll`
 
-Default packaging does not stage legacy Media Foundation producer DLLs. Camera and window producers are built into `VirtuaCamProcess.exe`; `DirectPortConsumer.dll` is the dynamic producer module kept in the default package.
+Default packaging does not stage legacy Media Foundation producer DLLs or `DirectPortConsumer.dll`. Camera, window, display, image, and video producers are built into `VirtuaCamProcess.exe`.
 
 ## Documentation
 
-Long-form current docs live in the separate GitHub wiki repo, not duplicated under `docs/`. When `wiki/` exists locally, it is an ignored wiki checkout.
+Long-form current docs live in the separate GitHub wiki repo, not duplicated under dated report files. When `wiki/` exists locally, it is an ignored wiki checkout.
 
 - [Wiki Home](https://github.com/14ag/VirtuaCam/wiki)
 - [Getting Started](https://github.com/14ag/VirtuaCam/wiki/Getting-Started)

@@ -10,6 +10,7 @@
 #define ID_TRAY_ABOUT           5002
 #define ID_TRAY_EXIT            5003
 #define IDC_TELEMETRY_LABEL     5004
+#define ID_TRAY_OPEN_LOGS       5005
 #define ID_AUDIO_DEVICE_NONE    6000
 #define ID_AUDIO_DEVICE_AUTO    6001
 #define ID_AUDIO_CAPTURE_FIRST  7001

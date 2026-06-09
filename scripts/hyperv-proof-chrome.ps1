@@ -27,7 +27,39 @@ function Read-JsonFile {
     if (-not (Test-Path -LiteralPath $Path)) {
         return $null
     }
-    Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        try {
+            $stream = [System.IO.File]::Open(
+                $Path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite)
+            try {
+                $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true)
+                try {
+                    $text = $reader.ReadToEnd()
+                } finally {
+                    $reader.Dispose()
+                }
+            } finally {
+                $stream.Dispose()
+            }
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                return $null
+            }
+            return $text | ConvertFrom-Json
+        } catch [System.IO.IOException] {
+            $lastError = $_
+            Start-Sleep -Milliseconds 150
+        } catch [System.Management.Automation.PSInvalidOperationException] {
+            $lastError = $_
+            Start-Sleep -Milliseconds 150
+        }
+    }
+
+    throw $lastError
 }
 
 function Write-JsonFile {

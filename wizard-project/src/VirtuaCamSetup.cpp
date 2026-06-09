@@ -24,11 +24,14 @@
 #include <chrono>
 #include <cstring>
 #include <cwctype>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <format>
+#include <new>
 #include <optional>
 #include <string>
+#include <mutex>
 #include <vector>
 
 #include "resource.h"
@@ -45,7 +48,6 @@ namespace
 {
     constexpr wchar_t kWindowClass[] = L"VirtuaCamSetupWindow";
     constexpr wchar_t kPreviewClass[] = L"VirtuaCamSetupPreview";
-    constexpr wchar_t kBrokerTextureName[] = L"Local\\VirtuaCast_Broker_Texture";
     constexpr wchar_t kSettingsSubkey[] = L"Software\\VirtuaCam\\Settings";
     constexpr wchar_t kWatcherServiceName[] = L"VirtuaCamWatcher";
 
@@ -58,6 +60,8 @@ namespace
     constexpr int IDC_UNINSTALL = 1006;
     constexpr int IDC_DEBUG = 1007;
     constexpr int IDC_OK = 1008;
+    constexpr UINT WM_APP_OPERATION_DONE = WM_APP + 1;
+    constexpr UINT_PTR kOperationLogTimerId = 1;
 
     struct CheckResult
     {
@@ -78,7 +82,6 @@ namespace
     {
         bool skipDllRegister = false;
         bool skipCertificateImport = false;
-        bool skipWatcherService = false;
     };
 
     class SourceReaderCallback final : public IMFSourceReaderCallback
@@ -183,6 +186,7 @@ namespace
     HBRUSH g_windowBrush = nullptr;
     HBRUSH g_panelBrush = nullptr;
     std::vector<std::wstring> g_operationLog;
+    std::mutex g_operationLogMutex;
     bool g_debugChecked = false;
     bool g_logMode = false;
     bool g_operationActive = false;
@@ -197,6 +201,13 @@ namespace
     ComPtr<ID3D11SamplerState> g_previewSampler;
     ComPtr<ID3D11ShaderResourceView> g_previewSrv;
     ComPtr<ID3D11Texture2D> g_previewTexture;
+    ComPtr<IMFMediaSource> g_previewMediaSource;
+    ComPtr<IMFSourceReader> g_previewReader;
+    ComPtr<SourceReaderCallback> g_previewCallback;
+    bool g_previewReadPending = false;
+    UINT32 g_previewWidth = 0;
+    UINT32 g_previewHeight = 0;
+    ULONGLONG g_nextPreviewOpenTick = 0;
 
     const char* g_vertexShaderHlsl = R"(
 struct VOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
@@ -513,27 +524,34 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
 
     void WriteInstallLog(const std::wstring& message)
     {
+        std::scoped_lock lock(g_operationLogMutex);
         g_operationLog.push_back(TimestampedLogLine(message));
     }
 
     void BeginOperationLog(const std::wstring& title)
     {
+        std::scoped_lock lock(g_operationLogMutex);
         g_operationLog.clear();
         std::error_code ec;
         std::filesystem::remove(InstallLogPath(), ec);
-        WriteInstallLog(L"============================================================");
-        WriteInstallLog(L" " + title);
-        WriteInstallLog(L"============================================================");
+        g_operationLog.push_back(TimestampedLogLine(L"============================================================"));
+        g_operationLog.push_back(TimestampedLogLine(L" " + title));
+        g_operationLog.push_back(TimestampedLogLine(L"============================================================"));
     }
 
     void FlushOperationLog()
     {
-        if (g_operationLog.empty()) return;
+        std::vector<std::wstring> snapshot;
+        {
+            std::scoped_lock lock(g_operationLogMutex);
+            snapshot = g_operationLog;
+        }
+        if (snapshot.empty()) return;
         std::error_code ec;
         std::filesystem::create_directories(LogDir(), ec);
         std::wofstream stream(InstallLogPath(), std::ios::trunc);
         if (!stream) return;
-        for (const auto& line : g_operationLog) {
+        for (const auto& line : snapshot) {
             stream << line << L"\n";
         }
     }
@@ -670,7 +688,13 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         if (RegGetValueW(key, nullptr, name, RRF_RT_REG_SZ, &type, buffer, &cb) == ERROR_SUCCESS && type == REG_SZ) {
             return true;
         }
-        return RegSetValueExW(key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value), static_cast<DWORD>((wcslen(value) + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
+        if (RegSetValueExW(key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value), static_cast<DWORD>((wcslen(value) + 1) * sizeof(wchar_t))) != ERROR_SUCCESS) {
+            return false;
+        }
+        cb = sizeof(buffer);
+        return RegGetValueW(key, nullptr, name, RRF_RT_REG_SZ, &type, buffer, &cb) == ERROR_SUCCESS &&
+            type == REG_SZ &&
+            wcscmp(buffer, value) == 0;
     }
 
     bool EnsureDwordValue(HKEY key, const wchar_t* name, DWORD value)
@@ -681,7 +705,13 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         if (RegGetValueW(key, nullptr, name, RRF_RT_REG_DWORD, &type, &existing, &cb) == ERROR_SUCCESS && type == REG_DWORD) {
             return true;
         }
-        return RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value)) == ERROR_SUCCESS;
+        if (RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value)) != ERROR_SUCCESS) {
+            return false;
+        }
+        cb = sizeof(existing);
+        return RegGetValueW(key, nullptr, name, RRF_RT_REG_DWORD, &type, &existing, &cb) == ERROR_SUCCESS &&
+            type == REG_DWORD &&
+            existing == value;
     }
 
     bool ReadSettingsDword(const wchar_t* name, DWORD defaultValue)
@@ -704,14 +734,22 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             0,
             nullptr,
             REG_OPTION_NON_VOLATILE,
-            KEY_SET_VALUE,
+            KEY_SET_VALUE | KEY_QUERY_VALUE,
             nullptr,
             &key,
             nullptr);
         if (status != ERROR_SUCCESS) {
             return false;
         }
-        const bool ok = RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value)) == ERROR_SUCCESS;
+        bool ok = RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value)) == ERROR_SUCCESS;
+        if (ok) {
+            DWORD verified = 0;
+            DWORD type = 0;
+            DWORD cb = sizeof(verified);
+            ok = RegGetValueW(key, nullptr, name, RRF_RT_REG_DWORD, &type, &verified, &cb) == ERROR_SUCCESS &&
+                type == REG_DWORD &&
+                verified == value;
+        }
         RegCloseKey(key);
         return ok;
     }
@@ -1194,7 +1232,6 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         SetupOptions options;
         options.skipDllRegister = HasArg(args, L"--skip-dll-register") || HasArg(args, L"/skip-dll-register");
         options.skipCertificateImport = HasArg(args, L"--skip-certificate-import") || HasArg(args, L"/skip-certificate-import");
-        options.skipWatcherService = HasArg(args, L"--skip-watcher-service") || HasArg(args, L"/skip-watcher-service");
         return options;
     }
 
@@ -1612,14 +1649,8 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         DeleteRegistryValue(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", L"VirtuaCamProcess");
         DeleteRegistryValue(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", L"VirtuaCam");
 
-        if (options.skipWatcherService) {
-            std::wstring watcherDetail;
-            RemoveWatcherService(watcherDetail);
-            LogSuccess(L"Configured HKLM\\SOFTWARE\\VirtuaCam without watcher service startup");
-        } else {
-            if (!ConfigureWatcherService(processExe, result.detail)) return result;
-            LogSuccess(L"Configured HKLM\\SOFTWARE\\VirtuaCam and watcher service startup");
-        }
+        if (!ConfigureWatcherService(processExe, result.detail)) return result;
+        LogSuccess(L"Configured HKLM\\SOFTWARE\\VirtuaCam and watcher service startup");
 
         result.success = true;
         result.detail = L"Drivers and software installed";
@@ -1858,6 +1889,16 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
 
     void CleanupPreviewD3D()
     {
+        if (g_previewReader) {
+            (void)g_previewReader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+        }
+        g_previewReadPending = false;
+        g_previewCallback.Reset();
+        g_previewReader.Reset();
+        if (g_previewMediaSource) {
+            g_previewMediaSource->Shutdown();
+        }
+        g_previewMediaSource.Reset();
         if (g_previewContext) g_previewContext->ClearState();
         g_previewSrv.Reset();
         g_previewTexture.Reset();
@@ -1868,6 +1909,178 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         g_previewSwapChain.Reset();
         g_previewContext.Reset();
         g_previewDevice.Reset();
+    }
+
+    void ResetDriverPreviewReader()
+    {
+        if (g_previewReader) {
+            (void)g_previewReader->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+        }
+        g_previewReadPending = false;
+        g_previewCallback.Reset();
+        g_previewReader.Reset();
+        if (g_previewMediaSource) {
+            g_previewMediaSource->Shutdown();
+        }
+        g_previewMediaSource.Reset();
+        g_nextPreviewOpenTick = GetTickCount64() + 2000;
+    }
+
+    bool RequestDriverPreviewSample()
+    {
+        if (!g_previewReader || !g_previewCallback || g_previewReadPending) {
+            return false;
+        }
+        g_previewCallback->ResetForRead();
+        const HRESULT hr = g_previewReader->ReadSample(
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+            0,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr);
+        g_previewReadPending = SUCCEEDED(hr);
+        if (!g_previewReadPending) {
+            ResetDriverPreviewReader();
+        }
+        return g_previewReadPending;
+    }
+
+    bool EnsureDriverPreviewReader()
+    {
+        if (g_previewReader && g_previewCallback) {
+            return true;
+        }
+
+        const ULONGLONG now = GetTickCount64();
+        if (now < g_nextPreviewOpenTick) {
+            return false;
+        }
+        g_nextPreviewOpenTick = now + 2000;
+
+        ComPtr<IMFMediaSource> source;
+        std::wstring name;
+        CheckResult opened = OpenVirtualCameraSource(source, name);
+        if (!opened.success || !source) {
+            return false;
+        }
+
+        SourceReaderCallback* callbackRaw = new (std::nothrow) SourceReaderCallback();
+        if (!callbackRaw || !callbackRaw->EventHandle()) {
+            if (callbackRaw) {
+                callbackRaw->Release();
+            }
+            source->Shutdown();
+            return false;
+        }
+        ComPtr<SourceReaderCallback> callback;
+        callback.Attach(callbackRaw);
+
+        ComPtr<IMFAttributes> attrs;
+        HRESULT hr = MFCreateAttributes(&attrs, 1);
+        if (SUCCEEDED(hr)) {
+            hr = attrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, static_cast<IMFSourceReaderCallback*>(callbackRaw));
+        }
+
+        ComPtr<IMFSourceReader> reader;
+        if (SUCCEEDED(hr)) {
+            hr = MFCreateSourceReaderFromMediaSource(source.Get(), attrs.Get(), &reader);
+        }
+        if (SUCCEEDED(hr)) {
+            reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
+            hr = reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE);
+        }
+
+        ComPtr<IMFMediaType> requestedType;
+        if (SUCCEEDED(hr)) {
+            hr = MFCreateMediaType(&requestedType);
+        }
+        if (SUCCEEDED(hr)) {
+            requestedType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+            requestedType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+            requestedType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+            hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, requestedType.Get());
+        }
+
+        ComPtr<IMFMediaType> currentType;
+        GUID subtype = {};
+        UINT32 width = 0;
+        UINT32 height = 0;
+        if (SUCCEEDED(hr)) {
+            hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &currentType);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = currentType->GetGUID(MF_MT_SUBTYPE, &subtype);
+        }
+        if (SUCCEEDED(hr)) {
+            hr = MFGetAttributeSize(currentType.Get(), MF_MT_FRAME_SIZE, &width, &height);
+        }
+        if (FAILED(hr) || subtype != MFVideoFormat_RGB32 || width == 0 || height == 0) {
+            source->Shutdown();
+            return false;
+        }
+
+        g_previewMediaSource = source;
+        g_previewReader = reader;
+        g_previewCallback = callback;
+        g_previewWidth = width;
+        g_previewHeight = height;
+        g_previewReadPending = false;
+        return RequestDriverPreviewSample();
+    }
+
+    bool UpdatePreviewTextureFromSample(IMFSample* sample)
+    {
+        if (!sample || !g_previewDevice || !g_previewContext || g_previewWidth == 0 || g_previewHeight == 0) {
+            return false;
+        }
+
+        ComPtr<IMFMediaBuffer> buffer;
+        HRESULT hr = sample->ConvertToContiguousBuffer(&buffer);
+        if (FAILED(hr)) return false;
+
+        BYTE* data = nullptr;
+        DWORD maxLen = 0;
+        DWORD currentLen = 0;
+        hr = buffer->Lock(&data, &maxLen, &currentLen);
+        if (FAILED(hr)) return false;
+
+        const UINT stride = g_previewWidth * 4;
+        const UINT required = stride * g_previewHeight;
+        const bool enoughData = currentLen >= required;
+        if (enoughData) {
+            bool recreate = !g_previewTexture;
+            if (g_previewTexture) {
+                D3D11_TEXTURE2D_DESC existing = {};
+                g_previewTexture->GetDesc(&existing);
+                recreate = existing.Width != g_previewWidth || existing.Height != g_previewHeight;
+            }
+
+            if (recreate) {
+                g_previewSrv.Reset();
+                g_previewTexture.Reset();
+                D3D11_TEXTURE2D_DESC desc = {};
+                desc.Width = g_previewWidth;
+                desc.Height = g_previewHeight;
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                desc.SampleDesc.Count = 1;
+                desc.Usage = D3D11_USAGE_DEFAULT;
+                desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                D3D11_SUBRESOURCE_DATA init = {};
+                init.pSysMem = data;
+                init.SysMemPitch = stride;
+                if (SUCCEEDED(g_previewDevice->CreateTexture2D(&desc, &init, &g_previewTexture))) {
+                    (void)g_previewDevice->CreateShaderResourceView(g_previewTexture.Get(), nullptr, &g_previewSrv);
+                }
+            } else {
+                g_previewContext->UpdateSubresource(g_previewTexture.Get(), 0, nullptr, data, stride, 0);
+            }
+        }
+
+        buffer->Unlock();
+        return enoughData;
     }
 
     void ResizePreviewBackbuffer(HWND hwnd)
@@ -1889,17 +2102,30 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
     {
         if (!g_preview || !g_previewDevice || !g_previewContext || !g_previewRtv) return;
 
-        if (!g_previewSrv) {
-            ComPtr<ID3D11Device1> device1;
-            if (SUCCEEDED(g_previewDevice.As(&device1))) {
-                HRESULT openHr = device1->OpenSharedResourceByName(
-                    kBrokerTextureName,
-                    DXGI_SHARED_RESOURCE_READ,
-                    __uuidof(ID3D11Texture2D),
-                    reinterpret_cast<void**>(g_previewTexture.GetAddressOf()));
-                if (SUCCEEDED(openHr) && g_previewTexture) {
-                    (void)g_previewDevice->CreateShaderResourceView(g_previewTexture.Get(), nullptr, &g_previewSrv);
-                }
+        if (EnsureDriverPreviewReader() && g_previewReadPending && g_previewCallback &&
+            WaitForSingleObject(g_previewCallback->EventHandle(), 0) == WAIT_OBJECT_0) {
+            g_previewReadPending = false;
+            if (SUCCEEDED(g_previewCallback->Status()) &&
+                (g_previewCallback->Flags() & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM)) == 0) {
+                (void)UpdatePreviewTextureFromSample(g_previewCallback->Sample());
+                (void)RequestDriverPreviewSample();
+            } else {
+                ResetDriverPreviewReader();
+            }
+        } else if (g_previewReader && !g_previewReadPending) {
+            (void)RequestDriverPreviewSample();
+        }
+
+        if (g_previewReader && g_previewReadPending && g_previewCallback &&
+            WaitForSingleObject(g_previewCallback->EventHandle(), 0) == WAIT_FAILED) {
+            ResetDriverPreviewReader();
+        }
+
+        if (!g_previewReader && g_previewSrv) {
+            const CheckResult camera = CheckVirtualCameraEnumeration();
+            if (!camera.success) {
+                g_previewSrv.Reset();
+                g_previewTexture.Reset();
             }
         }
 
@@ -1958,20 +2184,20 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         const int previewWidth = std::max(1, static_cast<int>(rc.right) - pad * 2);
         const int previewHeight = std::max(1, previewBottom - pad);
         MoveWindow(g_preview, pad, pad, previewWidth, previewHeight, TRUE);
-        MoveWindow(g_status, pad, pad, previewWidth, 24, TRUE);
-        MoveWindow(g_checks, pad, pad + 30, previewWidth, std::max(1, previewHeight - 30), TRUE);
+        MoveWindow(g_status, pad, pad, previewWidth, 1, TRUE);
+        MoveWindow(g_checks, pad, pad, previewWidth, previewHeight, TRUE);
         MoveWindow(g_debug, pad, debugY, std::min(280, std::max(1, static_cast<int>(rc.right) - pad * 2)), debugH, TRUE);
         ShowWindow(g_preview, g_logMode ? SW_HIDE : SW_SHOW);
-        ShowWindow(g_status, g_logMode ? SW_SHOW : SW_HIDE);
+        ShowWindow(g_status, SW_HIDE);
         ShowWindow(g_checks, g_logMode ? SW_SHOW : SW_HIDE);
         ShowWindow(g_debug, (g_operationActive || g_waitingForOk) ? SW_HIDE : SW_SHOW);
 
         constexpr int buttonGap = 8;
         const bool showOkOnly = g_operationActive || g_waitingForOk;
-        const int buttonCount = showOkOnly ? 1 : 4;
+        const int buttonCount = showOkOnly ? 1 : 3;
         int x = std::max(pad, static_cast<int>(rc.right) - pad - (buttonW * buttonCount) - (buttonGap * (buttonCount - 1)));
         const int okX = x;
-        for (int id : { IDC_INSTALL, IDC_UNINSTALL, IDC_LAUNCH, IDC_CLOSE }) {
+        for (int id : { IDC_LAUNCH, IDC_INSTALL, IDC_UNINSTALL }) {
             HWND child = GetDlgItem(hwnd, id);
             MoveWindow(child, showOkOnly ? okX : x, buttonY, buttonW, buttonH, TRUE);
             ShowWindow(child, showOkOnly ? SW_HIDE : SW_SHOW);
@@ -2004,8 +2230,13 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
 
     void PopulateOperationLog()
     {
+        std::vector<std::wstring> snapshot;
+        {
+            std::scoped_lock lock(g_operationLogMutex);
+            snapshot = g_operationLog;
+        }
         ClearChecks();
-        for (const auto& line : g_operationLog) {
+        for (const auto& line : snapshot) {
             AddLogLine(line);
         }
     }
@@ -2089,10 +2320,81 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             return result;
         }
         if (sei.hProcess) CloseHandle(sei.hProcess);
-        LogSuccess(L"VirtuaCam launched without --driver");
-        result.success = true;
-        result.detail = L"Started " + file;
+
+        const ULONGLONG deadline = GetTickCount64() + 8000;
+        while (GetTickCount64() < deadline) {
+            if (IsVirtuaCamRunning()) {
+                LogSuccess(L"VirtuaCam launched without --driver");
+                result.success = true;
+                result.detail = L"Started " + file;
+                return result;
+            }
+            Sleep(250);
+        }
+
+        result.detail = L"VirtuaCam launch command returned but VirtuaCam.exe was not observed running.";
+        LogInfo(result.detail);
         return result;
+    }
+
+    struct UiActionWork
+    {
+        std::wstring mode;
+        SetupOptions options;
+    };
+
+    std::wstring OperationStartedText(const std::wstring& mode)
+    {
+        if (mode == L"install") return L"Install started...";
+        if (mode == L"uninstall") return L"Uninstall started...";
+        return L"Launch started...";
+    }
+
+    std::wstring OperationCompleteText(const std::wstring& mode, bool success)
+    {
+        if (mode == L"install") return success ? L"Install complete. Press OK to continue." : L"Install failed. Press OK to continue.";
+        if (mode == L"uninstall") return success ? L"Uninstall complete. Press OK to continue." : L"Uninstall failed. Press OK to continue.";
+        return success ? L"Launch complete. Press OK to continue." : L"Launch failed. Press OK to continue.";
+    }
+
+    DWORD WINAPI UiActionWorkerProc(LPVOID context)
+    {
+        UiActionWork* work = static_cast<UiActionWork*>(context);
+        RunResult* result = new (std::nothrow) RunResult();
+        if (!result) {
+            delete work;
+            return ERROR_OUTOFMEMORY;
+        }
+
+        try {
+            if (work->mode == L"launch") {
+                result->mode = work->mode;
+                CheckResult launch = LaunchVirtuaCamInteractive();
+                result->success = launch.success;
+                result->checks.push_back(launch);
+            } else {
+                *result = RunMode(work->mode, {}, work->options);
+            }
+        } catch (const std::exception& ex) {
+            result->mode = work->mode;
+            result->success = false;
+            result->checks.push_back({ L"Unhandled setup error", false, Utf8ToWide(ex.what()) });
+            WriteInstallLog(Utf8ToWide(std::string("Unhandled setup error: ") + ex.what()));
+        } catch (...) {
+            result->mode = work->mode;
+            result->success = false;
+            result->checks.push_back({ L"Unhandled setup error", false, L"Unknown exception" });
+            WriteInstallLog(L"Unhandled setup error: unknown exception");
+        }
+
+        HWND hwnd = g_hwnd;
+        if (hwnd && PostMessageW(hwnd, WM_APP_OPERATION_DONE, 0, reinterpret_cast<LPARAM>(result))) {
+            result = nullptr;
+        } else {
+            delete result;
+        }
+        delete work;
+        return 0;
     }
 
     void RunUiAction(const std::wstring& mode)
@@ -2100,31 +2402,36 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         ClearChecks();
         SetLogMode(true);
         if ((mode == L"install" || mode == L"uninstall") && !IsAdministrator()) {
-            if (!RelaunchElevated(mode == L"install" ? L"--install" : L"--uninstall")) {
-                SetStatusText(L"Elevation was cancelled or failed.");
-            }
+            BeginOperationLog(mode == L"install" ? L"Install VirtuaCam" : L"Uninstall VirtuaCam");
+            SetOperationUi(true, false);
+            AddLogLine(L"Administrator approval required. Windows will show the UAC prompt.");
+            const bool relaunched = RelaunchElevated(mode == L"install" ? L"--install" : L"--uninstall");
+            AddLogLine(relaunched ? L"Elevated setup started. Press OK to continue in this window." : L"Elevation was cancelled or failed. Press OK to continue.");
+            SetStatusText(relaunched ? L"Elevated setup started." : L"Elevation was cancelled or failed.");
+            SetOperationUi(false, true);
             return;
         }
         SetOperationUi(true, false);
-        AddLogLine(mode == L"install" ? L"Install started..." : mode == L"uninstall" ? L"Uninstall started..." : L"Launch started...");
-        const SetupOptions options;
-        RunResult result;
-        if (mode == L"launch") {
-            result.mode = mode;
-            result.success = true;
-            CheckResult launch = LaunchVirtuaCamInteractive();
-            result.success = launch.success;
-            result.checks.push_back(launch);
-            SetStatusText(launch.success ? L"VirtuaCam launched." : L"VirtuaCam launch failed.");
-        } else {
-            result = RunMode(mode, {}, options);
+        AddLogLine(OperationStartedText(mode));
+        SetStatusText(OperationStartedText(mode));
+
+        auto* work = new (std::nothrow) UiActionWork{ mode, SetupOptions{} };
+        if (!work) {
+            AddLogLine(L"Failed to allocate setup operation.");
+            SetStatusText(L"Setup operation could not start.");
+            SetOperationUi(false, true);
+            return;
         }
-        PopulateOperationLog();
-        for (const auto& check : result.checks) {
-            AddCheckLine(check);
+        HANDLE thread = CreateThread(nullptr, 0, UiActionWorkerProc, work, 0, nullptr);
+        if (!thread) {
+            delete work;
+            AddLogLine(std::format(L"Failed to start setup worker: {}", GetLastError()));
+            SetStatusText(L"Setup operation could not start.");
+            SetOperationUi(false, true);
+            return;
         }
-        AddLogLine(result.success ? L"Done. Click OK to continue." : L"Failed. Click OK to continue.");
-        SetOperationUi(false, true);
+        CloseHandle(thread);
+        SetTimer(g_hwnd, kOperationLogTimerId, 250, nullptr);
     }
 
     LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -2145,7 +2452,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
                 nullptr);
             g_status = CreateWindowW(
                 L"STATIC",
-                L"Preview ready. Install, uninstall, or launch VirtuaCam.",
+                L"",
                 WS_CHILD | SS_LEFT,
                 0, 0, 0, 0,
                 hwnd,
@@ -2161,10 +2468,9 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
                 ControlId(IDC_CHECKS),
                 g_instance,
                 nullptr);
+            CreateWindowW(L"BUTTON", L"&Launch", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_LAUNCH), g_instance, nullptr);
             CreateWindowW(L"BUTTON", L"&Install", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_INSTALL), g_instance, nullptr);
             CreateWindowW(L"BUTTON", L"&Uninstall", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_UNINSTALL), g_instance, nullptr);
-            CreateWindowW(L"BUTTON", L"&Launch", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_LAUNCH), g_instance, nullptr);
-            CreateWindowW(L"BUTTON", L"E&xit", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd, ControlId(IDC_CLOSE), g_instance, nullptr);
             g_ok = CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON | WS_DISABLED, 0, 0, 0, 0, hwnd, ControlId(IDC_OK), g_instance, nullptr);
             g_debug = CreateWindowW(
                 L"BUTTON",
@@ -2176,7 +2482,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
                 g_instance,
                 nullptr);
             g_debugChecked = ReadSettingsDword(L"StartDebugMode", 0);
-            for (int id : { IDC_STATUS, IDC_CHECKS, IDC_INSTALL, IDC_UNINSTALL, IDC_LAUNCH, IDC_CLOSE, IDC_DEBUG, IDC_OK }) {
+            for (int id : { IDC_STATUS, IDC_CHECKS, IDC_LAUNCH, IDC_INSTALL, IDC_UNINSTALL, IDC_DEBUG, IDC_OK }) {
                 HWND child = GetDlgItem(hwnd, id);
                 if (child && g_uiFont) {
                     SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
@@ -2196,11 +2502,38 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
         case WM_SIZE:
             ResizeControls(hwnd);
             return 0;
+        case WM_TIMER:
+            if (wParam == kOperationLogTimerId && g_operationActive) {
+                PopulateOperationLog();
+                return 0;
+            }
+            break;
+        case WM_APP_OPERATION_DONE:
+        {
+            KillTimer(hwnd, kOperationLogTimerId);
+            RunResult* result = reinterpret_cast<RunResult*>(lParam);
+            if (!result) {
+                SetStatusText(L"Setup operation failed.");
+                AddLogLine(L"Setup operation failed before reporting a result.");
+                SetOperationUi(false, true);
+                return 0;
+            }
+
+            PopulateOperationLog();
+            for (const auto& check : result->checks) {
+                AddCheckLine(check);
+            }
+            SetStatusText(result->success ? OperationCompleteText(result->mode, true) : OperationCompleteText(result->mode, false));
+            AddLogLine(OperationCompleteText(result->mode, result->success));
+            SetOperationUi(false, true);
+            delete result;
+            return 0;
+        }
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
+            case IDC_LAUNCH: RunUiAction(L"launch"); return 0;
             case IDC_INSTALL: RunUiAction(L"install"); return 0;
             case IDC_UNINSTALL: RunUiAction(L"uninstall"); return 0;
-            case IDC_LAUNCH: RunUiAction(L"launch"); return 0;
             case IDC_CLOSE: DestroyWindow(hwnd); return 0;
             case IDC_OK:
                 g_waitingForOk = false;
@@ -2283,6 +2616,8 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_Target {
             DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
+            KillTimer(hwnd, kOperationLogTimerId);
+            g_hwnd = nullptr;
             PostQuitMessage(0);
             return 0;
         default:

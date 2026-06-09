@@ -185,7 +185,7 @@ If vHLK fails:
 2. Export failed names and latest status.
 3. If driver change is needed, read PDF table of contents or first pages, then relevant PDF section.
 4. If failure count reached 2, search web for each failed test plus driver/API terms.
-5. Record sources and fix rationale under `implementation\` or `docs\` as appropriate.
+5. Record durable sources and fix rationale in the wiki or tracked docs. Use `implementation\` only as temporary ignored scratch space.
 6. Patch.
 7. Return to Stage 1 and Stage 2.
 8. Retest the failed vHLK set first.
@@ -222,7 +222,7 @@ Pass criteria:
 
 - `run-vhlk-tests.ps1` fresh-starts `vhlk` and `driver-test`, installs staged `output\` into DUT, then queues the full project.
 - Final vHLK run completes without failed status.
-- Any impossible lab/tool blocker is documented under `docs\` and skipped only on the next failed-only run.
+- Any impossible lab/tool blocker is documented in `docs\vhlk-blocked-test-names.txt` and skipped only through the blocker-filter path.
 
 For a full rerun that must skip documented blockers, export all project test names, filter `docs\vhlk-blocked-test-names.txt`, then pass the filtered list to `run-vhlk-tests.ps1`. Also pass the blocker list so stale queued/running blocked results are canceled and cleaned but not re-queued.
 

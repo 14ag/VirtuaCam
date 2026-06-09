@@ -63,6 +63,7 @@ static bool g_startDebugMode = false;
 static constexpr ULONGLONG kAppFrameIntervalMs = 33;
 static constexpr ULONGLONG kDefaultFeedRefreshMs = 1000;
 static constexpr ULONGLONG kDriverStartInactiveExitMs = 5ull * 1000ull;
+static constexpr ULONGLONG kAudioDeviceRefreshMs = 2000;
 static constexpr DWORD kProducerGracefulStopMs = 3000;
 
 const wchar_t* SourceModeToString(SourceMode mode)
@@ -92,6 +93,8 @@ const wchar_t* PipPositionToString(PipPosition pos)
 
 bool IsRunningAsAdmin();
 bool GetDriverBridgeStatus();
+std::wstring GetRuntimeDriverStatusText();
+std::wstring GetRuntimeAudioStatusText();
 HRESULT LoadBroker();
 void ShutdownSystem();
 void RequestDriverDisconnect();
@@ -102,6 +105,7 @@ void ForceDefaultBrokerFrameToDriver(const wchar_t* reason);
 void LoadSettings();
 void SaveSettings();
 void InitializeAudio();
+void RefreshAudioDevicesIfChanged(ULONGLONG now);
 void SelectAudioForCameraPassthrough(int cameraIndex);
 void SetSourceFileMode(SourceMode newMode, const std::wstring& path);
 void ApplySavedAudioSelection();
@@ -326,6 +330,45 @@ void SetAspectRatioMode(AspectRatioMode mode)
 const VirtuaCam::Discovery* GetGlobalDiscovery() { return g_discovery.get(); }
 bool GetDriverBridgeStatus() { return g_driverBridge && g_driverBridge->IsDriverInUse(); }
 
+std::wstring GetRuntimeDriverStatusText()
+{
+    if (!g_driverBridge) {
+        return L"not initialized";
+    }
+    std::wstring text = g_driverBridge->IsDriverInUse()
+        ? L"active camera client"
+        : (g_driverBridge->IsConnected() ? L"upload path connected, no active camera client" : L"idle, warming, or unavailable");
+    if (!g_driverBridge->GetLastError().empty()) {
+        text += L"; last error: " + g_driverBridge->GetLastError();
+    }
+    return text;
+}
+
+std::wstring GetRuntimeAudioStatusText()
+{
+    if (!g_audioCapture) {
+        return L"disabled or unavailable";
+    }
+    const auto& names = g_audioCapture->GetCaptureDeviceNames();
+    const int selectedId = UI_GetCurrentAudioDeviceId();
+    std::wstring selected = L"None";
+    if (selectedId == ID_AUDIO_DEVICE_AUTO) {
+        selected = L"Auto";
+    } else if (selectedId >= ID_AUDIO_CAPTURE_FIRST) {
+        const size_t index = static_cast<size_t>(selectedId - ID_AUDIO_CAPTURE_FIRST);
+        if (index < names.size()) {
+            selected = names[index];
+        } else {
+            selected = L"Unavailable";
+        }
+    }
+    return std::format(
+        L"{}; devices={}; saved={}",
+        selected,
+        names.size(),
+        g_audioCaptureDeviceName.empty() ? L"None" : g_audioCaptureDeviceName);
+}
+
 bool HasLiveProducerProcess()
 {
     for (const auto& [key, pi] : g_producerProcesses) {
@@ -547,6 +590,57 @@ void InitializeAudio()
         SelectAudioMenuId(id, true, L"menu");
     });
     ApplySavedAudioSelection();
+}
+
+void RefreshAudioDevicesIfChanged(ULONGLONG now)
+{
+    static ULONGLONG s_nextAudioRefreshTick = 0;
+    static UINT s_audioRefreshFailureCount = 0;
+
+    if (!g_audioCapture || (s_nextAudioRefreshTick != 0 && now < s_nextAudioRefreshTick)) {
+        return;
+    }
+    s_nextAudioRefreshTick = now + kAudioDeviceRefreshMs;
+
+    const std::vector<std::wstring> previousNames = g_audioCapture->GetCaptureDeviceNames();
+    const std::wstring previousSelection = g_audioCaptureDeviceName;
+    HRESULT hr = g_audioCapture->EnumerateCaptureDevices();
+    if (FAILED(hr)) {
+        ++s_audioRefreshFailureCount;
+        if (s_audioRefreshFailureCount == 1 || (s_audioRefreshFailureCount % 30) == 0) {
+            VirtuaCamLog::LogHr(L"Audio capture device refresh failed", hr);
+        }
+        return;
+    }
+    s_audioRefreshFailureCount = 0;
+
+    const auto& names = g_audioCapture->GetCaptureDeviceNames();
+    if (names == previousNames) {
+        return;
+    }
+
+    UI_UpdateAudioDeviceLists(names);
+    VirtuaCamLog::LogLine(std::format(
+        L"Audio device list changed: previous={} current={}",
+        previousNames.size(),
+        names.size()));
+
+    if (g_audioRoutingMode == AudioRoutingMode::Manual) {
+        const int index = FindAudioCaptureDeviceByName(previousSelection);
+        if (index >= 0) {
+            SelectAudioCaptureDevice(index, false, L"audio device refresh");
+        } else {
+            g_audioCapture->StopCapture();
+            UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_NONE);
+            VirtuaCamLog::LogLine(std::format(
+                L"Selected audio source unavailable after device refresh: {}",
+                previousSelection.empty() ? L"None" : previousSelection));
+        }
+        return;
+    }
+
+    ApplySavedAudioSelection();
+    UI_SetCurrentAudioDeviceId(ID_AUDIO_DEVICE_AUTO);
 }
 
 void SelectAudioForCameraPassthrough(int cameraIndex)
@@ -1021,6 +1115,7 @@ void OnIdle() {
     static bool s_lastDriverActive = false;
     static ULONGLONG s_driverInactiveSinceTick = 0;
     const ULONGLONG now = GetTickCount64();
+    RefreshAudioDevicesIfChanged(now);
     const ULONGLONG frameIntervalMs = (s_lastDriverActive && s_lastBrokerState == BrokerState::Connected)
         ? kAppFrameIntervalMs
         : kDefaultFeedRefreshMs;

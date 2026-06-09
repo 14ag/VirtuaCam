@@ -176,7 +176,7 @@ Run only after failed-only vHLK, local gate, and `driver-test` gate pass.
 Pass criteria:
 
 - Full vHLK run completes without failed status.
-- Impossible lab or tool blockers are documented under `docs\` before any skip is used in a later failed-only run.
+- Impossible lab or tool blockers are documented in `docs\vhlk-blocked-test-names.txt` before any skip is used. The current blocked manual item is `Camera Driver Usage Indicator Manual Test`.
 
 ## Stage 6 - Documentation Assertion
 

@@ -10,6 +10,7 @@
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <commdlg.h>
+#include <cwctype>
 #include <filesystem>
 #include <map>
 
@@ -28,6 +29,9 @@ extern void SetSourceFileMode(SourceMode newMode, const std::wstring& path);
 
 extern const SourceState& GetPipSourceState(PipPosition pos);
 extern void SetPipSource(PipPosition pos, SourceMode newMode, DWORD_PTR context);
+extern const wchar_t* SourceModeToString(SourceMode mode);
+extern std::wstring GetRuntimeDriverStatusText();
+extern std::wstring GetRuntimeAudioStatusText();
 
 extern bool GetPipTlEnabled();
 extern bool GetPipTrEnabled();
@@ -43,6 +47,28 @@ namespace
 {
     const GUID kDriverPropertySet = { 0xcb043957, 0x7b35, 0x456e, { 0x9b, 0x61, 0x55, 0x13, 0x93, 0x0f, 0x4d, 0x8e } };
     constexpr ULONG kDriverPropertyId = 0;
+
+    bool ContainsNoCase(const std::wstring& value, const wchar_t* needle)
+    {
+        if (!needle || !*needle) return true;
+        std::wstring haystack = value;
+        std::wstring target = needle;
+        std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(towlower(ch));
+        });
+        std::transform(target.begin(), target.end(), target.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(towlower(ch));
+        });
+        return haystack.find(target) != std::wstring::npos;
+    }
+
+    bool IsVirtuaCamVideoSource(const std::wstring& name, const std::wstring& link)
+    {
+        return ContainsNoCase(name, L"VirtuaCam") ||
+            ContainsNoCase(name, L"Virtual Camera Driver") ||
+            ContainsNoCase(link, L"VirtuaCam") ||
+            ContainsNoCase(link, L"avshws");
+    }
 
     std::filesystem::path RepoRootFromExeDir()
     {
@@ -193,9 +219,7 @@ std::vector<std::wstring> EnumerateCameras() {
 
         std::wstring name = friendlyName.get() ? friendlyName.get() : L"Video Capture Device";
         std::wstring link = symbolicLink.get() ? symbolicLink.get() : L"";
-        if (name.find(L"VirtuaCam") != std::wstring::npos ||
-            name.find(L"Virtual Camera Driver") != std::wstring::npos ||
-            link.find(L"VirtuaCam") != std::wstring::npos) {
+        if (IsVirtuaCamVideoSource(name, link)) {
             continue;
         }
 
@@ -224,6 +248,8 @@ std::vector<std::wstring> g_cameraDeviceNamesCache;
 static int g_currentAudioDevice = ID_AUDIO_DEVICE_NONE;
 static bool g_debugUiEnabled = false;
 static std::function<void()> g_onIdle;
+static BrokerState g_lastBrokerState = (BrokerState)-1;
+static bool g_lastDriverConnected = false;
 
 static std::map<UINT, HWND> g_mainSourceWindowMap;
 static std::map<UINT, HWND> g_pipTlWindowMap;
@@ -282,6 +308,9 @@ LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 void AddTrayIcon(HWND hwnd, bool add);
 void UpdateTrayTooltip(BrokerState brokerState, bool driverConnected);
+std::wstring BrokerStateText(BrokerState brokerState);
+std::wstring SourceSummaryText(const SourceState& state, BrokerState brokerState);
+std::wstring BuildSupportStatusText(BrokerState brokerState, bool driverConnected);
 void ShowContextMenu(HWND hwnd);
 void HandleMenuCommand(UINT id);
 ATOM MyRegisterClass(HINSTANCE instance);
@@ -449,8 +478,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if (wParam == 1) InformBroker();
         break;
     case WM_APP_TRAY_MSG:
-        if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) ShowContextMenu(hwnd);
-        else if (lParam == WM_LBUTTONDBLCLK) CreatePreviewWindow();
+        if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU ||
+            lParam == WM_LBUTTONUP || lParam == NIN_SELECT || lParam == WM_LBUTTONDBLCLK) {
+            ShowContextMenu(hwnd);
+        }
         break;
     case WM_APP_MENU_COMMAND:
     {
@@ -482,7 +513,13 @@ void HandleMenuCommand(UINT id)
     }
 
     if (id == ID_TRAY_PREVIEW_WINDOW) CreatePreviewWindow();
-    else if (id == ID_TRAY_ABOUT) DialogBox(g_instance, MAKEINTRESOURCE(IDD_ABOUTBOX), nullptr, About);
+    else if (id == ID_TRAY_ABOUT) {
+        MessageBoxW(g_hMainWnd, BuildSupportStatusText(g_lastBrokerState, g_lastDriverConnected).c_str(), L"About VirtuaCam", MB_OK | MB_ICONINFORMATION);
+    }
+    else if (id == ID_TRAY_OPEN_LOGS) {
+        const std::filesystem::path logPath = VirtuaCamLog::GetLogPath();
+        ShellOpenPath(logPath.empty() ? std::filesystem::path(VirtuaCamLog::GetExeDir()) : logPath.parent_path());
+    }
     else if (id == ID_TRAY_EXIT) {
         RequestDriverDisconnect();
         DestroyWindow(g_hMainWnd);
@@ -596,6 +633,7 @@ HMENU BuildMainVideoSourceSubMenu(
     AddNativeMenuItem(subMenu, L"Off", ID_SOURCE_OFF, state.mode == SourceMode::Off);
     AddNativeSeparator(subMenu);
 
+    AddNativeMenuItem(subMenu, L"Windows and Games", 0, false, false);
     for (size_t i = 0; i < windows.size() && i < (ID_SOURCE_DISCOVERED_FIRST - ID_SOURCE_WINDOW_FIRST); ++i) {
         UINT menuId = ID_SOURCE_WINDOW_FIRST + (UINT)i;
         g_mainSourceWindowMap[menuId] = windows[i].hwnd;
@@ -605,6 +643,7 @@ HMENU BuildMainVideoSourceSubMenu(
     }
 
     AddNativeSeparator(subMenu);
+    AddNativeMenuItem(subMenu, L"Displays", 0, false, false);
     for (size_t i = 0; i < displays.size() && i < 100; ++i) {
         std::wstring name = displays[i].name;
         if (name.length() > 48) name = name.substr(0, 45) + L"...";
@@ -612,6 +651,7 @@ HMENU BuildMainVideoSourceSubMenu(
     }
 
     AddNativeSeparator(subMenu);
+    AddNativeMenuItem(subMenu, L"Video Capture Devices", 0, false, false);
     for (size_t i = 0; i < cameras.size() && i < (ID_SOURCE_DISPLAY_FIRST - ID_SOURCE_CAMERA_FIRST); ++i) {
         std::wstring name = cameras[i];
         if (name.length() > 48) name = name.substr(0, 45) + L"...";
@@ -619,12 +659,14 @@ HMENU BuildMainVideoSourceSubMenu(
     }
 
     AddNativeSeparator(subMenu);
+    AddNativeMenuItem(subMenu, L"Files", 0, false, false);
     AddNativeMenuItem(subMenu, L"Image...", ID_SOURCE_IMAGE_FILE, state.mode == SourceMode::Image);
     AddNativeMenuItem(subMenu, L"Video...", ID_SOURCE_VIDEO_FILE, state.mode == SourceMode::Video);
 
     const auto* discovery = GetGlobalDiscovery();
     if (discovery && !discovery->GetDiscoveredStreams().empty()) {
         AddNativeSeparator(subMenu);
+        AddNativeMenuItem(subMenu, L"DirectPort Streams", 0, false, false);
         size_t count = 0;
         for (size_t i = 0; i < discovery->GetDiscoveredStreams().size() && i < (ID_SOURCE_IMAGE_FILE - ID_SOURCE_DISCOVERED_FIRST); ++i) {
             const auto& stream = discovery->GetDiscoveredStreams()[i];
@@ -688,6 +730,7 @@ HMENU BuildSourceSubMenu(
     AddNativeSeparator(subMenu);
 
     if (!cameras.empty()) {
+        AddNativeMenuItem(subMenu, L"Video Capture Devices", 0, false, false);
         for (size_t i = 0; i < cameras.size(); ++i) {
             std::wstring name = cameras[i];
             if (name.length() > 32) name = name.substr(0, 29) + L"...";
@@ -697,6 +740,7 @@ HMENU BuildSourceSubMenu(
     }
 
     if (!windows.empty()) {
+        AddNativeMenuItem(subMenu, L"Windows and Games", 0, false, false);
         for (size_t i = 0; i < windows.size() && i < (ID_SOURCE_DISCOVERED_FIRST - ID_SOURCE_WINDOW_FIRST); ++i) {
             UINT menuId = id_window_first + (UINT)i;
             (*windowMap)[menuId] = windows[i].hwnd;
@@ -714,8 +758,11 @@ HMENU BuildSourceSubMenu(
         for (size_t i = 0; i < discovery->GetDiscoveredStreams().size() && i < discoveredLimit; ++i) {
             const auto& stream = discovery->GetDiscoveredStreams()[i];
             if (stream.processName != L"VirtuaCamProcess.exe") {
-                if (!separatorAdded && (!windows.empty() || discoveredCount > 0)) {
-                    AddNativeSeparator(subMenu);
+                if (!separatorAdded) {
+                    if (!windows.empty()) {
+                        AddNativeSeparator(subMenu);
+                    }
+                    AddNativeMenuItem(subMenu, L"DirectPort Streams", 0, false, false);
                     separatorAdded = true;
                 }
                 std::wstring label = stream.processName + L" (PID: " + std::to_wstring(stream.processId) + L")";
@@ -808,7 +855,6 @@ void ShowContextMenu(HWND hwnd) {
             }
 
             AddNativeSeparator(advancedMenu);
-            AddNativeMenuItem(advancedMenu, L"Open Logs", ID_ADV_OPEN_LOG_DIR);
             AddNativeMenuItem(advancedMenu, L"Run Host Media Proof", ID_ADV_RUN_HOST_PROOF);
             AddNativeMenuItem(advancedMenu, L"Run VM Verifier Proof", ID_ADV_RUN_VM_VERIFIER_PROOF);
             AddNativeMenuItem(advancedMenu, L"Open Setup", ID_ADV_RUN_SETUP_VERIFY);
@@ -816,6 +862,8 @@ void ShowContextMenu(HWND hwnd) {
         }
     }
 
+    AddNativeSeparator(menu);
+    AddNativeMenuItem(menu, L"Open Logs", ID_TRAY_OPEN_LOGS);
     AddNativeMenuItem(menu, L"About", ID_TRAY_ABOUT);
     AddNativeMenuItem(menu, L"Exit", ID_TRAY_EXIT);
 
@@ -886,39 +934,94 @@ void CreatePreviewWindow() {
 }
 
 void UpdateTelemetry(BrokerState currentState, bool driverConnected) {
-    static BrokerState lastBrokerState = (BrokerState)-1;
-    static bool lastDriverConnected = false;
+    static std::wstring lastSourceText;
     static bool hasState = false;
+    const std::wstring sourceText = SourceSummaryText(GetMainSourceState(), currentState);
 
-    if (!hasState || currentState != lastBrokerState || driverConnected != lastDriverConnected) {
+    if (!hasState ||
+        currentState != g_lastBrokerState ||
+        driverConnected != g_lastDriverConnected ||
+        sourceText != lastSourceText) {
         hasState = true;
-        lastBrokerState = currentState;
-        lastDriverConnected = driverConnected;
+        g_lastBrokerState = currentState;
+        g_lastDriverConnected = driverConnected;
+        lastSourceText = sourceText;
 
         UpdateTrayTooltip(currentState, driverConnected);
     }
 }
 
+std::wstring BrokerStateText(BrokerState brokerState)
+{
+    switch (brokerState) {
+    case BrokerState::Searching: return L"Searching";
+    case BrokerState::Connected: return L"Connected";
+    case BrokerState::Failed: return L"Disconnected";
+    default: return L"Unknown";
+    }
+}
+
+std::wstring SourceSummaryText(const SourceState& state, BrokerState brokerState)
+{
+    if (state.mode == SourceMode::Off) {
+        return L"Off (default feed)";
+    }
+    std::wstring text = SourceModeToString(state.mode);
+    if (state.mode == SourceMode::Camera && state.cameraIndex >= 0) {
+        text += L" #" + std::to_wstring(state.cameraIndex);
+    } else if (state.mode == SourceMode::Display && state.displayIndex >= 0) {
+        text += L" #" + std::to_wstring(state.displayIndex + 1);
+    } else if ((state.mode == SourceMode::Window || state.mode == SourceMode::Discovered) && state.pid != 0) {
+        text += L" PID " + std::to_wstring(state.pid);
+    } else if ((state.mode == SourceMode::Image || state.mode == SourceMode::Video) && !state.filePath.empty()) {
+        text += L" " + std::filesystem::path(state.filePath).filename().wstring();
+    }
+    if (brokerState != BrokerState::Connected) {
+        text += L" (default feed fallback)";
+    }
+    return text;
+}
+
 void UpdateTrayTooltip(BrokerState brokerState, bool driverConnected) {
     if (!g_hMainWnd) return;
 
-    const wchar_t* brokerText = L"Searching";
-    switch (brokerState) {
-    case BrokerState::Searching: brokerText = L"Searching"; break;
-    case BrokerState::Connected: brokerText = L"Connected"; break;
-    case BrokerState::Failed: brokerText = L"Disconnected"; break;
-    }
-
     std::wstring tip = std::format(
-        L"VirtuaCam | Broker: {} | Driver: {}",
-        brokerText,
-        driverConnected ? L"OK" : L"FAIL");
-
+        L"VirtuaCam | Driver: {} | Source: {}",
+        driverConnected ? L"active" : L"idle/offline",
+        SourceSummaryText(GetMainSourceState(), brokerState));
     NOTIFYICONDATA nid = { sizeof(nid) };
+    if (tip.size() >= ARRAYSIZE(nid.szTip)) {
+        tip.resize(ARRAYSIZE(nid.szTip) - 1);
+    }
     nid.hWnd = g_hMainWnd;
     nid.uID = 1;
     nid.uFlags = NIF_TIP;
     wcscpy_s(nid.szTip, tip.c_str());
     Shell_NotifyIcon(NIM_MODIFY, &nid);
+}
+
+std::wstring BuildSupportStatusText(BrokerState brokerState, bool driverConnected)
+{
+    UNREFERENCED_PARAMETER(driverConnected);
+    const std::filesystem::path logPath = VirtuaCamLog::GetLogPath();
+    const std::filesystem::path logDir = logPath.empty()
+        ? std::filesystem::path(VirtuaCamLog::GetExeDir()) / L"logs"
+        : logPath.parent_path();
+    const SourceState& source = GetMainSourceState();
+    return std::format(
+        L"VirtuaCam\n\n"
+        L"Driver: {}\n"
+        L"Broker: {}\n"
+        L"Source: {}\n"
+        L"Audio: {}\n"
+        L"Aspect ratio: {}\n"
+        L"Logs: {}\n\n"
+        L"Use -debug to show advanced proof tools. Open Logs is available from the tray menu.",
+        GetRuntimeDriverStatusText(),
+        BrokerStateText(brokerState),
+        SourceSummaryText(source, brokerState),
+        GetRuntimeAudioStatusText(),
+        VirtuaCamConfig::AspectRatioName(GetAspectRatioMode()),
+        logDir.wstring());
 }
 

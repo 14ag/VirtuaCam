@@ -40,7 +40,13 @@ The script runs a clean build by default and stages the full package in `output/
 The staged INF uses `PnpLockdown=1`, DIRID `13`, and `ServiceBinary=%13%\avshws.sys` for current package-isolation validation.
 
 ## Installation
-Use the setup wizard from the staged package:
+Use the setup wizard from the staged package. Open it as Administrator for normal GUI install:
+
+```powershell
+.\output\VirtuaCamSetup.exe
+```
+
+For automation, pass an action flag:
 
 ```powershell
 .\output\VirtuaCamSetup.exe --install --json .\output\logs\wizard\install.json
